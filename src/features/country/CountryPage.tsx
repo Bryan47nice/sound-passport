@@ -6,19 +6,21 @@ import type { Journey } from '../../domain/model';
 export function CountryPage() {
   const { countryCode = '' } = useParams();
   const repository = useJourneyRepository();
-  const [journeys, setJourneys] = useState<Journey[]>();
+  const [loadedCountry, setLoadedCountry] = useState<{ countryCode: string; journeys: Journey[] }>();
 
   useEffect(() => {
     let isCurrent = true;
 
     void repository.listJourneysByCountry(countryCode).then((value) => {
-      if (isCurrent) setJourneys(value);
+      if (isCurrent) setLoadedCountry({ countryCode, journeys: value });
     });
 
     return () => {
       isCurrent = false;
     };
   }, [countryCode, repository]);
+
+  const journeys = loadedCountry?.countryCode === countryCode ? loadedCountry.journeys : undefined;
 
   if (!journeys) return <section className="page" aria-label="載入國家旅程" />;
   if (journeys.length === 0) {

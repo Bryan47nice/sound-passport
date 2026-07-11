@@ -20,4 +20,14 @@ describe('App', () => {
     expect(screen.getByRole('main')).toBeInTheDocument();
     expect(await screen.findByLabelText('旅行世界地圖')).toBeInTheDocument();
   });
+  it('shows a not-found page for an unknown route', () => {
+    render(
+      <RepositoryProvider repository={fixtureJourneyRepository}>
+        <MemoryRouter initialEntries={['/not-found']}><App /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(screen.getByRole('heading', { name: '找不到這個頁面' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '回到世界地圖' })).toHaveAttribute('href', '/');
+  });
 });
