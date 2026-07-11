@@ -2,6 +2,7 @@
 node_modules/
 dist/
 coverage/
+work/
 
 # Local environment and credentials
 .env
@@ -23,4 +24,3 @@ ui-debug.log
 .idea/
 .DS_Store
 Thumbs.db
-
