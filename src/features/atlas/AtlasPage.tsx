@@ -32,7 +32,7 @@ export function AtlasPage() {
 
   return (
     <section className="page">
-      <p className="eyebrow">THE PLACES YOU HEARD</p>
+      <p className="eyebrow">聽見過的地方</p>
       <h1 className="page-title">我的旅行世界</h1>
       <p className="muted">選一個國家，回到某一次旅程。</p>
       <WorldMap countries={countries} onCountrySelect={selectCountry} />

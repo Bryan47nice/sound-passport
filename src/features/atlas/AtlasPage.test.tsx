@@ -40,6 +40,7 @@ describe('AtlasPage', () => {
     );
 
     expect((await screen.findAllByText('日本')).length).toBeGreaterThan(0);
+    expect(screen.getByText('聽見過的地方')).toBeInTheDocument();
     expect(screen.getAllByText(/2 趟旅程/).length).toBeGreaterThan(0);
     expect(screen.getByText('韓國')).toBeInTheDocument();
 

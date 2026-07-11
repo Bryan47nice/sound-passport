@@ -12,7 +12,9 @@ export function WorldMap({ countries, onCountrySelect }: WorldMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onCountrySelectRef = useRef(onCountrySelect);
 
-  onCountrySelectRef.current = onCountrySelect;
+  useEffect(() => {
+    onCountrySelectRef.current = onCountrySelect;
+  }, [onCountrySelect]);
 
   useEffect(() => {
     if (!containerRef.current) return;
