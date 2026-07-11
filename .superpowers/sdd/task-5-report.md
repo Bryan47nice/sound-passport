@@ -40,3 +40,37 @@ Implemented the controlled journey story player at `/journeys/:journeyId/play` u
 ## Concern
 
 Vite continues to warn that the pre-existing production JavaScript chunk exceeds 500 kB after minification. No unrelated code-splitting change was introduced for this task.
+
+## Review Follow-up: YouTube Video ID Validation
+
+### RED
+
+Added coverage for the single 11-character `[A-Za-z0-9_-]` validator, invalid URL query/path IDs, invalid or missing `providerItemId` recovery through a valid `sourceUrl`, fallback when both IDs are invalid, manual-moment iframe removal, and empty-story iframe absence.
+
+Command:
+
+```powershell
+npm.cmd run test:run -- src/domain/youtube.test.ts src/features/player/YouTubeEmbed.test.tsx src/features/player/JourneyPlayerPage.test.tsx
+```
+
+Result: 12 failures. The validator export was absent; whitespace, malformed, and wrong-length URL IDs were accepted; and `YouTubeEmbed` embedded an invalid `providerItemId` instead of falling back.
+
+### GREEN
+
+- Added `isValidYouTubeVideoId()` as the only video-ID format validator.
+- `parseYouTubeVideoId()` validates each extracted query or path candidate through that validator.
+- `YouTubeEmbed` validates `providerItemId` through the same validator, then parses `sourceUrl` when the provider value is missing, blank, or invalid. It renders fallback content without an iframe when neither yields a valid ID.
+- Player coverage confirms a manual next moment removes the iframe and exposes fallback content; an empty story shows Traditional Chinese copy and no iframe.
+
+Focused command result: 3 files, 32/32 tests passed.
+
+### Follow-up Verification
+
+```powershell
+npm.cmd run test:run
+npm.cmd run typecheck
+npm.cmd run build
+git diff --check
+```
+
+Results: full unit suite 10 files, 43/43 tests passed; typecheck, build, and diff check passed. The build retains the existing Vite warning for a JavaScript chunk above 500 kB.

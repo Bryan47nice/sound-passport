@@ -1,14 +1,14 @@
 import type { SongReference } from '../../domain/model';
-import { buildYouTubeEmbedUrl, parseYouTubeVideoId } from '../../domain/youtube';
+import { buildYouTubeEmbedUrl, isValidYouTubeVideoId, parseYouTubeVideoId } from '../../domain/youtube';
 
 interface YouTubeEmbedProps {
   song: SongReference;
 }
 
 export function YouTubeEmbed({ song }: YouTubeEmbedProps) {
-  const videoId = song.provider === 'youtube'
-    ? song.providerItemId ?? (song.sourceUrl ? parseYouTubeVideoId(song.sourceUrl) : undefined)
-    : undefined;
+  const providerVideoId = isValidYouTubeVideoId(song.providerItemId) ? song.providerItemId : undefined;
+  const sourceVideoId = song.sourceUrl ? parseYouTubeVideoId(song.sourceUrl) : undefined;
+  const videoId = song.provider === 'youtube' ? providerVideoId ?? sourceVideoId : undefined;
 
   if (videoId) {
     return (

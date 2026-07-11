@@ -42,6 +42,8 @@ describe('JourneyPlayerPage', () => {
     expect(screen.getByText('2 / 3')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: secondMoment.photoAlt })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '上一個時刻' })).toBeEnabled();
+    expect(screen.queryByTitle('YouTube player')).not.toBeInTheDocument();
+    expect(screen.getByText(secondMoment.song.title, { selector: '.song-fallback strong' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '上一個時刻' }));
     expect(screen.getByText('1 / 3')).toBeInTheDocument();
@@ -98,5 +100,20 @@ describe('JourneyPlayerPage', () => {
 
     expect(await screen.findByRole('heading', { name: '找不到這趟旅程' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '返回旅行地圖' })).toHaveAttribute('href', '/');
+  });
+
+  it('shows a Chinese empty-story state without an iframe', async () => {
+    const story = await fixtureJourneyRepository.getJourneyStory('tokyo-2024');
+    const repository: JourneyRepository = {
+      ...fixtureJourneyRepository,
+      async getJourneyStory() {
+        return { ...story!, moments: [] };
+      },
+    };
+
+    renderPlayer(repository, '/journeys/tokyo-2024/play');
+
+    expect(await screen.findByRole('heading', { name: '這趟旅程沒有音樂時刻' })).toBeInTheDocument();
+    expect(screen.queryByTitle('YouTube player')).not.toBeInTheDocument();
   });
 });
