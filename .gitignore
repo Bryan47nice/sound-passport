@@ -3,6 +3,7 @@ node_modules/
 dist/
 coverage/
 work/
+.worktrees/
 
 # Local environment and credentials
 .env

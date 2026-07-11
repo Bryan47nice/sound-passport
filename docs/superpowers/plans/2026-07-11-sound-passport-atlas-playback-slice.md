@@ -14,6 +14,7 @@
 - 點擊國家或進入旅程時不得自動播放聲音。
 - YouTube iframe 必須使用 `youtube-nocookie.com` 並設定 `autoplay=0`。
 - 第一階段只讀取 fixture 資料，不建立登入、寫入、分享或憑證。
+- 每個 fixture 音樂時刻必須包含非個人資料的示範照片、替代文字與 IANA 時區，播放器顯示照片及當地日期時間。
 - 第一階段使用 MapLibre 官方 demo style 進行開發驗證；正式發布前更換正式 tile provider。
 - UI 文案以繁體中文為主；程式識別字使用英文。
 - 所有固定格式元件必須有穩定尺寸，桌面與手機皆不得重疊或水平捲動。
@@ -45,6 +46,7 @@ src/app/AppShell.tsx
 src/domain/model.ts
 src/domain/fixtures.ts
 src/domain/countrySummary.ts
+src/domain/dateTime.ts
 src/domain/youtube.ts
 src/data/ports.ts
 src/data/fixtureJourneyRepository.ts
@@ -313,13 +315,16 @@ git commit -m "Build Sound Passport app shell"
 - Create: `src/domain/model.ts`
 - Create: `src/domain/fixtures.ts`
 - Create: `src/domain/countrySummary.ts`
+- Create: `src/domain/dateTime.ts`
 - Create: `src/data/ports.ts`
 - Create: `src/data/fixtureJourneyRepository.ts`
 - Create: `src/data/RepositoryContext.tsx`
 - Test: `src/data/fixtureJourneyRepository.test.ts`
+- Test: `src/domain/dateTime.test.ts`
 
 **Interfaces:**
 - Produces: `Journey`, `Moment`, `SongReference`, `JourneyStory`, `CountrySummary`
+- Produces: `formatLocalDateTime(takenAt, timeZone): string`
 - Produces: `JourneyRepository`
 - Produces: `fixtureJourneyRepository`
 - Consumes: none
@@ -343,6 +348,23 @@ describe('fixtureJourneyRepository', () => {
   it('returns moments in curated order', async () => {
     const story = await fixtureJourneyRepository.getJourneyStory('tokyo-2024');
     expect(story?.moments.map((item) => item.sortOrder)).toEqual([0, 1, 2]);
+    expect(story?.moments[0]).toMatchObject({
+      photoAlt: '雨夜裡的澀谷十字路口',
+      timeZone: 'Asia/Tokyo',
+    });
+  });
+});
+```
+
+Create `src/domain/dateTime.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { formatLocalDateTime } from './dateTime';
+
+describe('formatLocalDateTime', () => {
+  it('renders the moment in its recorded IANA time zone', () => {
+    expect(formatLocalDateTime('2024-10-03T12:42:00Z', 'Asia/Tokyo')).toBe('2024.10.03 · 21:42');
   });
 });
 ```
@@ -385,6 +407,9 @@ export interface Moment {
   journeyId: string;
   songReferenceId: string;
   takenAt: string;
+  timeZone: string;
+  photoUrl: string;
+  photoAlt: string;
   placeLabel: string;
   cityLabel: string;
   reason: string;
@@ -423,12 +448,30 @@ export const fixtureSongs: SongReference[] = [
 ];
 
 export const fixtureMoments: Moment[] = [
-  { id: 'tokyo-m1', journeyId: 'tokyo-2024', songReferenceId: 'song-tokyo-1', takenAt: '2024-10-03T21:42:00+09:00', placeLabel: '澀谷十字路口', cityLabel: '東京', reason: '雨停後路面還在反光，整座城市像慢了下來。', reasonStatus: 'complete', sortOrder: 0 },
-  { id: 'tokyo-m2', journeyId: 'tokyo-2024', songReferenceId: 'song-tokyo-2', takenAt: '2024-10-04T22:10:00+09:00', placeLabel: '代代木公園', cityLabel: '東京', reason: '夜裡走得很慢，剛好需要一首不趕時間的歌。', reasonStatus: 'complete', sortOrder: 1 },
-  { id: 'tokyo-m3', journeyId: 'tokyo-2024', songReferenceId: 'song-tokyo-3', takenAt: '2024-10-08T18:20:00+09:00', placeLabel: '羽田機場', cityLabel: '東京', reason: '', reasonStatus: 'needs_review', sortOrder: 2 },
-  { id: 'kyoto-m1', journeyId: 'kyoto-2023', songReferenceId: 'song-kyoto-1', takenAt: '2023-04-11T07:30:00+09:00', placeLabel: '鴨川', cityLabel: '京都', reason: '早晨的顏色很淡，適合留白。', reasonStatus: 'complete', sortOrder: 0 },
-  { id: 'seoul-m1', journeyId: 'seoul-2025', songReferenceId: 'song-seoul-1', takenAt: '2025-10-14T20:00:00+09:00', placeLabel: '漢江公園', cityLabel: '首爾', reason: '風吹過河面時，城市的聲音退到了後面。', reasonStatus: 'complete', sortOrder: 0 },
+  { id: 'tokyo-m1', journeyId: 'tokyo-2024', songReferenceId: 'song-tokyo-1', takenAt: '2024-10-03T21:42:00+09:00', timeZone: 'Asia/Tokyo', photoUrl: 'https://images.unsplash.com/photo-1542051841857-5f90071e7989?auto=format&fit=crop&w=1600&q=82', photoAlt: '雨夜裡的澀谷十字路口', placeLabel: '澀谷十字路口', cityLabel: '東京', reason: '雨停後路面還在反光，整座城市像慢了下來。', reasonStatus: 'complete', sortOrder: 0 },
+  { id: 'tokyo-m2', journeyId: 'tokyo-2024', songReferenceId: 'song-tokyo-2', takenAt: '2024-10-04T22:10:00+09:00', timeZone: 'Asia/Tokyo', photoUrl: 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?auto=format&fit=crop&w=1600&q=82', photoAlt: '東京夜晚的公園步道', placeLabel: '代代木公園', cityLabel: '東京', reason: '夜裡走得很慢，剛好需要一首不趕時間的歌。', reasonStatus: 'complete', sortOrder: 1 },
+  { id: 'tokyo-m3', journeyId: 'tokyo-2024', songReferenceId: 'song-tokyo-3', takenAt: '2024-10-08T18:20:00+09:00', timeZone: 'Asia/Tokyo', photoUrl: 'https://images.unsplash.com/photo-1436491865332-7a61a109cc05?auto=format&fit=crop&w=1600&q=82', photoAlt: '夕陽下準備起飛的客機', placeLabel: '羽田機場', cityLabel: '東京', reason: '', reasonStatus: 'needs_review', sortOrder: 2 },
+  { id: 'kyoto-m1', journeyId: 'kyoto-2023', songReferenceId: 'song-kyoto-1', takenAt: '2023-04-11T07:30:00+09:00', timeZone: 'Asia/Tokyo', photoUrl: 'https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?auto=format&fit=crop&w=1600&q=82', photoAlt: '京都清晨的安靜街景', placeLabel: '鴨川', cityLabel: '京都', reason: '早晨的顏色很淡，適合留白。', reasonStatus: 'complete', sortOrder: 0 },
+  { id: 'seoul-m1', journeyId: 'seoul-2025', songReferenceId: 'song-seoul-1', takenAt: '2025-10-14T20:00:00+09:00', timeZone: 'Asia/Seoul', photoUrl: 'https://images.unsplash.com/photo-1538485399081-7c89717f79e0?auto=format&fit=crop&w=1600&q=82', photoAlt: '首爾漢江旁的城市夜景', placeLabel: '漢江公園', cityLabel: '首爾', reason: '風吹過河面時，城市的聲音退到了後面。', reasonStatus: 'complete', sortOrder: 0 },
 ];
+```
+
+Create `src/domain/dateTime.ts`:
+
+```ts
+export function formatLocalDateTime(takenAt: string, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(takenAt));
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? '';
+  return `${value('year')}.${value('month')}.${value('day')} · ${value('hour')}:${value('minute')}`;
+}
 ```
 
 Create `src/domain/countrySummary.ts`:
@@ -516,7 +559,7 @@ export function useJourneyRepository() {
 - [ ] **Step 4: 驗證並 commit**
 
 ```powershell
-npm.cmd run test:run -- src/data/fixtureJourneyRepository.test.ts
+npm.cmd run test:run -- src/data/fixtureJourneyRepository.test.ts src/domain/dateTime.test.ts
 npm.cmd run typecheck
 ```
 
@@ -852,6 +895,8 @@ describe('JourneyPage', () => {
     const moments = screen.getAllByRole('listitem');
     expect(moments).toHaveLength(3);
     expect(moments[0]).toHaveTextContent('澀谷十字路口');
+    expect(screen.getByRole('img', { name: '雨夜裡的澀谷十字路口' })).toBeInTheDocument();
+    expect(moments[0]).toHaveTextContent('2024.10.03 · 21:42');
     expect(moments[1]).toHaveTextContent('代代木公園');
     expect(moments[2]).toHaveTextContent('羽田機場');
     expect(screen.getByText('旅後待補')).toBeInTheDocument();
@@ -912,6 +957,7 @@ Create `src/features/journey/JourneyPage.tsx`:
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { useJourneyRepository } from '../../data/RepositoryContext';
+import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
 
 export function JourneyPage() {
@@ -931,7 +977,8 @@ export function JourneyPage() {
         {story.moments.map((moment) => (
           <li className="moment-row" key={moment.id}>
             <span>{String(moment.sortOrder + 1).padStart(2, '0')}</span>
-            <span><strong>{moment.cityLabel} · {moment.placeLabel}</strong><small>{moment.song.title} · {moment.song.artist}</small></span>
+            <img className="moment-thumb" src={moment.photoUrl} alt={moment.photoAlt} />
+            <span><strong>{moment.cityLabel} · {moment.placeLabel}</strong><small>{formatLocalDateTime(moment.takenAt, moment.timeZone)} · {moment.song.title} · {moment.song.artist}</small></span>
             <p>{moment.reason || '旅後待補'}</p>
           </li>
         ))}
@@ -972,15 +1019,17 @@ Append to `src/styles/global.css`:
 .journey-row small { margin-top: 5px; color: var(--muted); }
 .primary-command { display: inline-flex; align-items: center; min-height: 44px; margin-top: 20px; padding: 0 16px; border-radius: var(--radius); background: var(--coral); color: white; font-weight: 800; }
 .moment-list { margin: 32px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
-.moment-row { display: grid; grid-template-columns: 42px minmax(190px, 1fr) minmax(220px, 1.4fr); gap: 16px; align-items: start; min-height: 96px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.moment-row { display: grid; grid-template-columns: 42px 104px minmax(190px, 1fr) minmax(220px, 1.4fr); gap: 16px; align-items: start; min-height: 96px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.moment-thumb { width: 104px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: var(--radius); }
 .moment-row strong, .moment-row small { display: block; }
 .moment-row small { margin-top: 5px; color: var(--muted); }
 .moment-row p { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .journey-row { grid-template-columns: minmax(0, 1fr) 20px; }
   .journey-row > span:nth-child(2) { display: none; }
-  .moment-row { grid-template-columns: 32px minmax(0, 1fr); }
-  .moment-row p { grid-column: 2; }
+  .moment-row { grid-template-columns: 32px 88px minmax(0, 1fr); }
+  .moment-thumb { width: 88px; }
+  .moment-row p { grid-column: 2 / -1; }
 }
 ```
 
@@ -1070,6 +1119,8 @@ describe('JourneyPlayerPage', () => {
     );
 
     expect(await screen.findByText('1 / 3')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '雨夜裡的澀谷十字路口' })).toBeInTheDocument();
+    expect(screen.getByText('2024.10.03 · 21:42')).toBeInTheDocument();
     const iframe = screen.getByTitle('YouTube player');
     expect(iframe).toHaveAttribute('src', expect.stringContaining('autoplay=0'));
     expect(iframe.getAttribute('allow') ?? '').not.toContain('autoplay');
@@ -1146,6 +1197,7 @@ Create `src/features/player/JourneyPlayerPage.tsx`:
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { useJourneyRepository } from '../../data/RepositoryContext';
+import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
 import { YouTubeEmbed } from './YouTubeEmbed';
 
@@ -1162,11 +1214,16 @@ export function JourneyPlayerPage() {
     <section className="page player-page">
       <p className="eyebrow">{story.journey.title}</p>
       <div className="player-stage">
-        <div className="player-media"><YouTubeEmbed song={moment.song} /></div>
+        <figure className="player-visual">
+          <img src={moment.photoUrl} alt={moment.photoAlt} />
+          <figcaption>{moment.cityLabel} · {moment.placeLabel}</figcaption>
+        </figure>
         <div className="player-copy">
           <span className="player-counter">{currentIndex + 1} / {story.moments.length}</span>
-          <h1>{moment.cityLabel} · {moment.placeLabel}</h1>
-          <h2>{moment.song.title}</h2>
+          <time dateTime={moment.takenAt}>{formatLocalDateTime(moment.takenAt, moment.timeZone)}</time>
+          <h1>{moment.song.title}</h1>
+          <p className="song-artist">{moment.song.artist}</p>
+          <div className="player-song"><YouTubeEmbed song={moment.song} /></div>
           <p>{moment.reason || '旅後待補'}</p>
         </div>
       </div>
@@ -1207,13 +1264,17 @@ Append to `src/styles/global.css`:
 
 ```css
 .player-stage { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.8fr); min-height: 430px; margin-top: 12px; background: var(--surface); border: 1px solid var(--line); }
-.player-media { min-width: 0; display: grid; place-items: center; background: #111513; }
-.player-media iframe { display: block; width: 100%; aspect-ratio: 16 / 9; border: 0; }
-.song-fallback { display: grid; gap: 8px; width: min(100% - 40px, 440px); color: white; }
+.player-visual { position: relative; min-width: 0; min-height: 430px; margin: 0; overflow: hidden; background: #111513; }
+.player-visual img { width: 100%; height: 100%; min-height: 430px; object-fit: cover; }
+.player-visual figcaption { position: absolute; left: 18px; bottom: 16px; padding: 6px 9px; border-radius: var(--radius); background: rgb(17 21 19 / 78%); color: white; font-size: 13px; }
+.player-song { margin-top: 20px; }
+.player-song iframe { display: block; width: 100%; aspect-ratio: 16 / 9; border: 0; }
+.song-fallback { display: grid; gap: 8px; width: 100%; min-height: 92px; padding: 16px; border: 1px solid var(--line); }
 .song-fallback a { color: var(--yellow); }
 .player-copy { min-width: 0; padding: 28px; align-self: center; overflow-wrap: anywhere; }
 .player-copy h1 { margin: 12px 0 0; font-size: 28px; letter-spacing: 0; }
-.player-copy h2 { margin: 16px 0 0; font-size: 18px; letter-spacing: 0; }
+.player-copy time { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.song-artist { margin-top: 6px !important; color: var(--muted); }
 .player-copy p { margin: 20px 0 0; line-height: 1.7; }
 .player-counter { color: var(--coral); font-size: 12px; font-weight: 800; }
 .player-controls { display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; }
@@ -1221,6 +1282,7 @@ Append to `src/styles/global.css`:
 .player-controls button:disabled { cursor: default; opacity: 0.45; }
 @media (max-width: 760px) {
   .player-stage { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .player-visual, .player-visual img { min-height: 320px; }
   .player-copy { padding: 22px 18px; }
   .player-controls button { min-width: 0; flex: 1; }
 }
@@ -1289,6 +1351,8 @@ test('revisits a journey from the map without autoplay', async ({ page }) => {
   await page.getByRole('link', { name: /東京，雨停之後/ }).click();
   await page.getByRole('link', { name: '▶ 播放這趟旅程' }).click();
   await expect(page.getByText('1 / 3')).toBeVisible();
+  await expect(page.getByRole('img', { name: '雨夜裡的澀谷十字路口' })).toBeVisible();
+  await expect(page.getByText('2024.10.03 · 21:42')).toBeVisible();
   await expect(page.getByTitle('YouTube player')).toHaveAttribute('src', /autoplay=0/);
   await page.getByRole('button', { name: '下一個時刻' }).click();
   await expect(page.getByText('2 / 3')).toBeVisible();
@@ -1315,7 +1379,7 @@ npm.cmd run test:run
 npm.cmd run test:e2e
 ```
 
-目前版本使用示範 fixture 資料，完成「世界地圖 → 國家 → 旅程 → 播放」唯讀流程。尚未包含快速記錄、PWA 安裝、Firebase 同步、YouTube 搜尋／匯出與公開分享。
+目前版本使用非個人資料的示範 fixture 旅程與遠端照片，完成「世界地圖 → 國家 → 旅程 → 播放」唯讀流程。尚未包含快速記錄、PWA 安裝、照片上傳、Firebase 同步、YouTube 搜尋／匯出與公開分享。
 ```
 
 - [ ] **Step 4: 執行完整驗證**
@@ -1334,6 +1398,7 @@ Start `npm.cmd run dev -- --host 127.0.0.1` and use Playwright screenshots at 14
 
 - map canvas is nonblank;
 - country markers are clickable;
+- fixture photos load at nonzero dimensions and local date-time labels are visible;
 - no UI or text overlap;
 - country → journey → player works;
 - iframe never auto-plays on navigation;
