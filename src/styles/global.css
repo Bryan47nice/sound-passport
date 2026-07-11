@@ -16,3 +16,26 @@ button { font: inherit; }
 .country-index { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1px; max-width: 100%; margin-top: 16px; border: 1px solid var(--line); background: var(--line); }
 .country-row { min-width: 0; min-height: 64px; padding: 12px 14px; overflow-wrap: anywhere; background: var(--surface); border: 0; text-align: left; cursor: pointer; }
 @media (max-width: 640px) { .world-map { min-height: 420px; height: calc(100vh - 220px); } }
+
+.journey-list { margin-top: 24px; border-top: 1px solid var(--line); }
+.journey-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 180px) 24px; gap: 16px; align-items: center; min-height: 82px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.journey-summary, .journey-summary strong, .journey-summary small, .journey-cities { min-width: 0; }
+.journey-summary strong, .journey-summary small { display: block; }
+.journey-summary small { margin-top: 5px; color: var(--muted); }
+.journey-cities { color: var(--muted); }
+.journey-arrow { font-size: 24px; line-height: 1; text-align: center; }
+.primary-command { display: inline-flex; align-items: center; min-height: 44px; max-width: 100%; margin-top: 20px; padding: 0 16px; border-radius: var(--radius); background: var(--coral); color: white; font-weight: 800; overflow-wrap: anywhere; }
+.moment-list { margin: 32px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.moment-row { display: grid; grid-template-columns: 42px 104px minmax(190px, 1fr) minmax(220px, 1.4fr); gap: 16px; align-items: start; min-height: 96px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.moment-number, .moment-details, .moment-row p { min-width: 0; overflow-wrap: anywhere; }
+.moment-thumb { display: block; width: 104px; height: 78px; object-fit: cover; border-radius: var(--radius); background: var(--line); }
+.moment-details strong, .moment-details small { display: block; }
+.moment-details small { margin-top: 5px; color: var(--muted); }
+.moment-row p { margin: 0; }
+@media (max-width: 640px) {
+  .journey-row { grid-template-columns: minmax(0, 1fr) 20px; gap: 12px; }
+  .journey-cities { display: none; }
+  .moment-row { grid-template-columns: 32px 88px minmax(0, 1fr); gap: 12px; }
+  .moment-thumb { width: 88px; height: 66px; }
+  .moment-row p { grid-column: 2 / -1; }
+}
