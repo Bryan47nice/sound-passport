@@ -1,6 +1,6 @@
 * { box-sizing: border-box; }
 html { color: var(--ink); background: var(--paper); font-family: Inter, "Noto Sans TC", system-ui, sans-serif; }
-body { margin: 0; min-width: 320px; }
+body { margin: 0; min-width: 320px; overflow-x: hidden; }
 a { color: inherit; text-decoration: none; }
 button { font: inherit; }
 .app-shell { min-height: 100vh; }
@@ -11,3 +11,8 @@ button { font: inherit; }
 .page { width: min(100% - 32px, var(--content)); margin: 0 auto; padding: 24px 0 48px; }
 .page-title { margin: 0; font-size: clamp(28px, 5vw, 52px); letter-spacing: 0; }
 .muted { color: var(--muted); }
+.world-map, .map-loading { width: 100%; max-width: 100%; min-height: 360px; height: min(68vh, 680px); border-radius: var(--radius); overflow: hidden; background: var(--forest); }
+.country-marker { width: 34px; height: 34px; border: 2px solid white; border-radius: 50%; background: var(--yellow); color: var(--ink); font-weight: 800; cursor: pointer; }
+.country-index { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1px; max-width: 100%; margin-top: 16px; border: 1px solid var(--line); background: var(--line); }
+.country-row { min-width: 0; min-height: 64px; padding: 12px 14px; overflow-wrap: anywhere; background: var(--surface); border: 0; text-align: left; cursor: pointer; }
+@media (max-width: 640px) { .world-map { min-height: 420px; height: calc(100vh - 220px); } }
