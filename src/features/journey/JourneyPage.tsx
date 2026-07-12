@@ -9,14 +9,17 @@ export function JourneyPage() {
   const repository = useJourneyRepository();
   const [story, setStory] = useState<JourneyStory>();
   const [loaded, setLoaded] = useState(false);
+  const [resolvedJourneyId, setResolvedJourneyId] = useState<string>();
 
   useEffect(() => {
     let isCurrent = true;
+    setStory(undefined);
     setLoaded(false);
 
     void repository.getJourneyStory(journeyId).then((value) => {
       if (isCurrent) {
         setStory(value);
+        setResolvedJourneyId(journeyId);
         setLoaded(true);
       }
     });
@@ -26,7 +29,7 @@ export function JourneyPage() {
     };
   }, [journeyId, repository]);
 
-  if (!loaded) return <section className="page" aria-label="載入旅程" />;
+  if (!loaded || resolvedJourneyId !== journeyId) return <section className="page" aria-label="載入旅程" />;
   if (!story) return <section className="page empty-state"><h1>找不到這趟旅程</h1></section>;
 
   return (

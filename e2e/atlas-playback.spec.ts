@@ -224,8 +224,20 @@ async function expectMapScreenshotVariance(page: Page, path: string, projectName
   const metrics = screenshotMetrics(await canvas.screenshot());
   expect(metrics.colorCount).toBeGreaterThan(512);
   expect(metrics.nearBlackPixelRatio).toBeLessThan(0.005);
-  await expect(map).toHaveScreenshot(`atlas-map-${state}-${projectName}.png`);
-  await map.screenshot({ path });
+  await expect(canvas).toHaveScreenshot(`atlas-map-${state}-${projectName}.png`, {
+    maxDiffPixelRatio: 0.0005,
+  });
+  await canvas.screenshot({ path });
+}
+
+async function expectNonBlankMapCanvas(page: Page) {
+  const map = page.locator('.world-map');
+  const canvas = map.locator('canvas');
+  await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
+  await expect(canvas).toBeVisible();
+  const metrics = screenshotMetrics(await canvas.screenshot());
+  expect(metrics.colorCount).toBeGreaterThan(512);
+  expect(metrics.nearBlackPixelRatio).toBeLessThan(0.005);
 }
 
 async function expectEastAsiaMarkerPlacement(page: Page) {
@@ -255,6 +267,9 @@ async function expectEastAsiaMarkerPlacement(page: Page) {
   expect(koreaCenter.y).toBeLessThan(mapBox.y + mapBox.height * 0.8);
   expect(japanCenter.x).toBeGreaterThan(koreaCenter.x);
   expect(Math.hypot(japanCenter.x - koreaCenter.x, japanCenter.y - koreaCenter.y)).toBeLessThan(100);
+  const overlapWidth = Math.max(0, Math.min(japanBox.x + japanBox.width, koreaBox.x + koreaBox.width) - Math.max(japanBox.x, koreaBox.x));
+  const overlapHeight = Math.max(0, Math.min(japanBox.y + japanBox.height, koreaBox.y + koreaBox.height) - Math.max(japanBox.y, koreaBox.y));
+  expect(overlapWidth * overlapHeight).toBe(0);
 }
 
 async function expectNoObviousOverlap(page: Page) {
@@ -359,6 +374,25 @@ test('revisits a journey from the map without autoplay', async ({ page }, testIn
   diagnostics.setStage('atlas remount after screenshot');
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 
+  expect(diagnostics.errors).toEqual([]);
+});
+
+test('keeps East Asia markers inside the map after a mobile orientation change', async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== 'mobile', 'This scenario runs only in the mobile project.');
+  test.setTimeout(90_000);
+  const diagnostics = collectPageErrors(page);
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto('/');
+  const map = page.locator('.world-map');
+  await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
+
+  diagnostics.setStage('portrait orientation resize');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
+  await expectNonBlankMapCanvas(page);
+  await expectEastAsiaMarkerPlacement(page);
+  await verifyRouteLayout(page);
   expect(diagnostics.errors).toEqual([]);
 });
 

@@ -17,6 +17,7 @@ const maplibreMocks = vi.hoisted(() => ({
     once: ReturnType<typeof vi.fn>;
     options: { center?: [number, number]; minZoom?: number; style?: unknown; zoom?: number };
     remove: ReturnType<typeof vi.fn>;
+    resize: ReturnType<typeof vi.fn>;
   }>,
   markers: [] as Array<{
     addTo: ReturnType<typeof vi.fn>;
@@ -24,6 +25,7 @@ const maplibreMocks = vi.hoisted(() => ({
     offset?: [number, number];
     remove: ReturnType<typeof vi.fn>;
     setLngLat: ReturnType<typeof vi.fn>;
+    setOffset: ReturnType<typeof vi.fn>;
   }>,
 }));
 
@@ -52,6 +54,17 @@ const animationFrames = vi.hoisted(() => {
     run: (id: number) => callbacks.get(id)?.(0),
   };
 });
+
+const resizeObserverMocks = vi.hoisted(() => ({
+  observers: [] as Array<{
+    disconnect: ReturnType<typeof vi.fn>;
+    emit: (width: number, height?: number) => void;
+    observe: ReturnType<typeof vi.fn>;
+  }>,
+  reset() {
+    this.observers.length = 0;
+  },
+}));
 
 vi.mock('maplibre-gl', () => ({
   default: {
@@ -98,6 +111,7 @@ vi.mock('maplibre-gl', () => ({
       });
       options: { center?: [number, number]; minZoom?: number; zoom?: number };
       remove = vi.fn();
+      resize = vi.fn(() => this);
 
       constructor(options: { center?: [number, number]; minZoom?: number; style?: unknown; zoom?: number }) {
         this.options = options;
@@ -108,6 +122,7 @@ vi.mock('maplibre-gl', () => ({
       addTo = vi.fn(() => this);
       remove = vi.fn();
       setLngLat = vi.fn(() => this);
+      setOffset = vi.fn(() => this);
 
       constructor({ element, offset }: { element: HTMLElement; offset?: [number, number] }) {
         maplibreMocks.markers.push(Object.assign(this, { element, offset }));
@@ -138,8 +153,24 @@ describe('WorldMap', () => {
     maplibreMocks.maps.length = 0;
     maplibreMocks.markers.length = 0;
     animationFrames.reset();
+    resizeObserverMocks.reset();
     vi.stubGlobal('requestAnimationFrame', animationFrames.request);
     vi.stubGlobal('cancelAnimationFrame', animationFrames.cancel);
+    vi.stubGlobal('ResizeObserver', class {
+      disconnect = vi.fn();
+      observe = vi.fn();
+
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverMocks.observers.push({
+          disconnect: this.disconnect,
+          observe: this.observe,
+          emit: (width, height = 0) => callback([{
+            contentRect: { width, height },
+            target: this.observe.mock.calls[0]?.[0],
+          } as ResizeObserverEntry], this as unknown as ResizeObserver),
+        });
+      }
+    });
   });
 
   afterEach(() => {
@@ -239,6 +270,43 @@ describe('WorldMap', () => {
       zoom: 1.1,
     });
     clientWidth.mockRestore();
+  });
+
+  it('reframes and repositions markers when its container resizes, then disconnects the observer', () => {
+    let clientWidth = 358;
+    const clientWidthSpy = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => clientWidth);
+    const { container, unmount } = render(
+      <WorldMap countries={countries} onCountrySelect={vi.fn()} />,
+    );
+    const mapElement = container.querySelector<HTMLElement>('.world-map');
+    const map = maplibreMocks.maps[0];
+    const observer = resizeObserverMocks.observers[0];
+
+    expect(observer.observe).toHaveBeenCalledWith(mapElement);
+    expect(map.resize).not.toHaveBeenCalled();
+
+    act(() => observer.emit(358));
+    expect(map.jumpTo).not.toHaveBeenCalled();
+
+    clientWidth = 1408;
+    act(() => observer.emit(1408));
+
+    expect(mapElement).toHaveAttribute('data-map-ready', 'false');
+    expect(map.resize).toHaveBeenCalledOnce();
+    expect(map.jumpTo).toHaveBeenCalledWith({ center: [0, 20], zoom: 1.1 });
+    expect(maplibreMocks.markers.map((marker) => marker.setOffset.mock.calls[0][0])).toEqual([[0, 0], [0, 0]]);
+
+    act(() => map.emitRender(true, true));
+    const frameId = [...animationFrames.callbacks.keys()][0];
+    act(() => animationFrames.run(frameId));
+    expect(mapElement).toHaveAttribute('data-map-ready', 'true');
+
+    unmount();
+    expect(observer.disconnect).toHaveBeenCalledOnce();
+
+    act(() => observer.emit(358));
+    expect(map.resize).toHaveBeenCalledOnce();
+    clientWidthSpy.mockRestore();
   });
 
   it('keeps the committed callback when a concurrent update is suspended', () => {

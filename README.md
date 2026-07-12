@@ -1,5 +1,16 @@
 # Sound Passport
 
+## Map visual baselines
+
+Map visual snapshots cover only the MapLibre canvas. They use the Chromium project with SwiftShader and shared baseline names, so the committed files do not include a host-platform suffix. Regenerate the baselines once after an intentional canvas rendering change, then rerun the same suite without updates:
+
+```powershell
+npm.cmd run test:e2e -- --update-snapshots
+npm.cmd run test:e2e
+```
+
+The desktop and mobile baseline paths are `e2e/atlas-playback.spec.ts-snapshots/atlas-map-initial-desktop.png`, `atlas-map-remount-desktop.png`, `atlas-map-initial-mobile.png`, and `atlas-map-remount-mobile.png`.
+
 Sound Passport 是一個「預設私人」的旅行音樂日誌，協助旅行者保存某個時刻的照片、地點、歌曲與感受，之後再從世界地圖進入該趟旅程，以可播放的故事重新回味。
 
 ## 本機執行
