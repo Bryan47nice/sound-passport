@@ -20,7 +20,7 @@ function worldCameraForWidth(containerWidth: number) {
   const clampedZoom = Math.min(MAX_WORLD_ZOOM, Math.max(MIN_WORLD_ZOOM, zoom));
   return {
     camera: {
-      center: (zoom <= MIN_WORLD_ZOOM ? [50, 20] : [0, 20]) as [number, number],
+      center: (zoom <= MIN_WORLD_ZOOM ? [60, 20] : [0, 20]) as [number, number],
       zoom: clampedZoom,
     },
     isNarrow: zoom <= MIN_WORLD_ZOOM,

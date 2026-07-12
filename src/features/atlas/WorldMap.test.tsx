@@ -250,13 +250,28 @@ describe('WorldMap', () => {
 
     expect(maplibreMocks.maps[0].fitBounds).not.toHaveBeenCalled();
     expect(maplibreMocks.maps[0].options).toMatchObject({
-      center: [50, 20],
+      center: [60, 20],
       minZoom: 0,
       style: atlasStyle,
       zoom: 0,
     });
     expect(maplibreMocks.markers.map((marker) => marker.offset)).toEqual([[0, 18], [0, -18]]);
     expect(maplibreMocks.maps[0].jumpTo).not.toHaveBeenCalled();
+    clientWidth.mockRestore();
+  });
+
+  it('keeps East Asia markers inside a 343px narrow map with camera margin', () => {
+    const clientWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(343);
+
+    render(<WorldMap countries={countries} onCountrySelect={vi.fn()} />);
+
+    expect(maplibreMocks.maps[0].options).toMatchObject({
+      center: [60, 20],
+      minZoom: 0,
+      style: atlasStyle,
+      zoom: 0,
+    });
+    expect(maplibreMocks.markers.map((marker) => marker.offset)).toEqual([[0, 18], [0, -18]]);
     clientWidth.mockRestore();
   });
 

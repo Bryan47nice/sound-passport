@@ -387,12 +387,14 @@ test('keeps East Asia markers inside the map after a mobile orientation change',
   const map = page.locator('.world-map');
   await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
 
-  diagnostics.setStage('portrait orientation resize');
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
-  await expectNonBlankMapCanvas(page);
-  await expectEastAsiaMarkerPlacement(page);
-  await verifyRouteLayout(page);
+  for (const width of [390, 375]) {
+    diagnostics.setStage(`portrait orientation resize at ${width}px`);
+    await page.setViewportSize({ width, height: 844 });
+    await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
+    await expectNonBlankMapCanvas(page);
+    await expectEastAsiaMarkerPlacement(page);
+    await verifyRouteLayout(page);
+  }
   expect(diagnostics.errors).toEqual([]);
 });
 
