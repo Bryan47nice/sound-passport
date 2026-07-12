@@ -23,9 +23,39 @@ function collectPageErrors(page: Page) {
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
-  await expect.poll(() => page.evaluate(() => (
-    document.documentElement.scrollWidth <= document.documentElement.clientWidth
-  ))).toBe(true);
+  const layout = await page.evaluate(() => {
+    const viewportWidth = document.documentElement.clientWidth;
+    const tolerance = 1;
+    const selectors = [
+      '.app-header', '.page', '.world-map', '.country-index', '.journey-list',
+      '.moment-list', '.player-stage', '.player-visual', '.player-copy',
+      'a', 'button', 'img', 'iframe', 'h1', 'h2', 'h3', 'time',
+    ];
+    const elements = [...new Set(selectors.flatMap((selector) => (
+      [...document.querySelectorAll<HTMLElement>(selector)]
+    )))];
+    const label = (element: HTMLElement) => {
+      const text = element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName;
+      const classes = element.className && typeof element.className === 'string' ? `.${element.className}` : '';
+      return `${element.tagName.toLowerCase()}${classes} (${text.slice(0, 80)})`;
+    };
+    const outside = elements.flatMap((element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.visibility === 'hidden' || style.display === 'none' || rect.width === 0 || rect.height === 0) return [];
+      if (rect.left >= -tolerance && rect.right <= viewportWidth + tolerance) return [];
+      return [`${label(element)}: horizontal bounds ${rect.left.toFixed(1)}..${rect.right.toFixed(1)} exceed viewport 0..${viewportWidth}`];
+    });
+
+    return {
+      outside,
+      scrollWidth: document.documentElement.scrollWidth,
+      viewportWidth,
+    };
+  });
+
+  expect(layout.scrollWidth, `document scrollWidth ${layout.scrollWidth} exceeds viewport ${layout.viewportWidth}`).toBeLessThanOrEqual(layout.viewportWidth);
+  expect(layout.outside, layout.outside.join('\n')).toEqual([]);
 }
 
 async function expectLoadedFixtureImages(page: Page) {
@@ -186,7 +216,7 @@ function filteredPng(colorType: 2 | 6, filter: number) {
   ]);
 }
 
-async function expectMapScreenshotVariance(page: Page, path: string) {
+async function expectMapScreenshotVariance(page: Page, path: string, projectName: string, state: 'initial' | 'remount') {
   const map = page.getByLabel('旅行世界地圖');
   const canvas = map.locator('canvas');
   await expect(map).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
@@ -194,6 +224,7 @@ async function expectMapScreenshotVariance(page: Page, path: string) {
   const metrics = screenshotMetrics(await canvas.screenshot());
   expect(metrics.colorCount).toBeGreaterThan(512);
   expect(metrics.nearBlackPixelRatio).toBeLessThan(0.005);
+  await expect(map).toHaveScreenshot(`atlas-map-${state}-${projectName}.png`);
   await map.screenshot({ path });
 }
 
@@ -278,7 +309,7 @@ test('revisits a journey from the map without autoplay', async ({ page }, testIn
   await page.goto('/');
   await expect(page.getByLabel('旅行世界地圖')).toBeVisible();
   expect(diagnostics.errors).toEqual([]);
-  await expectMapScreenshotVariance(page, testInfo.outputPath('atlas-map-initial.png'));
+  await expectMapScreenshotVariance(page, testInfo.outputPath('atlas-map-initial.png'), testInfo.project.name, 'initial');
   await expectEastAsiaMarkerPlacement(page);
   await verifyRouteLayout(page);
   diagnostics.setStage('initial mount after screenshot');
@@ -322,7 +353,7 @@ test('revisits a journey from the map without autoplay', async ({ page }, testIn
   await expect(page.getByRole('link', { name: /東京，雨停之後/ })).toBeVisible();
   await page.goBack();
   await expect(page.getByLabel('旅行世界地圖')).toBeVisible();
-  await expectMapScreenshotVariance(page, testInfo.outputPath('atlas-map-remount.png'));
+  await expectMapScreenshotVariance(page, testInfo.outputPath('atlas-map-remount.png'), testInfo.project.name, 'remount');
   await expectEastAsiaMarkerPlacement(page);
   await verifyRouteLayout(page);
   diagnostics.setStage('atlas remount after screenshot');
