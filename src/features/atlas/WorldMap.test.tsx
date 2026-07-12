@@ -1,25 +1,106 @@
 import { act, fireEvent, render } from '@testing-library/react';
 import { Suspense, startTransition, useState } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CountrySummary } from '../../domain/model';
+import { atlasStyle } from './atlasStyle';
 import { WorldMap } from './WorldMap';
 
 const maplibreMocks = vi.hoisted(() => ({
-  maps: [] as Array<{ remove: ReturnType<typeof vi.fn> }>,
+  maps: [] as Array<{
+    emitRender: (loaded: boolean, tilesLoaded: boolean) => void;
+    emitIdle: () => void;
+    emitLoad: () => void;
+    fitBounds: ReturnType<typeof vi.fn>;
+    jumpTo: ReturnType<typeof vi.fn>;
+    off: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
+    once: ReturnType<typeof vi.fn>;
+    options: { center?: [number, number]; minZoom?: number; style?: unknown; zoom?: number };
+    remove: ReturnType<typeof vi.fn>;
+  }>,
   markers: [] as Array<{
     addTo: ReturnType<typeof vi.fn>;
     element: HTMLElement;
+    offset?: [number, number];
     remove: ReturnType<typeof vi.fn>;
     setLngLat: ReturnType<typeof vi.fn>;
   }>,
 }));
 
+const animationFrames = vi.hoisted(() => {
+  let nextId = 0;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const id = ++nextId;
+    callbacks.set(id, callback);
+    return id;
+  });
+  const cancel = vi.fn((id: number) => {
+    callbacks.delete(id);
+  });
+
+  return {
+    cancel,
+    callbacks,
+    request,
+    reset: () => {
+      nextId = 0;
+      callbacks.clear();
+      request.mockClear();
+      cancel.mockClear();
+    },
+    run: (id: number) => callbacks.get(id)?.(0),
+  };
+});
+
 vi.mock('maplibre-gl', () => ({
   default: {
     Map: class {
+      private idleHandler?: () => void;
+      private loadHandler?: () => void;
+      private renderHandler?: () => void;
+      private mapLoaded = false;
+      private tilesLoaded = false;
+
+      areTilesLoaded = vi.fn(() => this.tilesLoaded);
+      emitIdle = () => {
+        const handler = this.idleHandler;
+        this.idleHandler = undefined;
+        handler?.();
+      };
+      emitLoad = () => {
+        const handler = this.loadHandler;
+        this.loadHandler = undefined;
+        handler?.();
+      };
+      emitRender = (loaded: boolean, tilesLoaded: boolean) => {
+        this.mapLoaded = loaded;
+        this.tilesLoaded = tilesLoaded;
+        this.renderHandler?.();
+      };
+      fitBounds = vi.fn(() => this);
+      jumpTo = vi.fn(() => this);
+      loaded = vi.fn(() => this.mapLoaded);
+      off = vi.fn((event: string, handler: () => void) => {
+        if (event === 'idle' && this.idleHandler === handler) this.idleHandler = undefined;
+        if (event === 'load' && this.loadHandler === handler) this.loadHandler = undefined;
+        if (event === 'render' && this.renderHandler === handler) this.renderHandler = undefined;
+        return this;
+      });
+      on = vi.fn((event: string, handler: () => void) => {
+        if (event === 'render') this.renderHandler = handler;
+        return this;
+      });
+      once = vi.fn((event: string, handler: () => void) => {
+        if (event === 'idle') this.idleHandler = handler;
+        if (event === 'load') this.loadHandler = handler;
+        return this;
+      });
+      options: { center?: [number, number]; minZoom?: number; zoom?: number };
       remove = vi.fn();
 
-      constructor() {
+      constructor(options: { center?: [number, number]; minZoom?: number; style?: unknown; zoom?: number }) {
+        this.options = options;
         maplibreMocks.maps.push(this);
       }
     },
@@ -28,8 +109,8 @@ vi.mock('maplibre-gl', () => ({
       remove = vi.fn();
       setLngLat = vi.fn(() => this);
 
-      constructor({ element }: { element: HTMLElement }) {
-        maplibreMocks.markers.push(Object.assign(this, { element }));
+      constructor({ element, offset }: { element: HTMLElement; offset?: [number, number] }) {
+        maplibreMocks.markers.push(Object.assign(this, { element, offset }));
       }
     },
   },
@@ -56,6 +137,13 @@ describe('WorldMap', () => {
   beforeEach(() => {
     maplibreMocks.maps.length = 0;
     maplibreMocks.markers.length = 0;
+    animationFrames.reset();
+    vi.stubGlobal('requestAnimationFrame', animationFrames.request);
+    vi.stubGlobal('cancelAnimationFrame', animationFrames.cancel);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('keeps the map stable across callback updates and cleans up MapLibre resources', () => {
@@ -79,6 +167,78 @@ describe('WorldMap', () => {
 
     expect(maplibreMocks.markers.every((marker) => marker.remove.mock.calls.length === 1)).toBe(true);
     expect(maplibreMocks.maps[0].remove).toHaveBeenCalledOnce();
+  });
+
+  it('exposes readiness only after render confirms loaded tiles and a frame', () => {
+    const { container, unmount } = render(
+      <WorldMap countries={countries} onCountrySelect={vi.fn()} />,
+    );
+    const mapElement = container.querySelector<HTMLElement>('.world-map');
+    const map = maplibreMocks.maps[0];
+
+    expect(mapElement).toHaveAttribute('data-map-ready', 'false');
+    expect(map.on).toHaveBeenCalledWith('render', expect.any(Function));
+
+    act(() => map.emitRender(false, false));
+    expect(mapElement).toHaveAttribute('data-map-ready', 'false');
+    expect(animationFrames.request).not.toHaveBeenCalled();
+    act(() => map.emitRender(true, false));
+    expect(mapElement).toHaveAttribute('data-map-ready', 'false');
+    expect(animationFrames.request).not.toHaveBeenCalled();
+    act(() => map.emitRender(true, true));
+    expect(mapElement).toHaveAttribute('data-map-ready', 'false');
+    expect(animationFrames.request).toHaveBeenCalledOnce();
+    const frameId = [...animationFrames.callbacks.keys()][0];
+    act(() => animationFrames.run(frameId));
+    expect(mapElement).toHaveAttribute('data-map-ready', 'true');
+
+    unmount();
+    expect(map.off).toHaveBeenCalledWith('render', expect.any(Function));
+    expect(mapElement).not.toHaveAttribute('data-map-ready');
+  });
+
+  it('cancels a pending readiness frame during cleanup', () => {
+    const { container, unmount } = render(
+      <WorldMap countries={countries} onCountrySelect={vi.fn()} />,
+    );
+    const mapElement = container.querySelector<HTMLElement>('.world-map');
+    const map = maplibreMocks.maps[0];
+
+    act(() => map.emitRender(true, true));
+    const frameId = [...animationFrames.callbacks.keys()][0];
+    unmount();
+
+    expect(animationFrames.cancel).toHaveBeenCalledWith(frameId);
+    expect(mapElement).not.toHaveAttribute('data-map-ready');
+  });
+
+  it('initializes a narrow map with a container-width-derived world camera', () => {
+    const clientWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(358);
+
+    render(<WorldMap countries={countries} onCountrySelect={vi.fn()} />);
+
+    expect(maplibreMocks.maps[0].fitBounds).not.toHaveBeenCalled();
+    expect(maplibreMocks.maps[0].options).toMatchObject({
+      center: [50, 20],
+      minZoom: 0,
+      style: atlasStyle,
+      zoom: 0,
+    });
+    expect(maplibreMocks.markers.map((marker) => marker.offset)).toEqual([[0, 18], [0, -18]]);
+    expect(maplibreMocks.maps[0].jumpTo).not.toHaveBeenCalled();
+    clientWidth.mockRestore();
+  });
+
+  it('caps the desktop camera zoom while retaining the global center', () => {
+    const clientWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1408);
+
+    render(<WorldMap countries={countries} onCountrySelect={vi.fn()} />);
+
+    expect(maplibreMocks.maps[0].options).toMatchObject({
+      center: [0, 20],
+      zoom: 1.1,
+    });
+    clientWidth.mockRestore();
   });
 
   it('keeps the committed callback when a concurrent update is suspended', () => {
