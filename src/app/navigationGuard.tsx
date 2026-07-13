@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -311,7 +312,7 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
     startTransitionRef.current(request);
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const actual = historyEntry(location);
     actualEntryRef.current = actual;
     const suppression = suppressionRef.current;

@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useLayoutEffect } from 'react';
 import { BrowserRouter, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -19,12 +20,24 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-function GuardHarness({ dirty, flush }: { dirty: boolean; flush: () => Promise<void> }) {
+function GuardHarness({
+  dirty,
+  flush,
+  onActualPathCommit,
+}: {
+  dirty: boolean;
+  flush: () => Promise<void>;
+  onActualPathCommit?: (pathname: string) => void;
+}) {
   useDirtyNavigationGuard({ dirty, flush });
   const actualLocation = useLocation();
   const routeLocation = useGuardedRouteLocation();
   const navigate = useGuardedNavigate();
   const rawNavigate = useNavigate();
+
+  useLayoutEffect(() => {
+    onActualPathCommit?.(actualLocation.pathname);
+  }, [actualLocation.pathname, onActualPathCommit]);
 
   return (
     <>
@@ -46,10 +59,18 @@ function GuardHarness({ dirty, flush }: { dirty: boolean; flush: () => Promise<v
   );
 }
 
-function GuardTree({ dirty, flush }: { dirty: boolean; flush: () => Promise<void> }) {
+function GuardTree({
+  dirty,
+  flush,
+  onActualPathCommit,
+}: {
+  dirty: boolean;
+  flush: () => Promise<void>;
+  onActualPathCommit?: (pathname: string) => void;
+}) {
   return (
     <NavigationGuardProvider>
-      <GuardHarness dirty={dirty} flush={flush} />
+      <GuardHarness dirty={dirty} flush={flush} onActualPathCommit={onActualPathCommit} />
     </NavigationGuardProvider>
   );
 }
@@ -62,11 +83,14 @@ function renderGuard(dirty: boolean, flush: () => Promise<void>) {
   );
 }
 
-async function renderBrowserHistory(flush: () => Promise<void>) {
+async function renderBrowserHistory(
+  flush: () => Promise<void>,
+  onActualPathCommit?: (pathname: string) => void,
+) {
   window.history.replaceState(null, '', '/previous');
   const view = render(
     <BrowserRouter>
-      <GuardTree dirty={false} flush={flush} />
+      <GuardTree dirty={false} flush={flush} onActualPathCommit={onActualPathCommit} />
     </BrowserRouter>,
   );
   fireEvent.click(screen.getByRole('button', { name: '程式前往中間頁' }));
@@ -75,7 +99,7 @@ async function renderBrowserHistory(flush: () => Promise<void>) {
   await waitFor(() => expect(window.location.pathname).toBe('/current'));
   view.rerender(
     <BrowserRouter>
-      <GuardTree dirty flush={flush} />
+      <GuardTree dirty flush={flush} onActualPathCommit={onActualPathCommit} />
     </BrowserRouter>,
   );
   return view;
@@ -247,6 +271,30 @@ describe('useDirtyNavigationGuard', () => {
       expect(locations()[0]).toHaveTextContent('/previous');
       expect(locations()[1]).toHaveTextContent('/previous');
       expect(screen.getByRole('heading', { name: '上一頁' })).toBeInTheDocument();
+    });
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a second POP committed immediately before the active flush resolves', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    let resolveOnPreviousCommit = false;
+    const view = await renderBrowserHistory(flush, (pathname) => {
+      if (resolveOnPreviousCommit && pathname === '/previous') pending.resolve(undefined);
+    });
+    const locations = () => view.container.querySelectorAll('output');
+
+    act(() => window.history.back());
+    await waitFor(() => expect(locations()[0]).toHaveTextContent('/middle'));
+    expect(flush).toHaveBeenCalledTimes(1);
+
+    resolveOnPreviousCommit = true;
+    act(() => window.history.back());
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/previous');
+      expect(locations()[0]).toHaveTextContent('/previous');
+      expect(locations()[1]).toHaveTextContent('/previous');
     });
     expect(flush).toHaveBeenCalledTimes(1);
   });
