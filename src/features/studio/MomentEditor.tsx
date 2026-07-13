@@ -5,6 +5,7 @@ import {
   type JourneyEditorRepository,
   type MomentAutosaveOutboxPort,
 } from '../../data/ports';
+import { StorageCapacityError } from '../../data/storageErrors';
 import type { JourneyMoment, MomentPatch, SongAvailability } from '../../domain/model';
 import { parseYouTubeVideoId } from '../../domain/youtube';
 import {
@@ -389,6 +390,10 @@ export function MomentEditor({
 
   const availability = linkState(draft.song.sourceUrl);
   const hasConflict = autosave.error instanceof MomentPatchConflictError;
+  const storageCapacityAnnouncement = autosave.state === 'error' &&
+    autosave.error instanceof StorageCapacityError
+    ? autosave.errorAnnouncement
+    : '';
   const saveLabel = autosave.state === 'saving'
     ? '時刻儲存中'
     : autosave.state === 'saved'
@@ -503,6 +508,9 @@ export function MomentEditor({
           ) : <button type="button" onClick={autosave.retry}>重試儲存</button>
         )}
       </div>
+      {storageCapacityAnnouncement && (
+        <p className="field-error" role="alert">{storageCapacityAnnouncement}</p>
+      )}
       {autosave.state === 'error' && hasConflict && (
         <p className="field-error" role="alert">時刻內容已在其他位置更新，本機草稿尚未覆寫。</p>
       )}

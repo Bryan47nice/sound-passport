@@ -20,13 +20,15 @@ const ownerB = '22222222-2222-4222-8222-222222222222';
 const legacyOwner = 'legacy-v3';
 
 function ownerStorage(initialValue?: string) {
-  let value = initialValue ?? null;
+  const values = new Map<string, string>();
+  if (initialValue) values.set(JOURNEY_OUTBOX_OWNER_STORAGE_KEY, initialValue);
   return {
     storage: {
-      getItem: vi.fn(() => value),
-      setItem: vi.fn((_key: string, next: string) => { value = next; }),
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, next: string) => { values.set(key, next); }),
+      removeItem: vi.fn((key: string) => { values.delete(key); }),
     },
-    value: () => value,
+    value: () => values.get(JOURNEY_OUTBOX_OWNER_STORAGE_KEY) ?? null,
   };
 }
 
@@ -316,35 +318,64 @@ describe('journeyOutbox', () => {
     await reloadedPage.release();
   });
 
-  it('uses fresh owners and still recovers one abandoned record when Web Locks are unavailable', async () => {
+  it('does not recover a copied fallback owner while its originating page remains live', async () => {
     vi.stubGlobal('navigator', {});
-    const firstContext = ownerStorage(ownerA);
-    const duplicatedContext = ownerStorage(ownerA);
-
-    const firstPage = await claimJourneyOutboxOwner({ storage: firstContext.storage });
+    const sourceContext = ownerStorage(ownerA);
+    const sourcePage = await claimJourneyOutboxOwner({ storage: sourceContext.storage });
+    const duplicatedContext = ownerStorage(sourcePage.ownerId);
     const duplicatePage = await claimJourneyOutboxOwner({ storage: duplicatedContext.storage });
 
-    expect(firstPage.ownerId).not.toBe(ownerA);
-    expect(duplicatePage.ownerId).not.toBe(ownerA);
-    expect(duplicatePage.ownerId).not.toBe(firstPage.ownerId);
-
-    const abandoned = record(ownerA, 'abandoned-generation');
-    const outbox = outboxStub([abandoned]);
-    await expect(readJourneyOutbox(outbox, 'private-tokyo', duplicatePage.ownerId)).resolves.toEqual({
-      kind: 'recovered',
-      record: { ...abandoned, ownerId: duplicatePage.ownerId },
-    });
+    expect(sourcePage.ownerId).not.toBe(ownerA);
+    expect(duplicatePage.ownerId).not.toBe(sourcePage.ownerId);
+    const liveRecord = record(sourcePage.ownerId, 'live-generation');
+    const outbox = outboxStub([liveRecord]);
+    await expect(readJourneyOutbox(
+      outbox,
+      'private-tokyo',
+      duplicatePage.ownerId,
+      duplicatePage.claimRecoveryOwner,
+    )).resolves.toEqual({ kind: 'none' });
+    expect(outbox.adopt).not.toHaveBeenCalled();
 
     await duplicatePage.release();
-    await firstPage.release();
+    await sourcePage.release();
+  });
+
+  it('recovers a previous fallback owner after the same session releases its handoff', async () => {
+    vi.stubGlobal('navigator', {});
+    const context = ownerStorage(ownerA);
+    const previousPage = await claimJourneyOutboxOwner({ storage: context.storage });
+    const previousOwnerId = previousPage.ownerId;
+    const abandoned = record(previousOwnerId, 'abandoned-generation');
+    const outbox = outboxStub([abandoned]);
+    window.dispatchEvent(new Event('pagehide'));
+    await Promise.resolve();
+
+    const reloadedPage = await claimJourneyOutboxOwner({ storage: context.storage });
+    expect(reloadedPage.ownerId).not.toBe(previousOwnerId);
+    await expect(readJourneyOutbox(
+      outbox,
+      'private-tokyo',
+      reloadedPage.ownerId,
+      reloadedPage.claimRecoveryOwner,
+    )).resolves.toEqual({
+      kind: 'recovered',
+      record: { ...abandoned, ownerId: reloadedPage.ownerId },
+    });
+
+    await reloadedPage.release();
   });
 
   it('keeps recovery in page-wide no-lock mode when the Web Locks request rejects', async () => {
     const locks = new RejectingLockManager();
-    vi.stubGlobal('navigator', { locks });
+    vi.stubGlobal('navigator', {});
     const context = ownerStorage(ownerA);
+    const previousPage = await claimJourneyOutboxOwner({ storage: context.storage });
+    const previousOwnerId = previousPage.ownerId;
+    await previousPage.release();
+    vi.stubGlobal('navigator', { locks });
     const page = await claimJourneyOutboxOwner({ locks, storage: context.storage });
-    const abandoned = record(ownerA, 'rejected-lock-generation');
+    const abandoned = record(previousOwnerId, 'rejected-lock-generation');
     const outbox = outboxStub([abandoned]);
 
     expect(page.ownerId).not.toBe(ownerA);

@@ -2,10 +2,7 @@ import type {
   MomentAutosaveOutboxPort,
   MomentAutosaveOutboxRecord,
 } from '../../data/ports';
-import {
-  tryClaimJourneyOutboxOwner,
-  type JourneyOutboxOwnerClaimer,
-} from './journeyOutbox';
+import type { JourneyOutboxOwnerClaimer } from './journeyOutbox';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -36,7 +33,7 @@ export async function readMomentOutbox(
   momentId: string,
   journeyId: string,
   ownerId: string,
-  claimOwner: JourneyOutboxOwnerClaimer = tryClaimJourneyOutboxOwner,
+  claimOwner?: JourneyOutboxOwnerClaimer,
 ): Promise<MomentAutosaveOutboxRecord | undefined> {
   const exact = normalizeMomentOutboxRecord(
     await outbox.getMomentOutbox(momentId, ownerId),
@@ -45,6 +42,7 @@ export async function readMomentOutbox(
     ownerId,
   );
   if (exact) return exact;
+  if (!claimOwner) return undefined;
 
   const candidates = (await outbox.listMomentOutboxesByJourney(journeyId))
     .map((record) => normalizeMomentOutboxRecord(record, momentId, journeyId))
