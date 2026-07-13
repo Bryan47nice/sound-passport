@@ -6,7 +6,11 @@ export function AppShell({ children }: PropsWithChildren) {
     <div className="app-shell">
       <header className="app-header">
         <Link className="brand" to="/">Sound Passport</Link>
-        <span className="status-label">LOCAL PREVIEW</span>
+        <nav className="app-navigation" aria-label="主要導覽">
+          <Link to="/">世界地圖</Link>
+          <Link to="/studio">整理</Link>
+        </nav>
+        <span className="status-label">本機預覽</span>
       </header>
       <main>{children}</main>
     </div>

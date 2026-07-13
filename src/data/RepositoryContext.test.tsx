@@ -7,6 +7,7 @@ import {
   RepositoryProvider,
   useJourneyEditorRepository,
   useJourneyRepository,
+  useOptionalJourneyEditorRepository,
   usePhotoAssetRepository,
   usePrivateDataPort,
 } from './RepositoryContext';
@@ -64,6 +65,11 @@ describe('repository service hooks', () => {
   it('throws the exact editor-service error when editor is absent', () => {
     expect(() => renderHook(useJourneyEditorRepository, { wrapper: QueryOnlyProvider }))
       .toThrowError(/^JourneyEditorRepository is not available$/);
+  });
+
+  it('returns undefined from the optional editor hook when local storage is unavailable', () => {
+    expect(renderHook(useOptionalJourneyEditorRepository, { wrapper: QueryOnlyProvider }).result.current)
+      .toBeUndefined();
   });
 
   it('throws the exact photo-service error when photos are absent', () => {

@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RepositoryProvider } from '../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../data/fixtureJourneyRepository';
 import { App } from './App';
@@ -10,6 +10,8 @@ vi.mock('../features/atlas/WorldMap', () => ({
 }));
 
 describe('App', () => {
+  afterEach(cleanup);
+
   it('renders the Sound Passport shell', async () => {
     render(
       <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
@@ -17,8 +19,21 @@ describe('App', () => {
       </RepositoryProvider>,
     );
     expect(screen.getByRole('banner')).toHaveTextContent('Sound Passport');
+    expect(screen.getByRole('link', { name: '世界地圖' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('link', { name: '整理' })).toHaveAttribute('href', '/studio');
     expect(screen.getByRole('main')).toBeInTheDocument();
     expect(await screen.findByLabelText('旅行世界地圖')).toBeInTheDocument();
+  });
+
+  it('renders the Studio route unavailable state instead of the not-found page', async () => {
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
+        <MemoryRouter initialEntries={['/studio']}><App /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: '本機儲存空間暫時無法使用' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '找不到這個頁面' })).not.toBeInTheDocument();
   });
   it('shows a not-found page for an unknown route', () => {
     render(

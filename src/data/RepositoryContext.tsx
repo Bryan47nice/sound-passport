@@ -33,6 +33,10 @@ export function useJourneyEditorRepository(): JourneyEditorRepository {
   return editor;
 }
 
+export function useOptionalJourneyEditorRepository(): JourneyEditorRepository | undefined {
+  return useContext(Context)?.editor;
+}
+
 export function usePhotoAssetRepository(): PhotoAssetRepository {
   const photos = useContext(Context)?.photos;
   if (!photos) throw new Error('PhotoAssetRepository is not available');
