@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useGuardedNavigate } from '../../app/navigationGuard';
 import { useJourneyRepository } from '../../data/RepositoryContext';
 import type { CountrySummary } from '../../domain/model';
 import { WorldMap } from './WorldMap';
 
 export function AtlasPage() {
   const repository = useJourneyRepository();
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
   const [countries, setCountries] = useState<CountrySummary[]>();
 
   useEffect(() => {

@@ -1,3 +1,5 @@
+// @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
+import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -50,6 +52,16 @@ async function flushMicrotasks() {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
+function findStyleRule(rules: CSSRuleList, selector: string) {
+  return Array.from(rules).find((rule) => (rule as CSSStyleRule).selectorText === selector) as
+    CSSStyleRule | undefined;
+}
+
+function findMediaRule(rules: CSSRuleList, mediaText: string) {
+  return Array.from(rules).find((rule) => (rule as CSSMediaRule).media?.mediaText === mediaText) as
+    CSSMediaRule | undefined;
+}
+
 function editorStub(overrides: Partial<JourneyEditorRepository> = {}): JourneyEditorRepository {
   let currentStory: JourneyStory = {
     journey: { ...story.journey, cityLabels: [...story.journey.cityLabels] },
@@ -94,8 +106,10 @@ function RouteSwitcher() {
 }
 
 describe('JourneyEditorPage', () => {
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await flushMicrotasks();
+    sessionStorage.clear();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -166,6 +180,30 @@ describe('JourneyEditorPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新載入' }));
     expect(await screen.findByRole('heading', { name: '東京夜行' })).toBeInTheDocument();
     expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the route editor mounted until an AppShell navigation flush succeeds', async () => {
+    const write = deferred<Journey>();
+    const updateJourney = vi.fn(() => write.promise);
+    const editor = editorStub({ updateJourney });
+    renderRoute(editor);
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '離開前標題' } });
+    fireEvent.click(screen.getByRole('link', { name: '整理' }));
+    await act(flushMicrotasks);
+
+    expect(updateJourney).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('heading', { name: '離開前標題' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '旅程資料' })).toBeInTheDocument();
+
+    const updated = {
+      ...story.journey,
+      title: '離開前標題',
+      updatedAt: versionAfter(story.journey.updatedAt),
+    };
+    await act(async () => { write.resolve(updated); await write.promise; await flushMicrotasks(); });
+    expect(await screen.findByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
   });
 
   it('demotes a complete journey in the same version-checked update when a required field is removed', async () => {
@@ -253,9 +291,10 @@ describe('JourneyEditorPage', () => {
     expect(updateJourney.mock.calls[0][1]).not.toHaveProperty('id');
     expect(updateJourney.mock.calls[0][1]).not.toHaveProperty('updatedAt');
     expect(screen.getByText('待整理')).toBeInTheDocument();
+    expect(screen.getByLabelText('旅程總文（選填）')).toHaveValue('其他分頁更新的總文');
   });
 
-  it('shows a same-field conflict and overwrites only after explicit Retry', async () => {
+  it('keeps an ordinary same-field retry conflict-safe and overwrites only after the explicit force action', async () => {
     const external: JourneyStory = {
       ...story,
       journey: {
@@ -281,8 +320,17 @@ describe('JourneyEditorPage', () => {
     await act(() => vi.advanceTimersByTimeAsync(500));
 
     expect(updateJourney).not.toHaveBeenCalled();
+    const saveStatus = document.querySelector('.journey-save-status');
+    const saveActions = saveStatus?.querySelector('.journey-save-actions');
+    expect(saveActions).toBeInTheDocument();
+    expect(saveActions?.querySelectorAll('button')).toHaveLength(2);
     expect(screen.getByLabelText('旅程標題')).toHaveValue('本機保留標題');
     expect(screen.getByText('內容衝突')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重試儲存' }));
+    await act(flushMicrotasks);
+    expect(updateJourney).not.toHaveBeenCalled();
+    expect(screen.getByText('內容衝突')).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('button', { name: '重試並套用' }));
     await act(flushMicrotasks);
     expect(updateJourney).toHaveBeenCalledTimes(1);
@@ -294,14 +342,62 @@ describe('JourneyEditorPage', () => {
     );
   });
 
-  it('refreshes the current version after an atomic repository conflict before Retry', async () => {
+  it('turns generic failure plus a concurrent same-field change into conflict before explicit force retry', async () => {
+    let persisted: JourneyStory = story;
+    const getPrivateJourneyStory = vi.fn(async () => persisted);
+    const updateJourney = vi.fn()
+      .mockRejectedValueOnce(new Error('storage unavailable'))
+      .mockImplementationOnce(async (_id: string, patch: JourneyPatch, options?: { expectedUpdatedAt?: string }) => {
+        persisted = {
+          ...persisted,
+          journey: {
+            ...persisted.journey,
+            ...patch,
+            updatedAt: versionAfter(persisted.journey.updatedAt),
+          },
+        };
+        expect(options).toEqual({ expectedUpdatedAt: '2024-05-04T00:00:01.000Z' });
+        return persisted.journey;
+      });
+    const editor = editorStub({ getPrivateJourneyStory, updateJourney });
+    renderRoute(editor);
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '本機失敗標題' } });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(screen.getByText('儲存失敗')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重試並套用' })).not.toBeInTheDocument();
+
+    persisted = {
+      ...persisted,
+      journey: {
+        ...persisted.journey,
+        title: '其他分頁標題',
+        updatedAt: '2024-05-04T00:00:01.000Z',
+      },
+    };
+    fireEvent.click(screen.getByRole('button', { name: '重試儲存' }));
+    await act(flushMicrotasks);
+    expect(updateJourney).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('內容衝突')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重試並套用' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '重試並套用' }));
+    await act(flushMicrotasks);
+    expect(updateJourney).toHaveBeenCalledTimes(2);
+    expect(updateJourney.mock.calls[1][1]).toEqual({ title: '本機失敗標題' });
+  });
+
+  it('retries against the latest version after a concurrent moment mutation invalidates the story', async () => {
     const raced: JourneyStory = {
       ...story,
       journey: {
         ...story.journey,
-        title: '競爭寫入標題',
+        status: 'review',
         updatedAt: '2024-05-04T00:00:01.000Z',
       },
+      moments: story.moments.map((moment) => ({ ...moment, localDate: '2024-04-30' })),
     };
     const getPrivateJourneyStory = vi.fn()
       .mockResolvedValueOnce(story)
@@ -327,11 +423,80 @@ describe('JourneyEditorPage', () => {
     await act(() => vi.advanceTimersByTimeAsync(500));
     expect(screen.getByText('內容衝突')).toBeInTheDocument();
     expect(screen.getByLabelText('旅程標題')).toHaveValue('本機競爭標題');
+    expect(screen.getByText('待整理')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '重試並套用' }));
+    fireEvent.click(screen.getByRole('button', { name: '重試儲存' }));
     await act(flushMicrotasks);
     expect(updateJourney).toHaveBeenCalledTimes(2);
     expect(updateJourney.mock.calls[1][2]).toEqual({ expectedUpdatedAt: raced.journey.updatedAt });
+    expect(updateJourney.mock.calls[1][1]).toEqual({ title: '本機競爭標題' });
+  });
+
+  it('does not overwrite a newer local field while rebasing an older save response', async () => {
+    const write = deferred<Journey>();
+    const external: JourneyStory = {
+      ...story,
+      journey: {
+        ...story.journey,
+        summary: '其他分頁更新的總文',
+        updatedAt: '2024-05-04T00:00:01.000Z',
+      },
+    };
+    const getPrivateJourneyStory = vi.fn()
+      .mockResolvedValueOnce(story)
+      .mockResolvedValue(external);
+    const updateJourney = vi.fn(() => write.promise);
+    renderRoute(editorStub({ getPrivateJourneyStory, updateJourney }));
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '本機新標題' } });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+    fireEvent.change(screen.getByLabelText('旅程總文（選填）'), { target: { value: '本機較新的總文' } });
+
+    const response = {
+      ...external.journey,
+      title: '本機新標題',
+      updatedAt: '2024-05-04T00:00:02.000Z',
+    };
+    await act(async () => { write.resolve(response); await write.promise; await flushMicrotasks(); });
+
+    expect(screen.getByLabelText('旅程總文（選填）')).toHaveValue('本機較新的總文');
+    expect(screen.getByRole('heading', { name: '本機新標題' })).toBeInTheDocument();
+  });
+
+  it('recovers the latest outbox envelope after a rejected bare-unmount flush', async () => {
+    let rejectWrite = true;
+    let persisted = story.journey;
+    const getPrivateJourneyStory = vi.fn(async () => ({ ...story, journey: persisted }));
+    const updateJourney = vi.fn(async (_id: string, patch: JourneyPatch) => {
+      if (rejectWrite) throw new Error('storage unavailable');
+      persisted = { ...persisted, ...patch, updatedAt: versionAfter(persisted.updatedAt) };
+      return persisted;
+    });
+    const editor = editorStub({ getPrivateJourneyStory, updateJourney });
+    const firstView = renderRoute(editor);
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '重新掛載後復原' } });
+    expect(sessionStorage).toHaveLength(1);
+    firstView.unmount();
+    await act(flushMicrotasks);
+    expect(updateJourney).toHaveBeenCalledTimes(1);
+    expect(sessionStorage).toHaveLength(1);
+
+    rejectWrite = false;
+    renderRoute(editor);
+    await act(flushMicrotasks);
+    expect(screen.getByLabelText('旅程標題')).toHaveValue('重新掛載後復原');
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+
+    expect(updateJourney).toHaveBeenCalledTimes(2);
+    expect(updateJourney.mock.calls[1][1]).toEqual({ title: '重新掛載後復原' });
+    expect(sessionStorage).toHaveLength(0);
   });
 
   it('marks and describes both date inputs when the range is invalid', async () => {
@@ -391,6 +556,35 @@ describe('JourneyEditorPage', () => {
     expect(listSeparator).toHaveAttribute('aria-valuenow', '180');
     fireEvent.keyDown(detailsSeparator, { key: 'ArrowLeft' });
     expect(detailsSeparator).toHaveAttribute('aria-valuenow', '356');
+  });
+
+  it('keeps conflict actions and the editor header contained across desktop and tablet CSS', () => {
+    const style = document.createElement('style');
+    style.textContent = readFileSync('src/styles/global.css', 'utf8');
+    document.head.append(style);
+
+    try {
+      const rules = style.sheet!.cssRules;
+      const saveStatus = findStyleRule(rules, '.journey-save-status');
+      const saveActions = findStyleRule(rules, '.journey-save-actions');
+      const title = findStyleRule(rules, '.journey-editor-header h1');
+      expect(saveStatus?.style.getPropertyValue('flex')).toBe('0 0 168px');
+      expect(saveStatus?.style.getPropertyValue('width')).toBe('168px');
+      expect(saveStatus?.style.getPropertyValue('flex-wrap')).toBe('wrap');
+      expect(saveStatus?.style.getPropertyValue('row-gap')).toBe('4px');
+      expect(saveActions?.style.getPropertyValue('display')).toBe('flex');
+      expect(saveActions?.style.getPropertyValue('gap')).toBe('4px');
+      expect(saveActions?.style.getPropertyValue('justify-content')).toBe('flex-end');
+      expect(title?.style.getPropertyValue('overflow')).toBe('hidden');
+      expect(title?.style.getPropertyValue('text-overflow')).toBe('ellipsis');
+      expect(title?.style.getPropertyValue('white-space')).toBe('nowrap');
+
+      const tablet = findMediaRule(rules, '(min-width: 641px) and (max-width: 1039px)');
+      expect(findStyleRule(tablet!.cssRules, '.journey-editor-header')?.style.getPropertyValue('gap')).toBe('16px');
+      expect(findStyleRule(tablet!.cssRules, '.journey-editor-meta')?.style.getPropertyValue('gap')).toBe('10px');
+    } finally {
+      style.remove();
+    }
   });
 
   it('shows only desktop guidance on mobile', () => {

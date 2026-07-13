@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
+import { GuardedLink } from '../../app/navigationGuard';
 import { useJourneyRepository } from '../../data/RepositoryContext';
 import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
@@ -39,7 +40,7 @@ export function JourneyPlayerPage() {
     return (
       <section className="page empty-state">
         <h1>找不到這趟旅程</h1>
-        <Link className="primary-command" to="/">返回旅行地圖</Link>
+        <GuardedLink className="primary-command" to="/">返回旅行地圖</GuardedLink>
       </section>
     );
   }

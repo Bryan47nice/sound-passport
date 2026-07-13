@@ -18,11 +18,14 @@ import { JourneyDetailsForm } from './JourneyDetailsForm';
 import {
   createJourneyPatchEnvelope,
   JourneyPatchConflictError,
+  journeyUserPatchKeys,
   journeyPatchBaseMatches,
   mergeJourneyPatchEnvelopes,
   type JourneyPatchEnvelope,
+  type JourneyUserPatchKey,
   type JourneyUserPatch,
 } from './journeyPatch';
+import { clearJourneyOutbox, readJourneyOutbox, writeJourneyOutbox } from './journeyOutbox';
 import { useAutosave } from './useAutosave';
 import { useDirtyNavigationGuard } from './useDirtyNavigationGuard';
 import { useMobileStudio } from './useMobileStudio';
@@ -67,20 +70,27 @@ function SaveStatus({ autosave }: {
     <div className="journey-save-status">
       <span>{text}</span>
       {autosave.state === 'error' && (
-        <button type="button" onClick={autosave.retry}>
-          {isConflict ? '重試並套用' : '重試儲存'}
-        </button>
+        <span className="journey-save-actions">
+          <button type="button" onClick={autosave.retry}>重試儲存</button>
+          {isConflict && <button type="button" onClick={autosave.forceRetry}>重試並套用</button>}
+        </span>
       )}
     </div>
   );
 }
 
 function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorRepository; story: JourneyStory }) {
-  const [draft, setDraft] = useState(story.journey);
+  const [recoveredEnvelope] = useState(() => readJourneyOutbox(story.journey.id));
+  const initialDraft = recoveredEnvelope
+    ? { ...story.journey, ...recoveredEnvelope.patch }
+    : story.journey;
+  const [draft, setDraft] = useState(initialDraft);
   const [dateError, setDateError] = useState('');
   const [demotionNotice, setDemotionNotice] = useState('');
   const [panelWidths, setPanelWidths] = useState({ list: 220, details: 340 });
-  const draftRef = useRef(story.journey);
+  const draftRef = useRef(initialDraft);
+  const fieldRevisionsRef = useRef<Partial<Record<JourneyUserPatchKey, number>>>({});
+  const recoveredQueuedRef = useRef(false);
   const mountedRef = useRef(false);
   const dragRef = useRef<{
     panel: AdjustablePanel;
@@ -94,17 +104,32 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
     return () => { mountedRef.current = false; };
   }, []);
 
-  const save = useCallback(async (
-    envelope: JourneyPatchEnvelope,
-    { isRetry }: { isRetry: boolean },
+  const rebaseDraft = useCallback((
+    persisted: Journey,
+    savedRevision: number,
+    protectedPatch?: JourneyUserPatch,
   ) => {
-    const currentStory = await editor.getPrivateJourneyStory(story.journey.id);
-    if (!currentStory) throw new Error('Journey is no longer available.');
+    if (!mountedRef.current) return;
+    const nextDraft: Journey = {
+      ...draftRef.current,
+      status: persisted.status,
+      updatedAt: persisted.updatedAt,
+    };
+    journeyUserPatchKeys.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(protectedPatch ?? {}, key)) return;
+      if ((fieldRevisionsRef.current[key] ?? 0) > savedRevision) return;
+      const value = persisted[key];
+      Object.assign(nextDraft, { [key]: Array.isArray(value) ? [...value] : value });
+    });
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+  }, []);
 
-    if (!isRetry && !journeyPatchBaseMatches(envelope, currentStory.journey)) {
-      throw new JourneyPatchConflictError();
-    }
-
+  const persistEnvelope = useCallback(async (
+    envelope: JourneyPatchEnvelope,
+    currentStory: JourneyStory,
+    revision: number,
+  ) => {
     const repositoryPatch: JourneyPatch = { ...envelope.patch };
     let demoted = false;
     if (currentStory.journey.status === 'complete') {
@@ -121,12 +146,7 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
         repositoryPatch,
         { expectedUpdatedAt: currentStory.journey.updatedAt },
       );
-
-      if (mountedRef.current && draftRef.current.status !== updated.status) {
-        const nextDraft = { ...draftRef.current, status: updated.status };
-        draftRef.current = nextDraft;
-        setDraft(nextDraft);
-      }
+      rebaseDraft(updated, revision);
       if (demoted && mountedRef.current) {
         setDemotionNotice('必要資料已移除，旅程已回到待整理');
       }
@@ -134,32 +154,71 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
       if (!(error instanceof JourneyVersionConflictError)) throw error;
       try {
         const refreshed = await editor.getPrivateJourneyStory(story.journey.id);
-        if (refreshed && mountedRef.current && draftRef.current.status !== refreshed.journey.status) {
-          const nextDraft = { ...draftRef.current, status: refreshed.journey.status };
-          draftRef.current = nextDraft;
-          setDraft(nextDraft);
-        }
+        if (refreshed) rebaseDraft(refreshed.journey, revision, envelope.patch);
       } catch {
         // Keep the field patch retryable even if the conflict refresh also fails.
       }
       throw new JourneyPatchConflictError();
     }
-  }, [editor, story.journey.id]);
+  }, [editor, rebaseDraft, story.journey.id]);
+
+  const save = useCallback(async (
+    envelope: JourneyPatchEnvelope,
+    { revision }: { revision: number },
+  ) => {
+    const currentStory = await editor.getPrivateJourneyStory(story.journey.id);
+    if (!currentStory) throw new Error('Journey is no longer available.');
+
+    if (!journeyPatchBaseMatches(envelope, currentStory.journey)) {
+      rebaseDraft(currentStory.journey, revision, envelope.patch);
+      throw new JourneyPatchConflictError();
+    }
+    await persistEnvelope(envelope, currentStory, revision);
+  }, [editor, persistEnvelope, rebaseDraft, story.journey.id]);
+
+  const forceSave = useCallback(async (
+    envelope: JourneyPatchEnvelope,
+    { revision }: { revision: number },
+  ) => {
+    const currentStory = await editor.getPrivateJourneyStory(story.journey.id);
+    if (!currentStory) throw new Error('Journey is no longer available.');
+    await persistEnvelope(envelope, currentStory, revision);
+  }, [editor, persistEnvelope, story.journey.id]);
+
+  const handleUnsavedChange = useCallback((envelope: JourneyPatchEnvelope | undefined) => {
+    if (envelope) writeJourneyOutbox(story.journey.id, envelope);
+    else clearJourneyOutbox(story.journey.id);
+  }, [story.journey.id]);
 
   const autosave = useAutosave({
     save,
+    forceSave,
     delay: 500,
     merge: mergeJourneyPatchEnvelopes,
+    onUnsavedChange: handleUnsavedChange,
   });
   useDirtyNavigationGuard({ dirty: autosave.dirty, flush: autosave.flush });
+
+  const markFieldRevisions = useCallback((patch: JourneyUserPatch, revision: number) => {
+    journeyUserPatchKeys.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(patch, key)) fieldRevisionsRef.current[key] = revision;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!recoveredEnvelope || recoveredQueuedRef.current) return;
+    recoveredQueuedRef.current = true;
+    const revision = autosave.enqueue(recoveredEnvelope);
+    markFieldRevisions(recoveredEnvelope.patch, revision);
+  }, [autosave.enqueue, markFieldRevisions, recoveredEnvelope]);
 
   const applyUserPatch = (patch: JourneyUserPatch, immediate: boolean) => {
     const envelope = createJourneyPatchEnvelope(draftRef.current, patch);
     const nextDraft: Journey = { ...draftRef.current, ...envelope.patch };
     draftRef.current = nextDraft;
     setDraft(nextDraft);
-    if (immediate) autosave.saveNow(envelope);
-    else autosave.enqueue(envelope);
+    const revision = immediate ? autosave.saveNow(envelope) : autosave.enqueue(envelope);
+    if (revision !== undefined) markFieldRevisions(envelope.patch, revision);
   };
 
   const handleDateChange = (field: 'startDate' | 'endDate', value: string) => {
@@ -229,7 +288,7 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
   } as CSSProperties;
   const liveMessage = autosave.state === 'error'
     ? autosave.error instanceof JourneyPatchConflictError
-      ? '其他位置已有更新。若要保留目前編輯，請重試並套用。'
+      ? '其他位置已有更新。可先重試儲存；確認覆蓋衝突欄位時，才使用重試並套用。'
       : autosave.errorAnnouncement
     : '';
 

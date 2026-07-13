@@ -3,13 +3,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export type AutosaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export interface AutosaveSaveContext {
-  isRetry: boolean;
+  revision: number;
 }
 
+type AutosaveSave<T> = (value: T, context: AutosaveSaveContext) => Promise<void>;
+
 interface UseAutosaveOptions<T> {
-  save: (value: T, context: AutosaveSaveContext) => Promise<void>;
+  save: AutosaveSave<T>;
+  forceSave?: AutosaveSave<T>;
   delay: number;
   merge?: (current: T, next: T) => T;
+  onUnsavedChange?: (value: T | undefined) => void;
 }
 
 interface RevisionedValue<T> {
@@ -32,22 +36,31 @@ interface AutosaveViewState {
 }
 
 export interface AutosaveResult<T> extends AutosaveViewState {
-  enqueue: (value: T) => void;
+  enqueue: (value: T) => number;
   retry: () => void;
-  saveNow: (value?: T) => void;
+  forceRetry: () => void;
+  saveNow: (value?: T) => number | undefined;
   flush: () => Promise<void>;
 }
 
 const latestValue = <T,>(_current: T, next: T) => next;
 
-export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosaveOptions<T>): AutosaveResult<T> {
+export function useAutosave<T>({
+  save,
+  forceSave,
+  delay,
+  merge = latestValue,
+  onUnsavedChange,
+}: UseAutosaveOptions<T>): AutosaveResult<T> {
   const [view, setView] = useState<AutosaveViewState>({
     state: 'idle',
     dirty: false,
     errorAnnouncement: '',
   });
   const saveRef = useRef(save);
+  const forceSaveRef = useRef(forceSave);
   const mergeRef = useRef(merge);
+  const onUnsavedChangeRef = useRef(onUnsavedChange);
   const delayRef = useRef(delay);
   const pendingRef = useRef<RevisionedValue<T> | undefined>(undefined);
   const inFlightRef = useRef<RevisionedValue<T> | undefined>(undefined);
@@ -57,11 +70,13 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
   const waitersRef = useRef<FlushWaiter[]>([]);
   const mountedRef = useRef(false);
   const lifecycleRef = useRef(0);
-  const startNextRef = useRef<(isRetry: boolean) => void>(() => undefined);
+  const startNextRef = useRef<(saveOperation?: AutosaveSave<T>) => void>(() => undefined);
   const flushRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   saveRef.current = save;
+  forceSaveRef.current = forceSave;
   mergeRef.current = merge;
+  onUnsavedChangeRef.current = onUnsavedChange;
   delayRef.current = delay;
 
   const publish = useCallback((update: (current: AutosaveViewState) => AutosaveViewState) => {
@@ -91,7 +106,20 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
     waiters.forEach(({ reject }) => reject(error));
   }, []);
 
-  const startNext = useCallback((isRetry: boolean) => {
+  const notifyUnsavedChange = useCallback(() => {
+    const inFlight = inFlightRef.current;
+    const pending = pendingRef.current;
+    const unsaved = inFlight && pending
+      ? mergeRef.current(inFlight.value, pending.value)
+      : inFlight?.value ?? pending?.value;
+    try {
+      onUnsavedChangeRef.current?.(unsaved);
+    } catch {
+      // Recovery persistence must not interrupt the underlying save queue.
+    }
+  }, []);
+
+  const startNext = useCallback((saveOperation?: AutosaveSave<T>) => {
     const pending = pendingRef.current;
     if (inFlightRef.current || !pending?.ready) return;
 
@@ -107,7 +135,8 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
 
     let saveResult: Promise<void>;
     try {
-      saveResult = Promise.resolve(saveRef.current(pending.value, { isRetry }));
+      const operation = saveOperation ?? saveRef.current;
+      saveResult = Promise.resolve(operation(pending.value, { revision: pending.revision }));
     } catch (error) {
       saveResult = Promise.reject(error);
     }
@@ -116,11 +145,12 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
       if (inFlightRef.current !== pending) return;
       inFlightRef.current = undefined;
       persistedRevisionRef.current = Math.max(persistedRevisionRef.current, pending.revision);
+      notifyUnsavedChange();
 
       const queued = pendingRef.current;
       if (queued) {
         if (queued.ready) {
-          startNextRef.current(false);
+          startNextRef.current();
         } else {
           publish((current) => ({
             ...current,
@@ -155,6 +185,7 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
             ready: false,
           }
         : { ...pending, ready: false };
+      notifyUnsavedChange();
 
       publish((current) => ({
         ...current,
@@ -165,7 +196,7 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
       }));
       rejectFlushes(error);
     });
-  }, [cancelDebounce, publish, rejectFlushes, resolveFlushesIfClean]);
+  }, [cancelDebounce, notifyUnsavedChange, publish, rejectFlushes, resolveFlushesIfClean]);
 
   startNextRef.current = startNext;
 
@@ -176,7 +207,7 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
 
     if (waitersRef.current.length > 0) {
       pending.ready = true;
-      startNextRef.current(false);
+      startNextRef.current();
       return;
     }
 
@@ -185,7 +216,7 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
       debounceRef.current = undefined;
       if (!pendingRef.current) return;
       pendingRef.current.ready = true;
-      startNextRef.current(false);
+      startNextRef.current();
     }, delayRef.current);
   }, [cancelDebounce]);
 
@@ -198,6 +229,7 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
       revision,
       ready: immediate || waitersRef.current.length > 0,
     };
+    notifyUnsavedChange();
 
     publish((current) => ({
       ...current,
@@ -207,32 +239,42 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
 
     if (pendingRef.current.ready) {
       cancelDebounce();
-      startNextRef.current(false);
+      startNextRef.current();
     } else {
       schedulePending();
     }
-  }, [cancelDebounce, publish, schedulePending]);
+    return revision;
+  }, [cancelDebounce, notifyUnsavedChange, publish, schedulePending]);
 
   const enqueue = useCallback((value: T) => {
-    queueValue(value, false);
+    return queueValue(value, false);
   }, [queueValue]);
 
   const saveNow = useCallback((value?: T) => {
     if (value !== undefined) {
-      queueValue(value, true);
-      return;
+      return queueValue(value, true);
     }
     cancelDebounce();
-    if (!pendingRef.current) return;
+    if (!pendingRef.current) return undefined;
     pendingRef.current.ready = true;
-    startNextRef.current(false);
+    const revision = pendingRef.current.revision;
+    startNextRef.current();
+    return revision;
   }, [cancelDebounce, queueValue]);
 
   const retry = useCallback(() => {
     cancelDebounce();
     if (!pendingRef.current) return;
     pendingRef.current.ready = true;
-    startNextRef.current(true);
+    startNextRef.current();
+  }, [cancelDebounce]);
+
+  const forceRetry = useCallback(() => {
+    cancelDebounce();
+    const operation = forceSaveRef.current;
+    if (!pendingRef.current || !operation) return;
+    pendingRef.current.ready = true;
+    startNextRef.current(operation);
   }, [cancelDebounce]);
 
   const flush = useCallback(() => {
@@ -243,7 +285,7 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
     const result = new Promise<void>((resolve, reject) => {
       waitersRef.current.push({ resolve, reject });
     });
-    startNextRef.current(false);
+    startNextRef.current();
     return result;
   }, [cancelDebounce, isClean]);
 
@@ -265,5 +307,5 @@ export function useAutosave<T>({ save, delay, merge = latestValue }: UseAutosave
     };
   }, [cancelDebounce]);
 
-  return { ...view, enqueue, retry, saveNow, flush };
+  return { ...view, enqueue, retry, forceRetry, saveNow, flush };
 }

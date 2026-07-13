@@ -1,4 +1,4 @@
-import { Link, Route, Routes } from 'react-router';
+import { Route, Routes } from 'react-router';
 import { AtlasPage } from '../features/atlas/AtlasPage';
 import { CountryPage } from '../features/country/CountryPage';
 import { JourneyPage } from '../features/journey/JourneyPage';
@@ -7,11 +7,13 @@ import { JourneyCreatePage } from '../features/studio/JourneyCreatePage';
 import { JourneyEditorPage } from '../features/studio/JourneyEditorPage';
 import { StudioPage } from '../features/studio/StudioPage';
 import { AppShell } from './AppShell';
+import { GuardedLink, NavigationGuardProvider, useGuardedRouteLocation } from './navigationGuard';
 
-export function App() {
+function AppRoutes() {
+  const routeLocation = useGuardedRouteLocation();
   return (
     <AppShell>
-      <Routes>
+      <Routes location={routeLocation}>
         <Route index element={<AtlasPage />} />
         <Route path="studio" element={<StudioPage />} />
         <Route path="studio/journeys/new" element={<JourneyCreatePage />} />
@@ -19,8 +21,12 @@ export function App() {
         <Route path="countries/:countryCode" element={<CountryPage />} />
         <Route path="journeys/:journeyId/play" element={<JourneyPlayerPage />} />
         <Route path="journeys/:journeyId" element={<JourneyPage />} />
-        <Route path="*" element={<section className="page empty-state"><h1>找不到這個頁面</h1><Link className="primary-command" to="/">回到世界地圖</Link></section>} />
+        <Route path="*" element={<section className="page empty-state"><h1>找不到這個頁面</h1><GuardedLink className="primary-command" to="/">回到世界地圖</GuardedLink></section>} />
       </Routes>
     </AppShell>
   );
+}
+
+export function App() {
+  return <NavigationGuardProvider><AppRoutes /></NavigationGuardProvider>;
 }

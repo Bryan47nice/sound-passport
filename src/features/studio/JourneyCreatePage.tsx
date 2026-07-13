@@ -1,6 +1,6 @@
 import { Plus, X } from 'lucide-react';
 import { type FormEvent, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useGuardedNavigate } from '../../app/navigationGuard';
 import { useOptionalJourneyEditorRepository } from '../../data/RepositoryContext';
 import { listCountries, type CountryOption } from '../../domain/countryCatalog';
 import { useMobileStudio } from './useMobileStudio';
@@ -18,7 +18,7 @@ function fieldError(errors: ValidationErrors, name: FieldName) {
 
 export function JourneyCreatePage({ onBootstrapRetry = () => window.location.reload() }: JourneyCreatePageProps) {
   const editor = useOptionalJourneyEditorRepository();
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
   const isMobile = useMobileStudio();
   const [title, setTitle] = useState('');
   const [countryInput, setCountryInput] = useState('');

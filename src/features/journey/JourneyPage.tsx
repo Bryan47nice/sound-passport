@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
+import { GuardedLink } from '../../app/navigationGuard';
 import { useJourneyRepository } from '../../data/RepositoryContext';
 import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
@@ -37,7 +38,7 @@ export function JourneyPage() {
     <section className="page">
       <p className="eyebrow">{story.journey.countryName} · {story.journey.startDate}</p>
       <h1 className="page-title">{story.journey.title}</h1>
-      <Link className="primary-command" to={`/journeys/${story.journey.id}/play`}>播放這趟旅程</Link>
+      <GuardedLink className="primary-command" to={`/journeys/${story.journey.id}/play`}>播放這趟旅程</GuardedLink>
       <ol className="moment-list">
         {story.moments.map((moment) => (
           <li className="moment-row" key={moment.id}>

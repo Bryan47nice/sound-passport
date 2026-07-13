@@ -13,6 +13,7 @@ import type {
   PrivateJourneySnapshot,
   SongReference,
 } from '../domain/model';
+import { validateJourneyForReview } from '../domain/journeyValidation';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
   JourneyVersionConflictError,
@@ -125,6 +126,27 @@ async function assertTargetKeysUnchanged(tx: WriteTransaction, expected: Private
       throw new PrivateDataStateConflictError();
     }
   }
+}
+
+async function advanceJourneyStoryVersion(tx: WriteTransaction, journeyId: string) {
+  const journeyStore = tx.objectStore('journeys');
+  const journey = await journeyStore.get(journeyId);
+  if (!journey) throw missingRecord('Journey', journeyId);
+
+  const moments = await tx.objectStore('moments').index('journeyId').getAll(journeyId);
+  moments.sort((left, right) => left.sortOrder - right.sortOrder);
+  const joinedMoments = await Promise.all(moments.map(async (moment) => {
+    const song = await tx.objectStore('songs').get(moment.songReferenceId);
+    if (!song) throw relationshipError(`moment ${moment.id} references missing song ${moment.songReferenceId}`);
+    return { ...moment, song };
+  }));
+  const status: JourneyStatus = journey.status === 'complete' &&
+    !validateJourneyForReview({ journey, moments: joinedMoments }).valid
+    ? 'review'
+    : journey.status;
+  const updated: Journey = { ...journey, status, updatedAt: nextUpdatedAt(journey.updatedAt) };
+  await journeyStore.put(updated);
+  return updated;
 }
 
 export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyRepositoryOptions): IndexedDbJourneyRepository {
@@ -328,6 +350,7 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
           await momentStore.add(moment);
           created.push(moment);
         }
+        if (created.length > 0) await advanceJourneyStoryVersion(tx, journeyId);
         return created;
       });
     },
@@ -357,6 +380,7 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
         }
 
         await momentStore.put(updated);
+        await advanceJourneyStoryVersion(tx, moment.journeyId);
         return updated;
       });
     },
@@ -378,6 +402,7 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
             journeys.some((journey) => journey.coverPhotoAssetId === moment.photoAssetId);
           if (!isReferenced) await tx.objectStore('photos').delete(moment.photoAssetId);
         }
+        await advanceJourneyStoryVersion(tx, moment.journeyId);
       });
     },
 
@@ -397,6 +422,7 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
           const moment = momentsById.get(id)!;
           await momentStore.put({ ...moment, sortOrder, updatedAt: timestamp });
         }
+        await advanceJourneyStoryVersion(tx, journeyId);
       });
     },
 

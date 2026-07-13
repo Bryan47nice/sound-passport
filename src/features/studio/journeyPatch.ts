@@ -1,6 +1,6 @@
 import type { Journey } from '../../domain/model';
 
-const userPatchKeys = [
+export const journeyUserPatchKeys = [
   'title',
   'countryCode',
   'countryName',
@@ -12,7 +12,7 @@ const userPatchKeys = [
   'coverPhotoAssetId',
 ] as const;
 
-type JourneyUserPatchKey = typeof userPatchKeys[number];
+export type JourneyUserPatchKey = typeof journeyUserPatchKeys[number];
 
 export type JourneyUserPatch = Partial<Pick<Journey, JourneyUserPatchKey>>;
 
@@ -51,7 +51,7 @@ export function createJourneyPatchEnvelope(draft: Journey, requestedPatch: Journ
   const patch: JourneyUserPatch = {};
   const base: JourneyUserPatch = {};
 
-  userPatchKeys.forEach((key) => {
+  journeyUserPatchKeys.forEach((key) => {
     if (!hasOwn(requestedPatch, key)) return;
     assignValue(patch, key, requestedPatch[key] as Journey[JourneyUserPatchKey]);
     assignValue(base, key, draft[key]);
@@ -67,7 +67,7 @@ export function mergeJourneyPatchEnvelopes(
   const patch: JourneyUserPatch = {};
   const base: JourneyUserPatch = {};
 
-  userPatchKeys.forEach((key) => {
+  journeyUserPatchKeys.forEach((key) => {
     if (hasOwn(current.patch, key)) {
       assignValue(patch, key, current.patch[key] as Journey[JourneyUserPatchKey]);
       assignValue(base, key, current.base[key] as Journey[JourneyUserPatchKey]);
@@ -84,7 +84,7 @@ export function mergeJourneyPatchEnvelopes(
 }
 
 export function journeyPatchBaseMatches(envelope: JourneyPatchEnvelope, persisted: Journey) {
-  return userPatchKeys.every((key) => (
+  return journeyUserPatchKeys.every((key) => (
     !hasOwn(envelope.patch, key) ||
     sameValue(envelope.base[key] as Journey[JourneyUserPatchKey], persisted[key])
   ));

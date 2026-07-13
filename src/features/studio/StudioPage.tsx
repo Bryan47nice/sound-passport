@@ -1,6 +1,6 @@
 import { Download, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router';
+import { GuardedLink } from '../../app/navigationGuard';
 import { useOptionalJourneyEditorRepository } from '../../data/RepositoryContext';
 import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStatus, JourneyStory } from '../../domain/model';
@@ -143,9 +143,9 @@ export function StudioPage({ onBootstrapRetry = () => window.location.reload() }
           <h1 className="page-title">整理旅程</h1>
         </div>
         <div className="studio-toolbar" role="toolbar" aria-label="旅程工具">
-          <Link className="primary-command studio-create-command" to="/studio/journeys/new">
+          <GuardedLink className="primary-command studio-create-command" to="/studio/journeys/new">
             <Plus size={18} aria-hidden="true" />新增旅程
-          </Link>
+          </GuardedLink>
           <button className="icon-command" type="button" disabled title="即將可用" aria-label="匯出備份，即將可用">
             <Download size={18} aria-hidden="true" />
           </button>
@@ -206,7 +206,7 @@ export function StudioPage({ onBootstrapRetry = () => window.location.reload() }
         ) : visibleRows.length === 0 ? (
           <section className="studio-empty">
             <p>這裡還沒有{tabs.find((tab) => tab.status === status)?.label}旅程。</p>
-            {status === 'draft' && <Link className="primary-command" to="/studio/journeys/new"><Plus size={18} aria-hidden="true" />新增第一趟旅程</Link>}
+            {status === 'draft' && <GuardedLink className="primary-command" to="/studio/journeys/new"><Plus size={18} aria-hidden="true" />新增第一趟旅程</GuardedLink>}
           </section>
         ) : (
           <div className="studio-table-wrap">
@@ -228,7 +228,7 @@ export function StudioPage({ onBootstrapRetry = () => window.location.reload() }
                         )}
                       </div>
                     </td>
-                    <th scope="row"><Link to={`/studio/journeys/${journey.id}`}>{journey.title}</Link></th>
+                    <th scope="row"><GuardedLink to={`/studio/journeys/${journey.id}`}>{journey.title}</GuardedLink></th>
                     <td>{journey.countryName}</td>
                     <td>{journey.startDate} 至 {journey.endDate}</td>
                     <td>{momentCount} 個時刻</td>

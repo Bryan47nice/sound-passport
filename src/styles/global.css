@@ -135,8 +135,9 @@ button { font: inherit; }
 .journey-status { min-width: 58px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 12px; font-weight: 800; text-align: center; }
 .journey-status-complete { border-color: var(--forest); color: var(--forest); }
 .journey-status-review { border-color: var(--coral); color: var(--coral); }
-.journey-save-status { display: flex; flex: 0 0 168px; width: 168px; min-height: 32px; align-items: center; justify-content: flex-end; gap: 8px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.journey-save-status { display: flex; flex: 0 0 168px; width: 168px; min-height: 32px; flex-wrap: wrap; align-content: center; align-items: center; justify-content: flex-end; row-gap: 4px; column-gap: 8px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .journey-save-status span { white-space: nowrap; }
+.journey-save-actions { display: flex; justify-content: flex-end; gap: 4px; }
 .journey-save-status button { padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); cursor: pointer; font: inherit; font-weight: 800; }
 .journey-demotion-notice { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--coral); background: var(--paper); color: var(--ink); font-size: 13px; font-weight: 700; }
 .journey-editor-workspace { display: grid; grid-template-areas: "list preview" "details details"; grid-template-columns: minmax(190px, .72fr) minmax(0, 1.28fr); min-width: 0; min-height: calc(100vh - 172px); }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
+import { GuardedLink } from '../../app/navigationGuard';
 import { useJourneyRepository } from '../../data/RepositoryContext';
 import type { Journey } from '../../domain/model';
 
@@ -33,14 +34,14 @@ export function CountryPage() {
       <h1 className="page-title">{journeys[0].countryName}</h1>
       <div className="journey-list">
         {journeys.map((journey) => (
-          <Link className="journey-row" key={journey.id} to={`/journeys/${journey.id}`}>
+          <GuardedLink className="journey-row" key={journey.id} to={`/journeys/${journey.id}`}>
             <span className="journey-summary">
               <strong>{journey.title}</strong>
               <small>{journey.startDate} 至 {journey.endDate}</small>
             </span>
             <span className="journey-cities">{journey.cityLabels.join('、')}</span>
             <span className="journey-arrow" aria-hidden="true">›</span>
-          </Link>
+          </GuardedLink>
         ))}
       </div>
     </section>

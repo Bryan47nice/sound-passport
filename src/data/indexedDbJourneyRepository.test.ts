@@ -92,6 +92,18 @@ async function openRepository(testName: string) {
   return { db, name, repository: createIndexedDbJourneyRepository({ db }) };
 }
 
+async function createCompleteValidJourney(
+  repository: ReturnType<typeof createIndexedDbJourneyRepository>,
+) {
+  const created = await repository.createJourney(journeyInput());
+  const [moment] = await repository.addMoments(created.id, [photoInput('valid.jpg')]);
+  await repository.updateMoment(moment.id, {
+    song: { title: 'Valid title', artist: 'Valid artist', sourceUrl: '' },
+  });
+  const journey = await repository.setJourneyStatus(created.id, 'complete');
+  return { journey, moment };
+}
+
 function withMutationAfterReorderPreflight(
   db: IDBPDatabase<SoundPassportDb>,
   afterPreflight: () => Promise<void>,
@@ -226,6 +238,93 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('batch-creates moments, advances the story version, and demotes an invalid complete journey atomically', async () => {
+    const { db, repository } = await openRepository('add-moments-story-version');
+    const { journey: plannedJourney } = await createCompleteValidJourney(repository);
+
+    await repository.addMoments(plannedJourney.id, [photoInput('new-invalid.jpg')]);
+
+    const story = await repository.getPrivateJourneyStory(plannedJourney.id);
+    expect(story?.journey.status).toBe('review');
+    expect(Date.parse(story!.journey.updatedAt)).toBeGreaterThan(Date.parse(plannedJourney.updatedAt));
+    await expect(repository.updateJourney(
+      plannedJourney.id,
+      { summary: 'Stale editor save' },
+      { expectedUpdatedAt: plannedJourney.updatedAt },
+    )).rejects.toMatchObject({ name: 'JourneyVersionConflictError' });
+    db.close();
+  });
+
+  it('advances the story version for moment and song updates so a planned editor save rejects', async () => {
+    const { db, repository } = await openRepository('update-moment-story-version');
+    const { journey: plannedJourney, moment } = await createCompleteValidJourney(repository);
+
+    await repository.updateMoment(moment.id, {
+      localDate: '2026-02-01',
+      song: { title: 'Concurrent title', artist: 'Concurrent artist', sourceUrl: '' },
+    });
+
+    const story = await repository.getPrivateJourneyStory(plannedJourney.id);
+    expect(story?.journey.status).toBe('review');
+    expect(story?.moments[0].song.title).toBe('Concurrent title');
+    expect(Date.parse(story!.journey.updatedAt)).toBeGreaterThan(Date.parse(plannedJourney.updatedAt));
+    await expect(repository.updateJourney(
+      plannedJourney.id,
+      { title: 'Editor planned against the old story' },
+      { expectedUpdatedAt: plannedJourney.updatedAt },
+    )).rejects.toMatchObject({
+      name: 'JourneyVersionConflictError',
+      actualUpdatedAt: story?.journey.updatedAt,
+    });
+    expect((await repository.getPrivateJourneyStory(plannedJourney.id))?.journey.title).toBe(plannedJourney.title);
+    db.close();
+  });
+
+  it('advances the story version and revalidates a complete journey while reordering', async () => {
+    const { db, repository } = await openRepository('reorder-story-version');
+    const created = await repository.createJourney(journeyInput());
+    const moments = await repository.addMoments(created.id, [photoInput('one.jpg'), photoInput('two.jpg')]);
+    const plannedJourney = await repository.setJourneyStatus(created.id, 'complete');
+
+    await repository.reorderMoments(created.id, [moments[1].id, moments[0].id]);
+
+    const story = await repository.getPrivateJourneyStory(created.id);
+    expect(story?.moments.map(({ id }) => id)).toEqual([moments[1].id, moments[0].id]);
+    expect(story?.journey.status).toBe('review');
+    expect(Date.parse(story!.journey.updatedAt)).toBeGreaterThan(Date.parse(plannedJourney.updatedAt));
+    db.close();
+  });
+
+  it('advances the story version and demotes a complete journey when deleting its last moment', async () => {
+    const { db, repository } = await openRepository('delete-moment-story-version');
+    const { journey: plannedJourney, moment } = await createCompleteValidJourney(repository);
+
+    await repository.deleteMoment(moment.id);
+
+    const story = await repository.getPrivateJourneyStory(plannedJourney.id);
+    expect(story?.moments).toEqual([]);
+    expect(story?.journey.status).toBe('review');
+    expect(Date.parse(story!.journey.updatedAt)).toBeGreaterThan(Date.parse(plannedJourney.updatedAt));
+    db.close();
+  });
+
+  it('rolls back a moment write when post-mutation story validation cannot join its song', async () => {
+    const { db, repository } = await openRepository('moment-validation-rollback');
+    const journey = await repository.createJourney(journeyInput());
+    const [moment] = await repository.addMoments(journey.id, [photoInput('rollback.jpg')]);
+    const corruptTx = db.transaction('songs', 'readwrite');
+    await corruptTx.store.delete(moment.songReferenceId);
+    await corruptTx.done;
+    const beforeAttempt = await repository.exportSnapshot();
+
+    await expect(repository.updateMoment(moment.id, { caption: 'Must roll back' })).rejects.toThrow(
+      /references missing song/i,
+    );
+
+    expect(await repository.exportSnapshot()).toEqual(beforeAttempt);
+    db.close();
+  });
+
   it('rejects incomplete or foreign reorder sets and writes contiguous sort orders', async () => {
     const { db, repository } = await openRepository('reorder');
     const journey = await repository.createJourney(journeyInput({ title: 'First' }));
@@ -322,11 +421,12 @@ describe('indexedDbJourneyRepository', () => {
     const retainedJourney = await repository.createJourney(journeyInput({ title: 'Retain' }));
     await repository.addMoments(deletedJourney.id, [photoInput('delete.jpg')]);
     const [retainedMoment] = await repository.addMoments(retainedJourney.id, [photoInput('retain.jpg')]);
+    const retainedStory = await repository.getPrivateJourneyStory(retainedJourney.id);
 
     await repository.deleteJourney(deletedJourney.id);
     const snapshot = await repository.exportSnapshot();
 
-    expect(snapshot.journeys).toEqual([retainedJourney]);
+    expect(snapshot.journeys).toEqual([retainedStory?.journey]);
     expect(snapshot.moments).toEqual([retainedMoment]);
     expect(snapshot.songs.map((song) => song.id)).toEqual([retainedMoment.songReferenceId]);
     expect(snapshot.photos.map((photo) => photo.id)).toEqual([retainedMoment.photoAssetId]);
