@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
@@ -110,13 +110,20 @@ function LocationProbe() {
   return <output aria-label="目前路徑">{useLocation().pathname}</output>;
 }
 
+function PushAway() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate('/newer')}>較新的前往</button>;
+}
+
 function renderPreview(editor: JourneyEditorRepository) {
   return render(
     <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
       <MemoryRouter initialEntries={['/studio/journeys/private-coast/preview']}>
+        <PushAway />
         <Routes>
           <Route path="/studio/journeys/:journeyId/preview" element={<JourneyPreviewPage />} />
           <Route path="/journeys/:journeyId" element={<LocationProbe />} />
+          <Route path="/newer" element={<h1>較新的目的地</h1>} />
         </Routes>
       </MemoryRouter>
     </RepositoryProvider>,
@@ -201,6 +208,27 @@ describe('JourneyPreviewPage', () => {
     await user.click(within(dialog).getByRole('button', { name: '確認完成旅程' }));
     expect(setJourneyStatus).toHaveBeenCalledTimes(2);
     expect(await screen.findByLabelText('目前路徑')).toHaveTextContent(`/journeys/${reviewStory.journey.id}`);
+  });
+
+  it('does not let deferred completion redirect override a newer PUSH', async () => {
+    const user = userEvent.setup();
+    const reviewStory = { ...story, journey: { ...story.journey, status: 'review' as const } };
+    const request = deferred<Journey>();
+    renderPreview(editorStub(reviewStory, { setJourneyStatus: vi.fn(() => request.promise) }));
+
+    await user.click(await screen.findByRole('button', { name: '完成旅程' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '確認完成旅程' }));
+    fireEvent.click(screen.getByRole('button', { name: '較新的前往' }));
+    expect(screen.getByRole('heading', { name: '較新的目的地' })).toBeInTheDocument();
+
+    await act(async () => {
+      request.resolve({ ...reviewStory.journey, status: 'complete' });
+      await request.promise;
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole('heading', { name: '較新的目的地' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('目前路徑')).not.toBeInTheDocument();
   });
 
   it('does not offer completion for an invalid review loaded directly', async () => {

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DragEndEvent } from '@dnd-kit/core';
@@ -90,6 +90,15 @@ async function flushMicrotasks() {
   for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
 
+function selectionButtons() {
+  return [...document.querySelectorAll<HTMLButtonElement>('[data-moment-select]')];
+}
+
+function orderedRowIds() {
+  return [...document.querySelectorAll<HTMLElement>('[data-moment-row]')]
+    .map((row) => row.dataset.id);
+}
+
 function SelectableMomentList({ onSelect }: { onSelect: (momentId: string) => void }) {
   const [selectedMomentId, setSelectedMomentId] = useState('first');
   return (
@@ -158,7 +167,7 @@ describe('MomentList', () => {
     await user.click(screen.getByRole('button', { name: '將第二則上移' }));
 
     expect(reorderMoments).toHaveBeenCalledWith('journey-1', ['second', 'first', 'third']);
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'second',
       'first',
       'third',
@@ -190,7 +199,7 @@ describe('MomentList', () => {
       'journey-1',
       ['third', 'first', 'second'],
     ));
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'third',
       'first',
       'second',
@@ -215,32 +224,56 @@ describe('MomentList', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it('uses one roving tab stop and Arrow, Home, and End keys to focus and select options', async () => {
+  it('uses semantic list rows with independent selection and ordering controls', () => {
+    render(
+      <MomentList
+        journeyId="journey-1"
+        moments={moments}
+        selectedMomentId="first"
+        repository={{ reorderMoments: vi.fn(async () => undefined) }}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const list = screen.getByRole('list', { name: '時刻排序' });
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows).toHaveLength(3);
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('option')).not.toBeInTheDocument();
+    rows.forEach((row, index) => {
+      const select = within(row).getByRole('button', { name: new RegExp(`選取第${index + 1}則時刻`) });
+      expect(select).toHaveAttribute('data-moment-select');
+      expect(within(select).queryByRole('button')).not.toBeInTheDocument();
+      expect(within(row).getByRole('button', { name: new RegExp(`拖曳第[一二三]則`) })).not.toBe(select);
+    });
+  });
+
+  it('uses one roving selection button and Arrow, Home, and End keys to focus and select rows', async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(<SelectableMomentList onSelect={onSelect} />);
-    const options = screen.getAllByRole('option');
+    const options = selectionButtons();
 
     expect(options.map((option) => option.tabIndex)).toEqual([0, -1, -1]);
     options[0].focus();
     await user.keyboard('{ArrowUp}');
     expect(options[0]).toHaveFocus();
-    expect(options[0]).toHaveAttribute('aria-selected', 'true');
+    expect(options[0]).toHaveAttribute('aria-pressed', 'true');
 
     await user.keyboard('{ArrowDown}');
     expect(options[1]).toHaveFocus();
-    expect(options[1]).toHaveAttribute('aria-selected', 'true');
+    expect(options[1]).toHaveAttribute('aria-pressed', 'true');
     expect(options.map((option) => option.tabIndex)).toEqual([-1, 0, -1]);
 
     await user.keyboard('{End}');
     expect(options[2]).toHaveFocus();
-    expect(options[2]).toHaveAttribute('aria-selected', 'true');
+    expect(options[2]).toHaveAttribute('aria-pressed', 'true');
     await user.keyboard('{ArrowDown}');
     expect(options[2]).toHaveFocus();
 
     await user.keyboard('{Home}');
     expect(options[0]).toHaveFocus();
-    expect(options[0]).toHaveAttribute('aria-selected', 'true');
+    expect(options[0]).toHaveAttribute('aria-pressed', 'true');
     expect(onSelect.mock.calls.map(([id]) => id)).toEqual(['first', 'second', 'third', 'third', 'first']);
   });
 
@@ -248,16 +281,16 @@ describe('MomentList', () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(<SelectableMomentList onSelect={onSelect} />);
-    const options = screen.getAllByRole('option');
+    const options = selectionButtons();
 
     options[1].focus();
     await user.keyboard('{Enter}');
-    expect(options[1]).toHaveAttribute('aria-selected', 'true');
+    expect(options[1]).toHaveAttribute('aria-pressed', 'true');
     expect(options[1].tabIndex).toBe(0);
 
     options[2].focus();
     await user.keyboard(' ');
-    expect(options[2]).toHaveAttribute('aria-selected', 'true');
+    expect(options[2]).toHaveAttribute('aria-pressed', 'true');
     expect(options[2].tabIndex).toBe(0);
 
     const callsBeforeDrag = onSelect.mock.calls.length;
@@ -284,7 +317,7 @@ describe('MomentList', () => {
     fireEvent.click(screen.getByRole('button', { name: '將第一則下移' }));
     await act(flushMicrotasks);
 
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'third',
       'second',
       'first',
@@ -317,7 +350,7 @@ describe('MomentList', () => {
     });
     expect(onReordered).toHaveBeenCalledTimes(1);
     expect(onReordered).toHaveBeenCalledWith(['third', 'second', 'first']);
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'third',
       'second',
       'first',
@@ -346,7 +379,7 @@ describe('MomentList', () => {
     await waitFor(() => expect(reorderMoments).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(onReordered).toHaveBeenCalledWith(['second', 'third', 'first']));
     expect(screen.queryByText('無法儲存時刻順序，請再試一次。')).not.toBeInTheDocument();
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'second',
       'third',
       'first',
@@ -369,15 +402,16 @@ describe('MomentList', () => {
       />,
     );
 
-    const firstOption = screen.getAllByRole('option')[0];
-    const moveDown = firstOption.querySelector<HTMLButtonElement>('.moment-order-actions button:last-child');
+    const firstOption = document.querySelector<HTMLElement>('[data-moment-row]');
+    expect(firstOption).not.toBeNull();
+    const moveDown = firstOption!.querySelector<HTMLButtonElement>('.moment-order-actions button:last-child');
     expect(moveDown).not.toBeNull();
     fireEvent.click(moveDown!);
     await act(flushMicrotasks);
 
     expect(onBeforeReorder).toHaveBeenCalledTimes(1);
     expect(reorderMoments).not.toHaveBeenCalled();
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'second',
       'first',
       'third',
@@ -391,7 +425,7 @@ describe('MomentList', () => {
 
     expect(onBeforeReorder).toHaveBeenCalledTimes(2);
     expect(reorderMoments).toHaveBeenCalledWith('journey-1', ['second', 'first', 'third']);
-    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(orderedRowIds()).toEqual([
       'second',
       'first',
       'third',
@@ -448,5 +482,91 @@ describe('MomentList', () => {
     await waitFor(() => expect(onReordered).toHaveBeenCalledTimes(2));
     expect(reorderMoments).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('順序已儲存，但重新載入失敗。')).not.toBeInTheDocument();
+  });
+
+  it('registers pending reorder work and keeps flush pending through persistence and refresh', async () => {
+    const write = deferred<void>();
+    const refresh = deferred<void>();
+    const registrations: Array<{ dirty: boolean; flush: () => Promise<void> } | undefined> = [];
+    render(
+      <MomentList
+        journeyId="journey-1"
+        moments={moments}
+        selectedMomentId="first"
+        repository={{ reorderMoments: vi.fn(() => write.promise) }}
+        onSelect={vi.fn()}
+        onReordered={() => refresh.promise}
+        {...({ onPendingChange: (registration: any) => registrations.push(registration) } as any)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    await act(flushMicrotasks);
+    const pending = registrations.at(-1);
+    expect(pending).toMatchObject({ dirty: true });
+    let flushed = false;
+    const flush = pending!.flush().then(() => { flushed = true; });
+
+    await act(async () => {
+      write.resolve();
+      await write.promise;
+      await flushMicrotasks();
+    });
+    expect(flushed).toBe(false);
+
+    await act(async () => {
+      refresh.resolve();
+      await refresh.promise;
+      await flush;
+    });
+    expect(flushed).toBe(true);
+    expect(registrations.at(-1)).toMatchObject({ dirty: false });
+  });
+
+  it.each([
+    {
+      label: 'concurrent add',
+      currentMoments: [...moments, makeMoment('fourth', '第四首', 3)],
+      expected: ['second', 'first', 'third', 'fourth'],
+    },
+    {
+      label: 'concurrent delete',
+      currentMoments: [moments[0], moments[2]],
+      expected: ['first', 'third'],
+    },
+  ])('rebases the requested relative order after a $label', async ({ currentMoments, expected }) => {
+    const conflict = Object.assign(new Error('moment set changed'), { name: 'MomentOrderConflictError' });
+    const reorderMoments = vi.fn()
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(undefined);
+    const getPrivateJourneyStory = vi.fn(async () => ({
+      journey: {
+        id: 'journey-1', title: '旅程', countryCode: 'TW', countryName: '臺灣',
+        countryCoordinates: [121, 25] as [number, number], cityLabels: ['台北'],
+        startDate: '2026-07-11', endDate: '2026-07-20', summary: '', status: 'draft' as const,
+        createdAt: '2026-07-11T00:00:00.000Z', updatedAt: '2026-07-13T00:00:00.000Z',
+        source: 'private' as const,
+      },
+      moments: currentMoments,
+    }));
+    const onReordered = vi.fn(async () => undefined);
+    render(
+      <MomentList
+        journeyId="journey-1"
+        moments={moments}
+        selectedMomentId="first"
+        repository={{ reorderMoments, getPrivateJourneyStory } as any}
+        onSelect={vi.fn()}
+        onReordered={onReordered}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+
+    await waitFor(() => expect(reorderMoments).toHaveBeenCalledTimes(2));
+    expect(getPrivateJourneyStory).toHaveBeenCalledWith('journey-1');
+    expect(reorderMoments).toHaveBeenNthCalledWith(1, 'journey-1', ['second', 'first', 'third']);
+    expect(reorderMoments).toHaveBeenNthCalledWith(2, 'journey-1', expected);
+    expect(onReordered).toHaveBeenCalledWith(expected);
   });
 });

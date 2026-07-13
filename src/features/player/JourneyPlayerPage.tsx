@@ -15,18 +15,26 @@ export function JourneyPlayerPage() {
   const [loaded, setLoaded] = useState(false);
   const [resolvedJourneyId, setResolvedJourneyId] = useState<string>();
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [loadError, setLoadError] = useState(false);
+  const [retryGeneration, setRetryGeneration] = useState(0);
 
   useEffect(() => {
     let isCurrent = true;
     setStory(undefined);
     setLoaded(false);
+    setLoadError(false);
     setCurrentIndex(0);
 
     void repository.getJourneyStory(journeyId)
-      .catch(() => undefined)
       .then((value) => {
         if (!isCurrent) return;
         setStory(value);
+        setResolvedJourneyId(journeyId);
+        setLoaded(true);
+      })
+      .catch(() => {
+        if (!isCurrent) return;
+        setLoadError(true);
         setResolvedJourneyId(journeyId);
         setLoaded(true);
       });
@@ -34,9 +42,21 @@ export function JourneyPlayerPage() {
     return () => {
       isCurrent = false;
     };
-  }, [journeyId, repository, repositoryRevision]);
+  }, [journeyId, repository, repositoryRevision, retryGeneration]);
 
   if (!loaded || resolvedJourneyId !== journeyId) return <section className="page" aria-label="載入播放器" />;
+  if (loadError) {
+    return (
+      <section className="page empty-state">
+        <h1>無法讀取旅程</h1>
+        <button
+          type="button"
+          className="secondary-command"
+          onClick={() => setRetryGeneration((current) => current + 1)}
+        >重新讀取</button>
+      </section>
+    );
+  }
   if (!story) {
     return (
       <section className="page empty-state">

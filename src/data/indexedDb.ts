@@ -1,9 +1,9 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction } from 'idb';
 import type { Journey, JourneyStatus, Moment, PhotoAsset, SongReference } from '../domain/model';
-import type { JourneyAutosaveOutboxRecord } from './ports';
+import type { JourneyAutosaveOutboxRecord, MomentAutosaveOutboxRecord } from './ports';
 
 export const DB_NAME = 'sound-passport';
-export const DB_VERSION = 5;
+export const DB_VERSION = 6;
 export const LEGACY_OUTBOX_OWNER_ID = 'legacy-v3';
 export const DATABASE_BLOCKED_MESSAGE = '請關閉其他分頁後重新嘗試';
 
@@ -39,9 +39,23 @@ export interface SoundPassportDb extends DBSchema {
       journeyId: string;
     };
   };
+  momentAutosaveOutbox: {
+    key: [string, string];
+    value: MomentAutosaveOutboxRecord;
+    indexes: {
+      journeyId: string;
+      momentId: string;
+    };
+  };
 }
 
-type SoundPassportStore = 'journeys' | 'moments' | 'songs' | 'photos' | 'journeyAutosaveOutbox';
+type SoundPassportStore =
+  | 'journeys'
+  | 'moments'
+  | 'songs'
+  | 'photos'
+  | 'journeyAutosaveOutbox'
+  | 'momentAutosaveOutbox';
 
 function createVersion1Stores(db: IDBPDatabase<SoundPassportDb>) {
   db.createObjectStore('journeys', { keyPath: 'id' });
@@ -114,6 +128,14 @@ async function migrateToVersion5(
   }
 }
 
+function migrateToVersion6(db: IDBPDatabase<SoundPassportDb>) {
+  const store = db.createObjectStore('momentAutosaveOutbox', {
+    keyPath: ['momentId', 'ownerId'],
+  });
+  store.createIndex('journeyId', 'journeyId');
+  store.createIndex('momentId', 'momentId');
+}
+
 export function openSoundPassportDb(name = DB_NAME) {
   let blocked = false;
   let closeWhenOpened = false;
@@ -129,6 +151,7 @@ export function openSoundPassportDb(name = DB_NAME) {
         if (version2Migration) await version2Migration;
         if (oldVersion < 4) await migrateToVersion4(db, tx);
         if (oldVersion < 5) await migrateToVersion5(tx);
+        if (oldVersion < 6) migrateToVersion6(db);
       };
       void migrate().catch(() => {
         try {

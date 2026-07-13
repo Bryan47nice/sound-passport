@@ -37,6 +37,19 @@ interface NavigationGuardContextValue {
   routeLocation: Location;
   requestNavigation: (request: AppNavigationRequest) => void;
   updateGuard: (owner: symbol, registration: NavigationGuardRegistration | undefined) => void;
+  captureCommand: () => ProviderCommandToken;
+  isCommandCurrent: (token: ProviderCommandToken) => boolean;
+}
+
+interface ProviderCommandToken {
+  generation: number;
+  routeKey: string;
+}
+
+export interface RouteCommandToken {
+  readonly owner: symbol;
+  readonly routeKey: string;
+  readonly provider?: ProviderCommandToken;
 }
 
 interface HistoryEntry {
@@ -127,6 +140,7 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
   const settleTransitionRef = useRef<(transition: ActiveTransition, succeeded: boolean) => void>(() => {});
   const applySuccessfulTransitionRef = useRef<(transition: ActiveTransition) => void>(() => {});
   const startTransitionRef = useRef<(desired: DesiredTransition) => void>(() => {});
+  const navigationGenerationRef = useRef(0);
 
   actualEntryRef.current = historyEntry(location);
 
@@ -297,6 +311,7 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
   }, []);
 
   const requestNavigation = useCallback((request: AppNavigationRequest) => {
+    navigationGenerationRef.current += 1;
     const activeTransition = transitionRef.current;
     if (activeTransition) {
       if (activeTransition.phase === 'flushing' || activeTransition.phase === 'settling-success') {
@@ -328,6 +343,9 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
     }
 
     const activeTransition = transitionRef.current;
+    if (!sameHistoryEntry(actual, committedEntryRef.current)) {
+      navigationGenerationRef.current += 1;
+    }
     if (activeTransition) {
       if (
         navigationType === NavigationType.Pop &&
@@ -366,11 +384,24 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [guardDirty]);
 
+  const captureCommand = useCallback((): ProviderCommandToken => ({
+    generation: navigationGenerationRef.current,
+    routeKey: committedEntryRef.current.location.key,
+  }), []);
+
+  const isCommandCurrent = useCallback((token: ProviderCommandToken) => (
+    mountedRef.current
+    && token.generation === navigationGenerationRef.current
+    && token.routeKey === committedEntryRef.current.location.key
+  ), []);
+
   const value = useMemo<NavigationGuardContextValue>(() => ({
     routeLocation,
     requestNavigation,
     updateGuard,
-  }), [requestNavigation, routeLocation, updateGuard]);
+    captureCommand,
+    isCommandCurrent,
+  }), [captureCommand, isCommandCurrent, requestNavigation, routeLocation, updateGuard]);
 
   return <NavigationGuardContext.Provider value={value}>{children}</NavigationGuardContext.Provider>;
 }
@@ -382,6 +413,35 @@ export function useNavigationGuardRegistration() {
 export function useGuardedRouteLocation() {
   const location = useLocation();
   return useContext(NavigationGuardContext)?.routeLocation ?? location;
+}
+
+export function useRouteCommandGuard() {
+  const location = useLocation();
+  const context = useContext(NavigationGuardContext);
+  const ownerRef = useRef(Symbol('route-command-owner'));
+  const mountedRef = useRef(true);
+  const locationKeyRef = useRef(location.key);
+  locationKeyRef.current = location.key;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const capture = useCallback((): RouteCommandToken => ({
+    owner: ownerRef.current,
+    routeKey: locationKeyRef.current,
+    provider: context?.captureCommand(),
+  }), [context]);
+
+  const isCurrent = useCallback((token: RouteCommandToken) => (
+    mountedRef.current
+    && token.owner === ownerRef.current
+    && token.routeKey === locationKeyRef.current
+    && (!token.provider || context?.isCommandCurrent(token.provider) === true)
+  ), [context]);
+
+  return useMemo(() => ({ capture, isCurrent }), [capture, isCurrent]);
 }
 
 export function useGuardedNavigate(): NavigateFunction {

@@ -6,11 +6,13 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useParams } from 'react-router';
+import { useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
 import {
   useInvalidateRepositoryQueries,
   useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
+  useOptionalMomentAutosaveOutbox,
   usePrivateStorageError,
 } from '../../data/RepositoryContext';
 import {
@@ -20,6 +22,7 @@ import {
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type JourneyEditorRepository,
+  type MomentAutosaveOutboxPort,
 } from '../../data/ports';
 import {
   validateJourneyForReview,
@@ -29,7 +32,7 @@ import type { Journey, JourneyMoment, JourneyPatch, JourneyStory, Moment } from 
 import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { JourneyDetailsForm } from './JourneyDetailsForm';
 import { MomentEditor, type MomentAutosaveRegistration } from './MomentEditor';
-import { MomentList } from './MomentList';
+import { MomentList, type MomentReorderRegistration } from './MomentList';
 import { PhotoDropzone } from './PhotoDropzone';
 import {
   createJourneyPatchEnvelope,
@@ -202,6 +205,7 @@ function JourneyEditorWorkspace({
   isMobile,
   outbox,
   outboxOwnerId,
+  momentOutbox,
   recoveredOutbox,
   story,
 }: {
@@ -209,10 +213,12 @@ function JourneyEditorWorkspace({
   isMobile: boolean;
   outbox: JourneyAutosaveOutboxPort;
   outboxOwnerId: string;
+  momentOutbox?: MomentAutosaveOutboxPort;
   recoveredOutbox?: JourneyAutosaveOutboxRecord;
   story: JourneyStory;
 }) {
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
+  const routeCommand = useRouteCommandGuard();
   const invalidateQueries = useInvalidateRepositoryQueries();
   const recoveredEnvelope = recoveredOutbox?.envelope;
   const initialDraft = recoveredEnvelope
@@ -224,6 +230,7 @@ function JourneyEditorWorkspace({
   const [demotionNotice, setDemotionNotice] = useState('');
   const [selectedMomentId, setSelectedMomentId] = useState(story.moments[0]?.id);
   const [momentDirty, setMomentDirty] = useState(false);
+  const [reorderDirty, setReorderDirty] = useState(false);
   const [validationIssues, setValidationIssues] = useState<JourneyValidationIssue[]>([]);
   const [validationFocus, setValidationFocus] = useState<{ field: string; momentId?: string }>();
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -235,6 +242,7 @@ function JourneyEditorWorkspace({
   const mountedRef = useRef(false);
   const storyRefreshGenerationRef = useRef(0);
   const momentAutosaveRef = useRef<MomentAutosaveRegistration | undefined>(undefined);
+  const momentReorderRef = useRef<MomentReorderRegistration | undefined>(undefined);
   const editorPageRef = useRef<HTMLElement>(null);
   const previewBusyRef = useRef(false);
   selectedMomentIdRef.current = selectedMomentId;
@@ -363,11 +371,19 @@ function JourneyEditorWorkspace({
   const flushMomentBeforeReorder = useCallback(() => (
     momentAutosaveRef.current?.flush() ?? Promise.resolve()
   ), []);
+  const handleReorderPendingChange = useCallback((registration: MomentReorderRegistration | undefined) => {
+    momentReorderRef.current = registration;
+    setReorderDirty(registration?.dirty ?? false);
+  }, []);
   const flushWorkspace = useCallback(async () => {
     await autosave.flush();
     await (momentAutosaveRef.current?.flush() ?? Promise.resolve());
+    await (momentReorderRef.current?.flush() ?? Promise.resolve());
   }, [autosave.flush]);
-  useDirtyNavigationGuard({ dirty: autosave.dirty || momentDirty, flush: flushWorkspace });
+  useDirtyNavigationGuard({
+    dirty: autosave.dirty || momentDirty || reorderDirty,
+    flush: flushWorkspace,
+  });
 
   const markFieldRevisions = useCallback((patch: JourneyUserPatch, revision: number) => {
     journeyUserPatchKeys.forEach((key) => {
@@ -485,7 +501,7 @@ function JourneyEditorWorkspace({
     if (!page) return;
     let target: HTMLElement | undefined;
     if (pending.field === 'photo' && pending.momentId) {
-      target = [...page.querySelectorAll<HTMLElement>('[role="option"][data-id]')]
+      target = [...page.querySelectorAll<HTMLElement>('[data-moment-select][data-id]')]
         .find((option) => option.dataset.id === pending.momentId);
     } else {
       target = page.querySelector<HTMLElement>(`[data-validation-field="${pending.field}"]`) ?? undefined;
@@ -552,6 +568,7 @@ function JourneyEditorWorkspace({
 
   const openPreview = useCallback(async () => {
     if (previewBusyRef.current) return;
+    const command = routeCommand.capture();
     previewBusyRef.current = true;
     setPreviewBusy(true);
     setPreviewError('');
@@ -575,8 +592,11 @@ function JourneyEditorWorkspace({
         });
         invalidateQueries();
       }
-      navigate(`/studio/journeys/${story.journey.id}/preview`);
+      if (routeCommand.isCurrent(command)) {
+        navigate(`/studio/journeys/${story.journey.id}/preview`);
+      }
     } catch (error) {
+      if (!routeCommand.isCurrent(command)) return;
       if (error instanceof JourneyValidationError) {
         const refreshed = await editor.getPrivateJourneyStory(story.journey.id).catch(() => undefined);
         presentValidation(error.issues, refreshed ?? currentStory ?? editorStory);
@@ -590,7 +610,7 @@ function JourneyEditorWorkspace({
       previewBusyRef.current = false;
       setPreviewBusy(false);
     }
-  }, [editor, editorStory, flushWorkspace, invalidateQueries, navigate, presentValidation, story.journey.id]);
+  }, [editor, editorStory, flushWorkspace, invalidateQueries, navigate, presentValidation, routeCommand, story.journey.id]);
 
   useEffect(() => {
     if (!selectedMomentId || !editorStory.moments.some((moment) => moment.id === selectedMomentId)) {
@@ -630,6 +650,7 @@ function JourneyEditorWorkspace({
           <button
             className="primary-command"
             type="button"
+            aria-label="前往預覽"
             disabled={previewBusy}
             onClick={() => void openPreview()}
           >
@@ -666,6 +687,7 @@ function JourneyEditorWorkspace({
           onSelect={selectMoment}
           onBeforeReorder={flushMomentBeforeReorder}
           onOrderChange={updateMomentOrder}
+          onPendingChange={handleReorderPendingChange}
           onReordered={(orderedIds) => {
             invalidateQueries();
             return refreshStory({ expectedMomentOrder: orderedIds }).then(() => undefined);
@@ -708,6 +730,8 @@ function JourneyEditorWorkspace({
                 }).then(() => undefined);
               }}
               onAutosaveChange={handleMomentAutosaveChange}
+              recovery={momentOutbox}
+              recoveryOwnerId={outboxOwnerId}
             />
           ) : <p className="muted">加入或選取時刻後即可編輯</p>}
         </section>
@@ -720,6 +744,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   const { journeyId = '' } = useParams();
   const editor = useOptionalJourneyEditorRepository();
   const outbox = useOptionalJourneyAutosaveOutbox();
+  const momentOutbox = useOptionalMomentAutosaveOutbox();
   const privateStorageError = usePrivateStorageError();
   const isMobile = useMobileStudio();
   const ownerClaimState = useJourneyOutboxOwnerClaim(editor, outbox);
@@ -894,6 +919,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
       isMobile={isMobile}
       outbox={outbox}
       outboxOwnerId={outboxOwnerId!}
+      momentOutbox={momentOutbox}
       recoveredOutbox={currentLoadState.recoveredOutbox}
       story={currentLoadState.story}
     />

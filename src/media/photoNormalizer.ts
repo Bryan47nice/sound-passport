@@ -1,10 +1,12 @@
 import type { NormalizedPhotoInput } from '../domain/model';
+import { PHOTO_LIMITS } from './photoLimits';
 
-export const MAX_PHOTO_INPUT_BYTES = 25 * 1024 * 1024;
-const MAX_PHOTO_EDGE = 2560;
+export const MAX_PHOTO_INPUT_BYTES = PHOTO_LIMITS.maxPhotoBytes;
+const MAX_PHOTO_EDGE = PHOTO_LIMITS.maxPhotoEdge;
 
 export type PhotoNormalizationErrorCode =
   | 'too_large'
+  | 'heic_unsupported'
   | 'unsupported_type'
   | 'decode_failed'
   | 'encode_failed';
@@ -15,6 +17,7 @@ export class PhotoNormalizationError extends Error {
   constructor(code: PhotoNormalizationErrorCode) {
     const messages: Record<PhotoNormalizationErrorCode, string> = {
       too_large: '照片檔案超過 25 MiB 上限。',
+      heic_unsupported: '目前不支援 HEIC 或 HEIF，請先轉換成 JPEG 或 PNG 再加入。',
       unsupported_type: '請選擇可支援的圖片檔案。',
       decode_failed: '無法讀取這張照片，請改用其他圖片檔案。',
       encode_failed: '無法處理這張照片，請稍後再試。',
@@ -27,6 +30,9 @@ export class PhotoNormalizationError extends Error {
 
 export function validatePhotoFile(file: File): void {
   if (file.size === 0) throw new PhotoNormalizationError('decode_failed');
+  if (/\.(?:heic|heif)$/i.test(file.name) || /image\/(?:heic|heif)/i.test(file.type)) {
+    throw new PhotoNormalizationError('heic_unsupported');
+  }
   if (file.size > MAX_PHOTO_INPUT_BYTES) throw new PhotoNormalizationError('too_large');
   if (!file.type.startsWith('image/')) throw new PhotoNormalizationError('unsupported_type');
 }
@@ -77,6 +83,7 @@ export async function normalizePhoto(file: File): Promise<NormalizedPhotoInput> 
     context.drawImage(bitmap, 0, 0, width, height);
     const contentType = hasTransparency(context, width, height) ? 'image/png' : 'image/webp';
     const blob = await encodeCanvas(canvas, contentType);
+    if (blob.size > PHOTO_LIMITS.maxPhotoBytes) throw new PhotoNormalizationError('too_large');
 
     return {
       blob,

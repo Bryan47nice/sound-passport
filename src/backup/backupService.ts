@@ -6,6 +6,11 @@ import {
   type PrivateDataPrimaryKeys,
 } from '../data/ports';
 import type { PhotoAsset, PrivateJourneySnapshot } from '../domain/model';
+import {
+  assertPrivateSnapshotSemantics,
+  SnapshotSemanticError,
+} from '../domain/privateSnapshotValidation';
+import { photoEnvelopeViolation } from '../media/photoLimits';
 import { inspectPhoto, type PhotoInspector } from '../media/photoInspector';
 import { BACKUP_LIMITS } from './backupLimits';
 import {
@@ -120,6 +125,34 @@ function validateRelationships(snapshot: PrivateJourneySnapshot) {
       throw new BackupError('relationship_error', 'A moment references a missing photo.');
     }
   }
+
+  try {
+    assertPrivateSnapshotSemantics(snapshot);
+  } catch (error) {
+    if (error instanceof SnapshotSemanticError) {
+      throw new BackupError(
+        error.kind === 'invalid' ? 'invalid_manifest' : 'relationship_error',
+        error.message,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+function assertPhotoCollectionLimits(photos: readonly PhotoAsset[]) {
+  const violation = photoEnvelopeViolation(photos);
+  if (violation) {
+    throw new BackupError('limit_exceeded', `Photo collection exceeds the ${violation} backup limit.`);
+  }
+}
+
+function assertManifestSize(manifest: BackupManifest) {
+  const bytes = strToU8(JSON.stringify(manifest));
+  if (bytes.byteLength > BACKUP_LIMITS.maxManifestBytes) {
+    throw new BackupError('limit_exceeded', 'The backup manifest exceeds the metadata limit.');
+  }
+  return bytes;
 }
 
 function cloneSnapshot(snapshot: PrivateJourneySnapshot): PrivateJourneySnapshot {
@@ -230,6 +263,26 @@ export class BackupService {
   async exportBackup(): Promise<Blob> {
     const snapshot = cloneSnapshot(await this.privateData.exportSnapshot());
     validateRelationships(snapshot);
+    assertPhotoCollectionLimits(snapshot.photos);
+
+    const metadataPhotos = snapshot.photos.map((photo) => {
+      assertBackupPhotoEnvelopeLimits(photo, photo.blob.size);
+      const path = expectedPhotoPath(photo);
+      const { blob: _blob, ...metadata } = photo;
+      return { ...metadata, path, sha256: '0'.repeat(64) };
+    });
+    const metadataManifest = parseBackupManifest({
+      format: BACKUP_FORMAT,
+      schemaVersion: BACKUP_SCHEMA_VERSION,
+      exportedAt: this.now().toISOString(),
+      appVersion: this.appVersion,
+      journeys: snapshot.journeys,
+      moments: snapshot.moments,
+      songs: snapshot.songs,
+      photos: metadataPhotos,
+    });
+    assertManifestSize(metadataManifest);
+
     const files: AsyncZippable = {};
     const photos: BackupManifest['photos'] = [];
 
@@ -253,7 +306,7 @@ export class BackupService {
       songs: snapshot.songs,
       photos,
     });
-    files['manifest.json'] = [strToU8(JSON.stringify(manifest)), { level: 0 }];
+    files['manifest.json'] = [assertManifestSize(manifest), { level: 0 }];
 
     try {
       const archive = await zipAsync(files);
@@ -292,6 +345,11 @@ export class BackupService {
       throw new BackupError('invalid_manifest', 'manifest.json is not valid JSON.', { cause });
     }
     const manifest = parseBackupManifest(parsed);
+    const declaredPhotos = manifest.photos.map((photo) => ({
+      ...photo,
+      blob: { size: photo.byteSize } as Blob,
+    }));
+    assertPhotoCollectionLimits(declaredPhotos);
     const metadataById = new Map(manifest.photos.map((photo) => [photo.id, photo]));
     const snapshot: PrivateJourneySnapshot = {
       journeys: manifest.journeys.map((journey) => ({ ...journey })),

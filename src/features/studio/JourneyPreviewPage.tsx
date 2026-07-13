@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
-import { GuardedLink } from '../../app/navigationGuard';
+import { useParams } from 'react-router';
+import { GuardedLink, useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
 import {
   useInvalidateRepositoryQueries,
   useOptionalJourneyEditorRepository,
@@ -35,7 +35,8 @@ function canEmbed(song: SongReference) {
 
 export function JourneyPreviewPage() {
   const { journeyId = '' } = useParams();
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
+  const routeCommand = useRouteCommandGuard();
   const editor = useOptionalJourneyEditorRepository();
   const privateStorageError = usePrivateStorageError();
   const repositoryRevision = useRepositoryRevision();
@@ -105,6 +106,7 @@ export function JourneyPreviewPage() {
   const completeJourney = async () => {
     if (completionPendingRef.current || story.journey.status !== 'review' || !validation?.valid) return;
     const targetJourneyId = story.journey.id;
+    const command = routeCommand.capture();
     completionPendingRef.current = true;
     setCompletionBusy(true);
     setCompletionError('');
@@ -113,9 +115,11 @@ export function JourneyPreviewPage() {
         expectedUpdatedAt: story.journey.updatedAt,
       });
       invalidateQueries();
-      if (journeyIdRef.current === targetJourneyId) navigate(`/journeys/${targetJourneyId}`);
+      if (journeyIdRef.current === targetJourneyId && routeCommand.isCurrent(command)) {
+        navigate(`/journeys/${targetJourneyId}`);
+      }
     } catch (error) {
-      if (journeyIdRef.current !== targetJourneyId) return;
+      if (journeyIdRef.current !== targetJourneyId || !routeCommand.isCurrent(command)) return;
       if (error instanceof JourneyVersionConflictError) {
         setCompletionError('旅程內容已更新，請重新載入後再完成。');
       } else if (error instanceof JourneyValidationError) {

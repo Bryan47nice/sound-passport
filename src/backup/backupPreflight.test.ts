@@ -196,6 +196,8 @@ describe('backup ZIP central-directory preflight', () => {
       maxCompressionRatio: 100,
       maxManifestBytes: 2 * 1024 * 1024,
       maxPhotoBytes: 25 * 1024 * 1024,
+      maxPhotoCount: 500,
+      maxTotalPhotoBytes: 250 * 1024 * 1024,
       maxPhotoEdge: 2560,
     });
   });

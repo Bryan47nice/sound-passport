@@ -1,10 +1,11 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
+import { StorageCapacityError } from '../../data/indexedDbJourneyRepository';
 import type { JourneyEditorRepository } from '../../data/ports';
 import { findCountry } from '../../domain/countryCatalog';
 import { JourneyCreatePage } from './JourneyCreatePage';
@@ -26,13 +27,25 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function renderPage(editor = editorStub()) {
+function NavigationControls() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" onClick={() => navigate('/newer')}>較新的前往</button>
+      <button type="button" onClick={() => navigate(-1)}>較新的返回</button>
+    </>
+  );
+}
+
+function renderPage(editor = editorStub(), initialEntries = ['/studio/journeys/new'], initialIndex = 0) {
   render(
     <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
-      <MemoryRouter initialEntries={['/studio/journeys/new']}>
+      <MemoryRouter initialEntries={initialEntries} initialIndex={initialIndex}>
+        <NavigationControls />
         <Routes>
           <Route path="/studio/journeys/new" element={<JourneyCreatePage />} />
           <Route path="/studio/journeys/:journeyId" element={<h1>編輯器目標</h1>} />
+          <Route path="/newer" element={<h1>較新的目的地</h1>} />
         </Routes>
       </MemoryRouter>
     </RepositoryProvider>,
@@ -104,6 +117,34 @@ describe('JourneyCreatePage', () => {
     expect(await screen.findByRole('heading', { name: '編輯器目標' })).toBeInTheDocument();
   });
 
+  it('does not let a deferred create redirect override a newer PUSH', async () => {
+    const user = userEvent.setup();
+    const creation = deferred<Awaited<ReturnType<JourneyEditorRepository['createJourney']>>>();
+    const editor = editorStub();
+    vi.mocked(editor.createJourney).mockImplementation(() => creation.promise);
+    renderPage(editor);
+    await user.type(screen.getByLabelText('旅程標題'), '春天散步');
+    await user.type(screen.getByLabelText('國家'), '日本');
+    await user.type(screen.getByLabelText('開始日期'), '2024-05-01');
+    await user.type(screen.getByLabelText('結束日期'), '2024-05-03');
+    await user.click(screen.getByRole('button', { name: '建立旅程' }));
+
+    await user.click(screen.getByRole('button', { name: '較新的前往' }));
+    expect(screen.getByRole('heading', { name: '較新的目的地' })).toBeInTheDocument();
+    await act(async () => {
+      creation.resolve({
+        id: 'new-journey', title: '春天散步', countryCode: 'JP', countryName: '日本', countryCoordinates: [139.6917, 35.6895],
+        cityLabels: [], startDate: '2024-05-01', endDate: '2024-05-03', summary: '', status: 'draft', source: 'private',
+        createdAt: '2024-05-01T00:00:00.000Z', updatedAt: '2024-05-01T00:00:00.000Z',
+      });
+      await creation.promise;
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole('heading', { name: '較新的目的地' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '編輯器目標' })).not.toBeInTheDocument();
+  });
+
   it('retries bootstrap when the editor service is unavailable', async () => {
     const user = userEvent.setup();
     const onBootstrapRetry = vi.fn();
@@ -115,6 +156,24 @@ describe('JourneyCreatePage', () => {
 
     await user.click(screen.getByRole('button', { name: '重新嘗試' }));
     expect(onBootstrapRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives centralized backup and deletion guidance for storage capacity failures', async () => {
+    const user = userEvent.setup();
+    const editor = editorStub();
+    vi.mocked(editor.createJourney).mockRejectedValue(new StorageCapacityError(
+      new DOMException('quota reached', 'QuotaExceededError'),
+    ));
+    renderPage(editor);
+    await user.type(screen.getByLabelText('旅程標題'), '春天散步');
+    await user.type(screen.getByLabelText('國家'), '日本');
+    await user.type(screen.getByLabelText('開始日期'), '2024-05-01');
+    await user.type(screen.getByLabelText('結束日期'), '2024-05-03');
+    await user.click(screen.getByRole('button', { name: '建立旅程' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '本機儲存空間不足，請先匯出備份並刪除不需要的旅程或照片，再重試。',
+    );
   });
 
   it('shows mobile guidance and suppresses every editable control', () => {

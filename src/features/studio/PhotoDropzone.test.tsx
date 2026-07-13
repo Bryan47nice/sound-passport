@@ -109,7 +109,7 @@ describe('PhotoDropzone', () => {
     const normalize = vi.fn()
       .mockRejectedValueOnce(new PhotoNormalizationError('too_large'))
       .mockRejectedValueOnce(new PhotoNormalizationError('decode_failed'));
-    const addMoments = vi.fn();
+    const addMoments = vi.fn(async () => []);
     const onSelectMoment = vi.fn();
     render(
       <PhotoDropzone
@@ -163,5 +163,112 @@ describe('PhotoDropzone', () => {
     expect(addMoments).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('照片已加入但重新載入失敗。')).not.toBeInTheDocument();
     expect(screen.getByLabelText('加入照片')).toBeEnabled();
+  });
+
+  it('normalizes at most three photos concurrently and preserves selection order', async () => {
+    const files = Array.from({ length: 5 }, (_, index) => (
+      new File([`${index}`], `第${index + 1}張.jpg`, { type: 'image/jpeg' })
+    ));
+    const pending = files.map(() => deferred<NormalizedPhotoInput>());
+    let active = 0;
+    let peak = 0;
+    const normalize = vi.fn(async (file: File) => {
+      const index = files.indexOf(file);
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        return await pending[index].promise;
+      } finally {
+        active -= 1;
+      }
+    });
+    const addMoments = vi.fn(async (_journeyId: string, photos: NormalizedPhotoInput[]) => (
+      photos.map((photo, index) => moment(`moment-${index}`, photo.originalFileName, index))
+    ));
+    render(
+      <PhotoDropzone
+        journeyId="journey-1"
+        repository={{ addMoments }}
+        normalize={normalize}
+        onMomentsAdded={vi.fn()}
+        onSelectMoment={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('加入照片'), { target: { files } });
+    await waitFor(() => expect(normalize).toHaveBeenCalledTimes(3));
+    expect(peak).toBe(3);
+
+    await act(async () => {
+      pending[2].resolve(normalized(files[2].name));
+      await pending[2].promise;
+    });
+    await waitFor(() => expect(normalize).toHaveBeenCalledTimes(4));
+
+    await act(async () => {
+      pending[0].resolve(normalized(files[0].name));
+      await pending[0].promise;
+    });
+    await waitFor(() => expect(normalize).toHaveBeenCalledTimes(5));
+
+    await act(async () => {
+      pending[4].resolve(normalized(files[4].name));
+      pending[3].resolve(normalized(files[3].name));
+      pending[1].resolve(normalized(files[1].name));
+      await Promise.all(pending.map(({ promise }) => promise));
+    });
+
+    await waitFor(() => expect(addMoments).toHaveBeenCalledOnce());
+    expect(addMoments.mock.calls[0][1].map((photo) => photo.originalFileName))
+      .toEqual(files.map(({ name }) => name));
+    expect(peak).toBe(3);
+  });
+
+  it('rejects an excessive batch before starting normalization', async () => {
+    const files = Array.from({ length: 101 }, (_, index) => (
+      new File(['x'], `照片-${index}.jpg`, { type: 'image/jpeg' })
+    ));
+    const normalize = vi.fn(async (file: File) => normalized(file.name));
+    const addMoments = vi.fn(async () => []);
+    render(
+      <PhotoDropzone
+        journeyId="journey-1"
+        repository={{ addMoments }}
+        normalize={normalize}
+        onMomentsAdded={vi.fn()}
+        onSelectMoment={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('加入照片'), { target: { files } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('一次最多加入 100 張照片');
+    expect(normalize).not.toHaveBeenCalled();
+    expect(addMoments).not.toHaveBeenCalled();
+  });
+
+  it('rejects excessive aggregate input bytes before starting normalization', async () => {
+    const files = Array.from({ length: 11 }, (_, index) => {
+      const file = new File(['x'], `照片-${index}.jpg`, { type: 'image/jpeg' });
+      Object.defineProperty(file, 'size', { value: 25 * 1024 * 1024 });
+      return file;
+    });
+    const normalize = vi.fn(async (file: File) => normalized(file.name));
+    const addMoments = vi.fn();
+    render(
+      <PhotoDropzone
+        journeyId="journey-1"
+        repository={{ addMoments }}
+        normalize={normalize}
+        onMomentsAdded={vi.fn()}
+        onSelectMoment={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('加入照片'), { target: { files } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('這批照片合計超過 250 MiB 上限');
+    expect(normalize).not.toHaveBeenCalled();
+    expect(addMoments).not.toHaveBeenCalled();
   });
 });

@@ -40,6 +40,18 @@ describe('validatePhotoFile', () => {
     expect(() => validatePhotoFile(new File(['x'], 'notes.txt', { type: 'text/plain' })))
       .toThrowError(expect.objectContaining({ code: 'unsupported_type' }));
   });
+
+  it.each([
+    ['capture.heic', 'image/heic'],
+    ['capture.heif', 'image/heif'],
+    ['capture.HEIC', 'image/jpeg'],
+  ])('gives explicit JPEG or PNG conversion guidance for %s', (name, type) => {
+    expect(() => validatePhotoFile(new File(['heic'], name, { type })))
+      .toThrowError(expect.objectContaining({
+        code: 'heic_unsupported',
+        message: '目前不支援 HEIC 或 HEIF，請先轉換成 JPEG 或 PNG 再加入。',
+      }));
+  });
 });
 
 describe('normalizePhoto', () => {
@@ -118,6 +130,19 @@ describe('normalizePhoto', () => {
     mockCanvas({ encodedBlob: new Blob(['image'], { type: 'image/png' }) });
 
     await expect(normalizePhoto(fileOfSize(1))).rejects.toMatchObject({ code: 'encode_failed' });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('enforces the 25 MiB limit again after normalization', async () => {
+    const close = vi.fn();
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 100, height: 50, close }));
+    const oversized = {
+      size: 25 * 1024 * 1024 + 1,
+      type: 'image/webp',
+    } as Blob;
+    mockCanvas({ encodedBlob: oversized });
+
+    await expect(normalizePhoto(fileOfSize(1))).rejects.toMatchObject({ code: 'too_large' });
     expect(close).toHaveBeenCalledOnce();
   });
 });

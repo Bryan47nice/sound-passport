@@ -20,24 +20,32 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
 } from 'react';
-import type { JourneyEditorRepository } from '../../data/ports';
+import { MomentOrderConflictError, type JourneyEditorRepository } from '../../data/ports';
 import type { JourneyMoment } from '../../domain/model';
 
 interface MomentListProps {
   journeyId: string;
   moments: JourneyMoment[];
   selectedMomentId?: string;
-  repository: Pick<JourneyEditorRepository, 'reorderMoments'>;
+  repository: Pick<JourneyEditorRepository, 'reorderMoments'> &
+    Partial<Pick<JourneyEditorRepository, 'getPrivateJourneyStory'>>;
   onSelect: (momentId: string) => void;
   onBeforeReorder?: () => void | Promise<void>;
   onOrderChange?: (orderedIds: string[]) => void;
   onReordered?: (orderedIds: string[]) => void | Promise<void>;
+  onPendingChange?: (registration: MomentReorderRegistration | undefined) => void;
   headerActions?: ReactNode;
+}
+
+export interface MomentReorderRegistration {
+  dirty: boolean;
+  flush: () => Promise<void>;
 }
 
 interface SortableMomentOptionProps {
@@ -48,7 +56,7 @@ interface SortableMomentOptionProps {
   tabbable: boolean;
   onSelect: () => void;
   onNavigate: (key: OptionNavigationKey) => void;
-  onNodeChange: (node: HTMLLIElement | null) => void;
+  onNodeChange: (node: HTMLButtonElement | null) => void;
   onMove: (direction: -1 | 1) => void;
 }
 
@@ -95,13 +103,7 @@ function SortableMomentOption({
   } = useSortable({ id: moment.id });
   const style = { transform: CSS.Transform.toString(transform), transition };
 
-  const handleOptionKeyDown = (event: KeyboardEvent<HTMLLIElement>) => {
-    if (event.target !== event.currentTarget) return;
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      onSelect();
-      return;
-    }
+  const handleOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Home' || event.key === 'End') {
       event.preventDefault();
       onNavigate(event.key);
@@ -116,16 +118,11 @@ function SortableMomentOption({
     <li
       ref={(node) => {
         setNodeRef(node);
-        onNodeChange(node);
       }}
-      role="option"
-      tabIndex={tabbable ? 0 : -1}
+      data-moment-row
       data-id={moment.id}
-      aria-selected={selected}
       className={`${selected ? 'is-current' : ''}${isDragging ? ' is-dragging' : ''}`}
       style={style}
-      onClick={onSelect}
-      onKeyDown={handleOptionKeyDown}
     >
       <button
         className="moment-drag-handle"
@@ -138,11 +135,24 @@ function SortableMomentOption({
       >
         <GripVertical size={16} aria-hidden="true" />
       </button>
-      <span className="moment-list-index">{String(index + 1).padStart(2, '0')}</span>
-      <div className="moment-list-copy">
-        <strong>{moment.song.title || '尚未填寫歌名'}</strong>
-        <small>{moment.placeLabel || moment.cityLabel || moment.localDate}</small>
-      </div>
+      <button
+        ref={onNodeChange}
+        className="moment-select-command"
+        type="button"
+        data-moment-select
+        data-id={moment.id}
+        aria-label={`選取第${index + 1}則時刻：${moment.song.title || '尚未填寫歌名'}`}
+        aria-pressed={selected}
+        tabIndex={tabbable ? 0 : -1}
+        onClick={onSelect}
+        onKeyDown={handleOptionKeyDown}
+      >
+        <span className="moment-list-index">{String(index + 1).padStart(2, '0')}</span>
+        <span className="moment-list-copy">
+          <strong>{moment.song.title || '尚未填寫歌名'}</strong>
+          <small>{moment.placeLabel || moment.cityLabel || moment.localDate}</small>
+        </span>
+      </button>
       <div className="moment-order-actions">
         <button
           type="button"
@@ -176,16 +186,19 @@ export function MomentList({
   onBeforeReorder,
   onOrderChange,
   onReordered,
+  onPendingChange,
   headerActions,
 }: MomentListProps) {
   const [orderedMoments, setOrderedMoments] = useState(moments);
   const [reorderFailure, setReorderFailure] = useState<ReorderFailure>();
+  const [pendingDirty, setPendingDirty] = useState(false);
   const orderedMomentsRef = useRef(moments);
   const persistenceTailRef = useRef<Promise<void>>(Promise.resolve());
+  const latestFailureRef = useRef<unknown>(undefined);
   const latestGenerationRef = useRef(0);
   const protectedGenerationRef = useRef<number | undefined>(undefined);
   const confirmedGenerationRef = useRef<number | undefined>(undefined);
-  const optionNodesRef = useRef(new Map<string, HTMLLIElement>());
+  const optionNodesRef = useRef(new Map<string, HTMLButtonElement>());
   const mountedRef = useRef(false);
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -194,8 +207,24 @@ export function MomentList({
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      onPendingChange?.(undefined);
+    };
+  }, [onPendingChange]);
+
+  const flushPending = useCallback(async () => {
+    while (true) {
+      const tail = persistenceTailRef.current;
+      await tail;
+      if (tail === persistenceTailRef.current) break;
+    }
+    if (latestFailureRef.current !== undefined) throw latestFailureRef.current;
   }, []);
+
+  useEffect(() => {
+    onPendingChange?.({ dirty: pendingDirty, flush: flushPending });
+  }, [flushPending, onPendingChange, pendingDirty]);
 
   useLayoutEffect(() => {
     let nextMoments = moments;
@@ -230,17 +259,34 @@ export function MomentList({
       if (generation === latestGenerationRef.current) confirmedGenerationRef.current = generation;
       return;
     }
-    try {
-      await onReordered(orderedIds);
-    } catch {
-      if (mountedRef.current && generation === latestGenerationRef.current) {
-        setReorderFailure({ kind: 'refresh', orderedIds: [...orderedIds] });
-      }
-      return;
-    }
+    await onReordered(orderedIds);
     if (mountedRef.current && generation === latestGenerationRef.current) {
       confirmedGenerationRef.current = generation;
-      setReorderFailure(undefined);
+    }
+  };
+
+  const persistWithRebase = async (orderedIds: string[]) => {
+    try {
+      await repository.reorderMoments(journeyId, orderedIds);
+      return orderedIds;
+    } catch (error) {
+      const isSetConflict = error instanceof MomentOrderConflictError
+        || (error instanceof Error && error.name === 'MomentOrderConflictError');
+      if (!isSetConflict || !repository.getPrivateJourneyStory) throw error;
+      const currentStory = await repository.getPrivateJourneyStory(journeyId);
+      if (!currentStory) throw error;
+      const currentIds = currentStory.moments
+        .slice()
+        .sort((left, right) => left.sortOrder - right.sortOrder)
+        .map(({ id }) => id);
+      const currentSet = new Set(currentIds);
+      const requestedSet = new Set(orderedIds);
+      const rebased = [
+        ...orderedIds.filter((id) => currentSet.has(id)),
+        ...currentIds.filter((id) => !requestedSet.has(id)),
+      ];
+      await repository.reorderMoments(journeyId, rebased);
+      return rebased;
     }
   };
 
@@ -249,19 +295,37 @@ export function MomentList({
     latestGenerationRef.current = generation;
     protectedGenerationRef.current = generation;
     confirmedGenerationRef.current = undefined;
+    latestFailureRef.current = undefined;
+    setPendingDirty(true);
     setReorderFailure(undefined);
 
     const persist = async () => {
+      let persistedIds = orderedIds;
       try {
         await onBeforeReorder?.();
-        await repository.reorderMoments(journeyId, orderedIds);
-      } catch {
+        persistedIds = await persistWithRebase(orderedIds);
+      } catch (error) {
         if (mountedRef.current && generation === latestGenerationRef.current) {
           setReorderFailure({ kind: 'persistence', orderedIds: [...orderedIds] });
+          latestFailureRef.current = error;
         }
         return;
       }
-      if (generation === latestGenerationRef.current) await refreshOrder(generation, orderedIds);
+      if (generation !== latestGenerationRef.current) return;
+      try {
+        await refreshOrder(generation, persistedIds);
+      } catch (error) {
+        if (mountedRef.current && generation === latestGenerationRef.current) {
+          setReorderFailure({ kind: 'refresh', orderedIds: [...persistedIds] });
+          latestFailureRef.current = error;
+        }
+        return;
+      }
+      if (mountedRef.current && generation === latestGenerationRef.current) {
+        latestFailureRef.current = undefined;
+        setReorderFailure(undefined);
+        setPendingDirty(false);
+      }
     };
     const queued = persistenceTailRef.current.then(persist, persist);
     persistenceTailRef.current = queued.then(() => undefined, () => undefined);
@@ -316,8 +380,25 @@ export function MomentList({
     if (reorderFailure?.kind !== 'refresh') return;
     const generation = latestGenerationRef.current;
     const orderedIds = reorderFailure.orderedIds;
+    latestFailureRef.current = undefined;
     setReorderFailure(undefined);
-    void refreshOrder(generation, orderedIds);
+    setPendingDirty(true);
+    const refresh = async () => {
+      try {
+        await refreshOrder(generation, orderedIds);
+      } catch (error) {
+        if (mountedRef.current && generation === latestGenerationRef.current) {
+          latestFailureRef.current = error;
+          setReorderFailure({ kind: 'refresh', orderedIds: [...orderedIds] });
+        }
+        return;
+      }
+      if (mountedRef.current && generation === latestGenerationRef.current) {
+        setPendingDirty(false);
+      }
+    };
+    const queued = persistenceTailRef.current.then(refresh, refresh);
+    persistenceTailRef.current = queued.then(() => undefined, () => undefined);
   };
 
   const renderedIds = orderedMoments.map((moment) => moment.id);
@@ -336,7 +417,7 @@ export function MomentList({
       ) : (
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={renderedIds} strategy={verticalListSortingStrategy}>
-            <ol role="listbox" aria-label="時刻排序">
+            <ol aria-label="時刻排序">
               {orderedMoments.map((moment, index) => (
                 <SortableMomentOption
                   key={moment.id}

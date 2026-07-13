@@ -42,6 +42,9 @@ function createPrivateRepository(): IndexedDbJourneyRepository {
     adopt: vi.fn(),
     put: vi.fn(),
     compareAndDelete: vi.fn(),
+    getMomentOutbox: vi.fn(),
+    putMomentOutbox: vi.fn(),
+    compareAndDeleteMomentOutbox: vi.fn(),
   } as IndexedDbJourneyRepository;
 }
 
@@ -81,6 +84,7 @@ describe('bootstrapRepositoryServices', () => {
     expect(renderServices).toHaveBeenCalledTimes(2);
     expect(upgraded.editor).toBe(privateRepository);
     expect(upgraded.outbox).toBe(privateRepository);
+    expect(upgraded.momentOutbox).toBe(privateRepository);
     expect(upgraded.photos).toBe(privateRepository);
     expect(upgraded.privateData).toBe(privateRepository);
     expect(upgraded.backup).toBe(backup);

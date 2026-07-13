@@ -14,15 +14,24 @@ import type {
   SongReference,
 } from '../domain/model';
 import { validateJourneyForReview } from '../domain/journeyValidation';
+import {
+  assertPrivateSnapshotSemantics,
+  isPublishablePrivateStory,
+  SnapshotSemanticError,
+} from '../domain/privateSnapshotValidation';
+import { photoEnvelopeViolation } from '../media/photoLimits';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
   JourneyStatusTransitionError,
   JourneyValidationError,
   JourneyVersionConflictError,
   MomentVersionConflictError,
+  MomentOrderConflictError,
   PrivateDataStateConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
+  type MomentAutosaveOutboxPort,
+  type MomentAutosaveOutboxRecord,
   type PrivateDataPrimaryKeys,
   type SetJourneyStatusOptions,
   type UpdateMomentOptions,
@@ -32,9 +41,12 @@ import {
   PrivateDataPort,
 } from './ports';
 import type { SoundPassportDb } from './indexedDb';
+import { JourneyQueryError, StorageCapacityError } from './storageErrors';
+
+export { StorageCapacityError } from './storageErrors';
 
 const stores = ['journeys', 'moments', 'songs', 'photos'] as const;
-const privateStores = [...stores, 'journeyAutosaveOutbox'] as const;
+const privateStores = [...stores, 'journeyAutosaveOutbox', 'momentAutosaveOutbox'] as const;
 type WriteTransaction = IDBPTransaction<SoundPassportDb, typeof stores, 'readwrite'>;
 type PrivateWriteTransaction = IDBPTransaction<SoundPassportDb, typeof privateStores, 'readwrite'>;
 type OutboxWriteTransaction = IDBPTransaction<
@@ -42,23 +54,22 @@ type OutboxWriteTransaction = IDBPTransaction<
   ['journeys', 'journeyAutosaveOutbox'],
   'readwrite'
 >;
+type MomentOutboxWriteTransaction = IDBPTransaction<
+  SoundPassportDb,
+  ['moments', 'momentAutosaveOutbox'],
+  'readwrite'
+>;
 
 export interface IndexedDbJourneyRepository
   extends JourneyRepository,
     JourneyEditorRepository,
     JourneyAutosaveOutboxPort,
+    MomentAutosaveOutboxPort,
     PhotoAssetRepository,
     PrivateDataPort {}
 
 export interface IndexedDbJourneyRepositoryOptions {
   db: IDBPDatabase<SoundPassportDb>;
-}
-
-export class StorageCapacityError extends Error {
-  constructor(cause: unknown) {
-    super('Sound Passport does not have enough local storage capacity.', { cause });
-    this.name = 'StorageCapacityError';
-  }
 }
 
 function isQuotaExceededError(error: unknown): error is DOMException {
@@ -71,6 +82,22 @@ function missingRecord(kind: string, id: string) {
 
 function relationshipError(detail: string) {
   return new Error(`Snapshot relationship is invalid: ${detail}.`);
+}
+
+function assertSnapshotSemantics(snapshot: PrivateJourneySnapshot) {
+  try {
+    assertPrivateSnapshotSemantics(snapshot);
+  } catch (error) {
+    if (error instanceof SnapshotSemanticError) {
+      throw relationshipError(`semantic validation failed: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function assertPhotoEnvelope(photos: Array<Pick<PhotoAsset, 'blob' | 'byteSize'>>) {
+  const violation = photoEnvelopeViolation(photos);
+  if (violation) throw relationshipError(`photo envelope exceeds the ${violation} limit`);
 }
 
 function nextUpdatedAt(previousUpdatedAt: string) {
@@ -121,14 +148,14 @@ function assertUniqueIds<T extends { id: string }>(kind: string, records: T[]) {
   return ids;
 }
 
-function assertExactReorderSet(journeyMoments: Moment[], orderedIds: string[]) {
+function assertExactReorderSet(journeyId: string, journeyMoments: Moment[], orderedIds: string[]) {
   const expectedIds = new Set(journeyMoments.map((moment) => moment.id));
   const submittedIds = new Set(orderedIds);
   const isExactSet =
     expectedIds.size === orderedIds.length &&
     submittedIds.size === orderedIds.length &&
     orderedIds.every((id) => expectedIds.has(id));
-  if (!isExactSet) throw new Error('Reorder IDs must exactly match the journey moments.');
+  if (!isExactSet) throw new MomentOrderConflictError(journeyId);
 }
 
 function samePrimaryKeys(actual: string[], expected: readonly string[]) {
@@ -171,6 +198,30 @@ async function advanceJourneyStoryVersion(tx: WriteTransaction, journeyId: strin
   return updated;
 }
 
+async function advanceJourneyStoryVersionInPrivateWrite(
+  tx: PrivateWriteTransaction,
+  journeyId: string,
+) {
+  const journeyStore = tx.objectStore('journeys');
+  const journey = await journeyStore.get(journeyId);
+  if (!journey) throw missingRecord('Journey', journeyId);
+
+  const moments = await tx.objectStore('moments').index('journeyId').getAll(journeyId);
+  moments.sort((left, right) => left.sortOrder - right.sortOrder);
+  const joinedMoments = await Promise.all(moments.map(async (moment) => {
+    const song = await tx.objectStore('songs').get(moment.songReferenceId);
+    if (!song) throw relationshipError(`moment ${moment.id} references missing song ${moment.songReferenceId}`);
+    return { ...moment, song };
+  }));
+  const status: JourneyStatus = journey.status === 'complete' &&
+    !validateJourneyForReview({ journey, moments: joinedMoments }).valid
+    ? 'review'
+    : journey.status;
+  const updated: Journey = { ...journey, status, updatedAt: nextUpdatedAt(journey.updatedAt) };
+  await journeyStore.put(updated);
+  return updated;
+}
+
 export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyRepositoryOptions): IndexedDbJourneyRepository {
   async function runWrite<T>(work: (tx: WriteTransaction) => Promise<T>) {
     const tx = db.transaction(stores, 'readwrite');
@@ -196,6 +247,28 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
 
   async function runOutboxWrite<T>(work: (tx: OutboxWriteTransaction) => Promise<T>) {
     const tx = db.transaction(['journeys', 'journeyAutosaveOutbox'], 'readwrite');
+    try {
+      const result = await work(tx);
+      await tx.done;
+      return result;
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+        // A failed IndexedDB request may have already aborted the transaction.
+      }
+      try {
+        await tx.done;
+      } catch {
+        // Preserve the operation error, which carries more detail than AbortError.
+      }
+      if (isQuotaExceededError(error)) throw new StorageCapacityError(error);
+      throw error;
+    }
+  }
+
+  async function runMomentOutboxWrite<T>(work: (tx: MomentOutboxWriteTransaction) => Promise<T>) {
+    const tx = db.transaction(['moments', 'momentAutosaveOutbox'], 'readwrite');
     try {
       const result = await work(tx);
       await tx.done;
@@ -273,14 +346,26 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       }),
     );
     await tx.done;
-    return { journey, moments: joinedMoments };
+    const story = { journey, moments: joinedMoments };
+    if (completeOnly && !isPublishablePrivateStory(story)) return undefined;
+    return story;
   }
 
   async function listCompleteJourneys() {
     const tx = db.transaction('journeys', 'readonly');
     const journeys = await tx.store.index('status').getAll('complete');
     await tx.done;
-    return journeys;
+    const stories = await Promise.all(journeys.map(({ id }) => readStory(id, true)));
+    return stories.flatMap((story) => story ? [story.journey] : []);
+  }
+
+  async function runPublicQuery<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (cause) {
+      if (cause instanceof JourneyQueryError) throw cause;
+      throw new JourneyQueryError('Private journey data could not be read.', undefined, { cause });
+    }
   }
 
   async function updateJourney(
@@ -318,17 +403,17 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
 
   return {
     async listCountrySummaries() {
-      return summarizeCountries(await listCompleteJourneys());
+      return runPublicQuery(async () => summarizeCountries(await listCompleteJourneys()));
     },
 
     async listJourneysByCountry(countryCode) {
-      return (await listCompleteJourneys())
+      return runPublicQuery(async () => (await listCompleteJourneys())
         .filter((journey) => journey.countryCode === countryCode)
-        .sort((left, right) => right.startDate.localeCompare(left.startDate));
+        .sort((left, right) => right.startDate.localeCompare(left.startDate)));
     },
 
     async getJourneyStory(journeyId) {
-      return readStory(journeyId, true);
+      return runPublicQuery(() => readStory(journeyId, true));
     },
 
     async listPrivateJourneys() {
@@ -363,6 +448,9 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
         const outboxStore = tx.objectStore('journeyAutosaveOutbox');
         const outboxKeys = await outboxStore.index('journeyId').getAllKeys(id);
         for (const key of outboxKeys) await outboxStore.delete(key);
+        const momentOutboxStore = tx.objectStore('momentAutosaveOutbox');
+        const momentOutboxKeys = await momentOutboxStore.index('journeyId').getAllKeys(id);
+        for (const key of momentOutboxKeys) await momentOutboxStore.delete(key);
         if (!journey) return;
         const momentStore = tx.objectStore('moments');
         const journeyMoments = await momentStore.index('journeyId').getAll(id);
@@ -401,6 +489,8 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
         if (!journey) throw missingRecord('Journey', journeyId);
         const momentStore = tx.objectStore('moments');
         const existing = await momentStore.index('journeyId').getAll(journeyId);
+        const existingPhotos = await tx.objectStore('photos').getAll();
+        assertPhotoEnvelope([...existingPhotos, ...photos]);
         const nextSortOrder = existing.reduce((maximum, moment) => Math.max(maximum, moment.sortOrder), -1) + 1;
         const created: Moment[] = [];
 
@@ -476,9 +566,12 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     },
 
     async deleteMoment(id: string) {
-      await runWrite(async (tx) => {
+      await runPrivateWrite(async (tx) => {
         const momentStore = tx.objectStore('moments');
         const moment = await momentStore.get(id);
+        const outboxStore = tx.objectStore('momentAutosaveOutbox');
+        const outboxKeys = await outboxStore.index('momentId').getAllKeys(id);
+        for (const key of outboxKeys) await outboxStore.delete(key);
         if (!moment) return;
         await momentStore.delete(id);
         const retainedMoments = await momentStore.getAll();
@@ -492,7 +585,7 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
             journeys.some((journey) => journey.coverPhotoAssetId === moment.photoAssetId);
           if (!isReferenced) await tx.objectStore('photos').delete(moment.photoAssetId);
         }
-        await advanceJourneyStoryVersion(tx, moment.journeyId);
+        await advanceJourneyStoryVersionInPrivateWrite(tx, moment.journeyId);
       });
     },
 
@@ -500,12 +593,12 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       const readTx = db.transaction('moments', 'readonly');
       const journeyMoments = await readTx.store.index('journeyId').getAll(journeyId);
       await readTx.done;
-      assertExactReorderSet(journeyMoments, orderedIds);
+      assertExactReorderSet(journeyId, journeyMoments, orderedIds);
 
       await runWrite(async (tx) => {
         const momentStore = tx.objectStore('moments');
         const currentJourneyMoments = await momentStore.index('journeyId').getAll(journeyId);
-        assertExactReorderSet(currentJourneyMoments, orderedIds);
+        assertExactReorderSet(journeyId, currentJourneyMoments, orderedIds);
         const momentsById = new Map(currentJourneyMoments.map((moment) => [moment.id, moment]));
         for (const [sortOrder, id] of orderedIds.entries()) {
           const moment = momentsById.get(id)!;
@@ -623,6 +716,40 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       });
     },
 
+    async getMomentOutbox(momentId: string, ownerId: string) {
+      return runMomentOutboxWrite(async (tx) => {
+        const store = tx.objectStore('momentAutosaveOutbox');
+        const key: [string, string] = [momentId, ownerId];
+        if (!(await tx.objectStore('moments').get(momentId))) {
+          await store.delete(key);
+          return undefined;
+        }
+        return store.get(key);
+      });
+    },
+
+    async putMomentOutbox(record: MomentAutosaveOutboxRecord) {
+      await runMomentOutboxWrite(async (tx) => {
+        const moment = await tx.objectStore('moments').get(record.momentId);
+        if (!moment) throw missingRecord('Moment', record.momentId);
+        if (moment.journeyId !== record.journeyId) {
+          throw relationshipError(`moment recovery ${record.momentId} references the wrong journey`);
+        }
+        await tx.objectStore('momentAutosaveOutbox').put(record);
+      });
+    },
+
+    async compareAndDeleteMomentOutbox(momentId: string, ownerId: string, generation: string) {
+      return runMomentOutboxWrite(async (tx) => {
+        const key: [string, string] = [momentId, ownerId];
+        const store = tx.objectStore('momentAutosaveOutbox');
+        const stored = await store.get(key);
+        if (!stored || stored.generation !== generation) return false;
+        await store.delete(key);
+        return true;
+      });
+    },
+
     async getPhotoAsset(id) {
       const tx = db.transaction('photos', 'readonly');
       const photo = await tx.store.get(id);
@@ -635,6 +762,8 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     },
 
     async importSnapshot(snapshot: PrivateJourneySnapshot, expectedKeys: PrivateDataPrimaryKeys) {
+      assertSnapshotSemantics(snapshot);
+      assertPhotoEnvelope(snapshot.photos);
       await runWrite(async (tx) => {
         const journeyIds = assertUniqueIds('journey', snapshot.journeys);
         assertUniqueIds('moment', snapshot.moments);

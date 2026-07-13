@@ -1,7 +1,7 @@
 import { Pencil, Trash2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
-import { GuardedLink } from '../../app/navigationGuard';
+import { useParams } from 'react-router';
+import { GuardedLink, useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
 import {
   useInvalidateRepositoryQueries,
   useJourneyRepository,
@@ -15,7 +15,8 @@ import { AccessibleDialog } from '../studio/AccessibleDialog';
 
 export function JourneyPage() {
   const { journeyId = '' } = useParams();
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
+  const routeCommand = useRouteCommandGuard();
   const repository = useJourneyRepository();
   const editor = useOptionalJourneyEditorRepository();
   const repositoryRevision = useRepositoryRevision();
@@ -53,15 +54,18 @@ export function JourneyPage() {
   const canManage = story.journey.source === 'private' && editor !== undefined;
   const deleteJourney = async () => {
     if (!canManage || deletePendingRef.current) return;
+    const command = routeCommand.capture();
     deletePendingRef.current = true;
     setDeleteBusy(true);
     setDeleteError('');
     try {
       await editor.deleteJourney(story.journey.id);
       invalidateQueries();
-      navigate('/studio');
+      if (routeCommand.isCurrent(command)) navigate('/studio');
     } catch {
-      setDeleteError('無法刪除旅程，資料仍完整保留，請再試一次。');
+      if (routeCommand.isCurrent(command)) {
+        setDeleteError('無法刪除旅程，資料仍完整保留，請再試一次。');
+      }
     } finally {
       deletePendingRef.current = false;
       setDeleteBusy(false);

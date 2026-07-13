@@ -43,6 +43,11 @@ function LocationProbe() {
   return <output aria-label="目前路徑">{useLocation().pathname}</output>;
 }
 
+function PopAway() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate(-1)}>較新的返回</button>;
+}
+
 describe('JourneyPage', () => {
   afterEach(cleanup);
 
@@ -202,6 +207,49 @@ describe('JourneyPage', () => {
     await user.click(screen.getByRole('button', { name: '確認刪除旅程' }));
     expect(deleteJourney).toHaveBeenCalledTimes(2);
     expect(await screen.findByLabelText('目前路徑')).toHaveTextContent('/studio');
+  });
+
+  it('does not let deferred deletion redirect override a newer POP', async () => {
+    const user = userEvent.setup();
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('tokyo-2024') as JourneyStory;
+    const privateStory: JourneyStory = {
+      journey: { ...fixtureStory.journey, id: 'private-pop-delete', source: 'private' },
+      moments: fixtureStory.moments.map((moment) => ({ ...moment, journeyId: 'private-pop-delete' })),
+    };
+    const request = deferred<void>();
+    const query: JourneyRepository = {
+      ...fixtureJourneyRepository,
+      getJourneyStory: vi.fn(async () => privateStory),
+    };
+    render(
+      <RepositoryProvider services={{ query, editor: editorStub({ deleteJourney: vi.fn(() => request.promise) }) }}>
+        <MemoryRouter
+          initialEntries={['/newer', `/journeys/${privateStory.journey.id}`]}
+          initialIndex={1}
+        >
+          <PopAway />
+          <Routes>
+            <Route path="/journeys/:journeyId" element={<JourneyPage />} />
+            <Route path="/studio" element={<LocationProbe />} />
+            <Route path="/newer" element={<h1>較新的目的地</h1>} />
+          </Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '刪除旅程' }));
+    fireEvent.click(screen.getByRole('button', { name: '確認刪除旅程' }));
+    fireEvent.click(screen.getByRole('button', { name: '較新的返回' }));
+    expect(screen.getByRole('heading', { name: '較新的目的地' })).toBeInTheDocument();
+
+    await act(async () => {
+      request.resolve(undefined);
+      await request.promise;
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole('heading', { name: '較新的目的地' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('目前路徑')).not.toBeInTheDocument();
   });
 
   it('keeps a failed private deletion recoverable without leaving the journey', async () => {

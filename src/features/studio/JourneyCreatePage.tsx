@@ -1,7 +1,8 @@
 import { Plus, X } from 'lucide-react';
 import { type FormEvent, useRef, useState } from 'react';
-import { useGuardedNavigate } from '../../app/navigationGuard';
+import { useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
 import { useOptionalJourneyEditorRepository } from '../../data/RepositoryContext';
+import { storageWriteFailureMessage } from '../../data/storageErrors';
 import { listCountries, type CountryOption } from '../../domain/countryCatalog';
 import { useMobileStudio } from './useMobileStudio';
 
@@ -19,6 +20,7 @@ function fieldError(errors: ValidationErrors, name: FieldName) {
 export function JourneyCreatePage({ onBootstrapRetry = () => window.location.reload() }: JourneyCreatePageProps) {
   const editor = useOptionalJourneyEditorRepository();
   const navigate = useGuardedNavigate();
+  const routeCommand = useRouteCommandGuard();
   const isMobile = useMobileStudio();
   const [title, setTitle] = useState('');
   const [countryInput, setCountryInput] = useState('');
@@ -75,6 +77,7 @@ export function JourneyCreatePage({ onBootstrapRetry = () => window.location.rel
     if (Object.keys(nextErrors).length > 0 || !country) return;
 
     submittingRef.current = true;
+    const command = routeCommand.capture();
     setIsSubmitting(true);
     try {
       const journey = await editor.createJourney({
@@ -87,9 +90,11 @@ export function JourneyCreatePage({ onBootstrapRetry = () => window.location.rel
         endDate,
         summary: summary.trim(),
       });
-      navigate(`/studio/journeys/${journey.id}`);
-    } catch {
-      setSubmitError('無法建立旅程，請再試一次');
+      if (routeCommand.isCurrent(command)) navigate(`/studio/journeys/${journey.id}`);
+    } catch (error) {
+      if (routeCommand.isCurrent(command)) {
+        setSubmitError(storageWriteFailureMessage(error, '無法建立旅程，請再試一次'));
+      }
     } finally {
       submittingRef.current = false;
       setIsSubmitting(false);

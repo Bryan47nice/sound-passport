@@ -1,11 +1,13 @@
 import { ImagePlus } from 'lucide-react';
 import { type ChangeEvent, type DragEvent, useState } from 'react';
 import type { JourneyEditorRepository } from '../../data/ports';
+import { storageWriteFailureMessage } from '../../data/storageErrors';
 import type { Moment, NormalizedPhotoInput } from '../../domain/model';
 import {
   normalizePhoto,
   PhotoNormalizationError,
 } from '../../media/photoNormalizer';
+import { PHOTO_LIMITS } from '../../media/photoLimits';
 
 interface PhotoFailure {
   fileName: string;
@@ -26,6 +28,26 @@ function localizedFailure(error: unknown) {
   return '無法處理這張照片，請稍後再試。';
 }
 
+async function boundedMap<Input, Output>(
+  values: readonly Input[],
+  worker: (value: Input, index: number) => Promise<Output>,
+): Promise<Output[]> {
+  const output = new Array<Output>(values.length);
+  let nextIndex = 0;
+  const run = async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      output[index] = await worker(values[index], index);
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(PHOTO_LIMITS.normalizationConcurrency, values.length) },
+    run,
+  ));
+  return output;
+}
+
 export function PhotoDropzone({
   journeyId,
   repository,
@@ -42,11 +64,20 @@ export function PhotoDropzone({
 
   const processFiles = async (files: File[]) => {
     if (files.length === 0 || processing || refreshFailure) return;
-    setProcessing(true);
     setBatchError('');
     setFailures([]);
+    if (files.length > PHOTO_LIMITS.maxBatchPhotoCount) {
+      setBatchError(`一次最多加入 ${PHOTO_LIMITS.maxBatchPhotoCount} 張照片。`);
+      return;
+    }
+    const totalInputBytes = files.reduce((sum, file) => sum + file.size, 0);
+    if (totalInputBytes > PHOTO_LIMITS.maxBatchInputBytes) {
+      setBatchError('這批照片合計超過 250 MiB 上限。');
+      return;
+    }
+    setProcessing(true);
 
-    const results = await Promise.all(files.map(async (file) => {
+    const results = await boundedMap(files, async (file) => {
       try {
         return { kind: 'success' as const, photo: await normalize(file) };
       } catch (error) {
@@ -55,7 +86,7 @@ export function PhotoDropzone({
           failure: { fileName: file.name, reason: localizedFailure(error) },
         };
       }
-    }));
+    });
     const nextFailures = results.flatMap((result) => (
       result.kind === 'failure' ? [result.failure] : []
     ));
@@ -72,8 +103,8 @@ export function PhotoDropzone({
     let created: Moment[];
     try {
       created = await repository.addMoments(journeyId, photos);
-    } catch {
-      setBatchError('無法加入照片，請稍後再試。');
+    } catch (error) {
+      setBatchError(storageWriteFailureMessage(error, '無法加入照片，請稍後再試。'));
       setProcessing(false);
       return;
     }

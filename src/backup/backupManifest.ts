@@ -1,4 +1,11 @@
 import type { Journey, Moment, PhotoAsset, SongReference } from '../domain/model';
+import {
+  hasValidCoordinates,
+  isCanonicalRouteId,
+  isCanonicalTimestamp,
+  isStrictLocalDate,
+  isStrictLocalTime,
+} from '../domain/semanticValidation';
 
 export const BACKUP_FORMAT = 'sound-passport';
 export const BACKUP_SCHEMA_VERSION = 1;
@@ -65,16 +72,7 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
 
 export function assertBackupId(value: unknown, label: string): asserts value is string {
   assertNonEmptyString(value, label);
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) invalid(`${label} must be well-formed Unicode`);
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      invalid(`${label} must be well-formed Unicode`);
-    }
-  }
+  if (!isCanonicalRouteId(value)) invalid(`${label} must be canonical and route-safe`);
 }
 
 function assertOptionalString(value: unknown, label: string): asserts value is string | undefined {
@@ -107,7 +105,12 @@ function assertEnum<const Value extends string>(value: unknown, allowed: readonl
 
 function assertTimestamp(value: unknown, label: string): asserts value is string {
   assertString(value, label);
-  if (!Number.isFinite(Date.parse(value))) invalid(`${label} must be a timestamp`);
+  if (!isCanonicalTimestamp(value)) invalid(`${label} must be a canonical timestamp`);
+}
+
+function assertLocalDate(value: unknown, label: string): asserts value is string {
+  assertString(value, label);
+  if (!isStrictLocalDate(value)) invalid(`${label} must be a valid YYYY-MM-DD date`);
 }
 
 function validateJourney(value: unknown, index: number) {
@@ -118,14 +121,17 @@ function validateJourney(value: unknown, index: number) {
     'startDate', 'endDate', 'summary', 'status', 'createdAt', 'updatedAt', 'source',
   ], ['coverPhotoAssetId'], label);
   assertBackupId(value.id, `${label}.id`);
-  ['title', 'countryCode', 'countryName', 'startDate', 'endDate', 'summary'].forEach((key) =>
+  ['title', 'countryCode', 'countryName', 'summary'].forEach((key) =>
     assertString(value[key], `${label}.${key}`));
   if (!Array.isArray(value.countryCoordinates) || value.countryCoordinates.length !== 2) {
     invalid(`${label}.countryCoordinates must be a coordinate tuple`);
   }
   value.countryCoordinates.forEach((coordinate, coordinateIndex) =>
     assertFiniteNumber(coordinate, `${label}.countryCoordinates[${coordinateIndex}]`));
+  if (!hasValidCoordinates(value.countryCoordinates as number[])) invalid(`${label}.countryCoordinates are out of range`);
   assertStringArray(value.cityLabels, `${label}.cityLabels`);
+  assertLocalDate(value.startDate, `${label}.startDate`);
+  assertLocalDate(value.endDate, `${label}.endDate`);
   assertOptionalId(value.coverPhotoAssetId, `${label}.coverPhotoAssetId`);
   assertEnum(value.status, ['draft', 'review', 'complete'], `${label}.status`);
   assertTimestamp(value.createdAt, `${label}.createdAt`);
@@ -144,9 +150,13 @@ function validateMoment(value: unknown, index: number) {
   assertBackupId(value.journeyId, `${label}.journeyId`);
   assertBackupId(value.photoAssetId, `${label}.photoAssetId`);
   assertBackupId(value.songReferenceId, `${label}.songReferenceId`);
-  ['photoAlt', 'localDate', 'cityLabel', 'placeLabel', 'caption', 'reason'].forEach((key) =>
+  ['photoAlt', 'cityLabel', 'placeLabel', 'caption', 'reason'].forEach((key) =>
     assertString(value[key], `${label}.${key}`));
+  assertLocalDate(value.localDate, `${label}.localDate`);
   assertOptionalString(value.localTime, `${label}.localTime`);
+  if (value.localTime !== undefined && !isStrictLocalTime(value.localTime as string)) {
+    invalid(`${label}.localTime must be a valid HH:mm time`);
+  }
   assertEnum(value.reasonStatus, ['complete', 'needs_review'], `${label}.reasonStatus`);
   assertInteger(value.sortOrder, `${label}.sortOrder`, 0);
   assertTimestamp(value.createdAt, `${label}.createdAt`);

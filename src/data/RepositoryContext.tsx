@@ -11,6 +11,7 @@ import type {
   JourneyAutosaveOutboxPort,
   JourneyEditorRepository,
   JourneyRepository,
+  MomentAutosaveOutboxPort,
   PhotoAssetRepository,
   PrivateDataPort,
 } from './ports';
@@ -19,6 +20,7 @@ export interface RepositoryServices {
   query: JourneyRepository;
   editor?: JourneyEditorRepository;
   outbox?: JourneyAutosaveOutboxPort;
+  momentOutbox?: MomentAutosaveOutboxPort;
   photos?: PhotoAssetRepository;
   privateData?: PrivateDataPort;
   backup?: BackupService;
@@ -81,6 +83,10 @@ export function useJourneyAutosaveOutbox(): JourneyAutosaveOutboxPort {
 
 export function useOptionalJourneyAutosaveOutbox(): JourneyAutosaveOutboxPort | undefined {
   return useContext(Context)?.outbox;
+}
+
+export function useOptionalMomentAutosaveOutbox(): MomentAutosaveOutboxPort | undefined {
+  return useContext(Context)?.momentOutbox;
 }
 
 export function usePrivateStorageError(): string | undefined {

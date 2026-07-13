@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes } from 'react-router';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCombinedJourneyRepository } from '../../data/combinedJourneyRepository';
 import { openSoundPassportDb } from '../../data/indexedDb';
 import { createIndexedDbJourneyRepository } from '../../data/indexedDbJourneyRepository';
@@ -109,6 +109,26 @@ describe('JourneyPlayerPage', () => {
 
     expect(await screen.findByRole('heading', { name: '找不到這趟旅程' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '返回旅行地圖' })).toHaveAttribute('href', '/');
+  });
+
+  it('distinguishes a storage read failure from not found and retries it', async () => {
+    const user = userEvent.setup();
+    const story = await fixtureJourneyRepository.getJourneyStory('tokyo-2024');
+    const getJourneyStory = vi.fn()
+      .mockRejectedValueOnce(new Error('IndexedDB read failed'))
+      .mockResolvedValueOnce(story);
+    const repository: JourneyRepository = {
+      ...fixtureJourneyRepository,
+      getJourneyStory,
+    };
+    renderPlayer(repository, '/journeys/tokyo-2024/play');
+
+    expect(await screen.findByRole('heading', { name: '無法讀取旅程' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '找不到這趟旅程' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重新讀取' }));
+
+    expect(await screen.findByText(story!.journey.title)).toBeInTheDocument();
+    expect(getJourneyStory).toHaveBeenCalledTimes(2);
   });
 
   it('shows a Chinese empty-story state without an iframe', async () => {

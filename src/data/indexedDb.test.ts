@@ -1,7 +1,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
-import { openSoundPassportDb } from './indexedDb';
+import { DB_VERSION, openSoundPassportDb } from './indexedDb';
 
 const databaseNames: string[] = [];
 const openDatabases: Array<{ close(): void }> = [];
@@ -84,7 +84,7 @@ describe('openSoundPassportDb', () => {
     const name = databaseName('blocking-upgrade');
     const current = track(await openSoundPassportDb(name));
     const closeSpy = vi.spyOn(current, 'close');
-    const futureOpening = openDB(name, 6);
+    const futureOpening = openDB(name, DB_VERSION + 1);
 
     const result = await settleWithin(futureOpening);
     if (result.kind === 'timeout') current.close();

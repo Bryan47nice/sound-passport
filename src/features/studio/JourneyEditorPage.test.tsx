@@ -225,6 +225,26 @@ function RouteSwitcher() {
   return <button type="button" onClick={() => navigate('/studio/journeys/private-kyoto')}>切換旅程</button>;
 }
 
+function HistoryBackControl() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate(-1)}>瀏覽器返回</button>;
+}
+
+function storyWithTwoMoments(): JourneyStory {
+  const second = {
+    ...story.moments[0],
+    id: 'moment-2',
+    songReferenceId: 'song-2',
+    sortOrder: 1,
+    photoAlt: '東京清晨',
+    song: { ...story.moments[0].song, id: 'song-2', title: 'Morning Walk' },
+  };
+  return {
+    journey: { ...story.journey },
+    moments: [story.moments[0], second],
+  };
+}
+
 describe('JourneyEditorPage', () => {
   beforeEach(() => {
     ownerLocks = new DeterministicLockManager();
@@ -493,6 +513,145 @@ describe('JourneyEditorPage', () => {
     };
     await act(async () => { write.resolve(updated); await write.promise; await flushMicrotasks(); });
     expect(await screen.findByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
+  });
+
+  it('keeps preview pending until the active reorder and refresh both finish', async () => {
+    const currentStory = storyWithTwoMoments();
+    const reorder = deferred<void>();
+    const refresh = deferred<JourneyStory>();
+    let loaded = false;
+    let reorderFinished = false;
+    let refreshFinished = false;
+    const getPrivateJourneyStory = vi.fn(async () => {
+      if (!loaded) {
+        loaded = true;
+        return currentStory;
+      }
+      if (reorderFinished && !refreshFinished) return refresh.promise;
+      return currentStory;
+    });
+    const editor = editorStub({
+      getPrivateJourneyStory,
+      reorderMoments: vi.fn(async () => {
+        await reorder.promise;
+        reorderFinished = true;
+      }),
+    });
+    renderRoute(editor);
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    fireEvent.click(screen.getByRole('button', { name: '前往預覽' }));
+    await act(flushMicrotasks);
+
+    expect(screen.getByRole('button', { name: '前往預覽' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '查看已完成旅程' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      reorder.resolve();
+      await reorder.promise;
+      await flushMicrotasks();
+    });
+    expect(screen.queryByRole('button', { name: '查看已完成旅程' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      refreshFinished = true;
+      refresh.resolve({ ...currentStory, moments: [...currentStory.moments].reverse() });
+      await refresh.promise;
+      await flushMicrotasks();
+    });
+    expect(await screen.findByRole('link', { name: '查看已完成旅程' })).toBeInTheDocument();
+  });
+
+  it('holds a newer AppShell PUSH until pending reorder work succeeds', async () => {
+    const currentStory = storyWithTwoMoments();
+    const reorder = deferred<void>();
+    const editor = editorStub({
+      getPrivateJourneyStory: vi.fn(async () => currentStory),
+      reorderMoments: vi.fn(() => reorder.promise),
+    });
+    renderRoute(editor);
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    fireEvent.click(screen.getByRole('link', { name: '整理' }));
+    await act(flushMicrotasks);
+
+    expect(screen.getByRole('button', { name: '前往預覽' })).toBeInTheDocument();
+    await act(async () => {
+      reorder.resolve();
+      await reorder.promise;
+      await flushMicrotasks();
+    });
+    expect(await screen.findByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
+  });
+
+  it('holds a newer POP until pending reorder work succeeds', async () => {
+    const currentStory = storyWithTwoMoments();
+    const reorder = deferred<void>();
+    const editor = editorStub({
+      getPrivateJourneyStory: vi.fn(async () => currentStory),
+      reorderMoments: vi.fn(() => reorder.promise),
+    });
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor, outbox: outboxStub() }}>
+        <MemoryRouter
+          initialEntries={['/studio', '/studio/journeys/private-tokyo']}
+          initialIndex={1}
+        >
+          <HistoryBackControl />
+          <App />
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    fireEvent.click(screen.getByRole('button', { name: '瀏覽器返回' }));
+    await act(flushMicrotasks);
+
+    expect(screen.getByRole('button', { name: '前往預覽' })).toBeInTheDocument();
+    await act(async () => {
+      reorder.resolve();
+      await reorder.promise;
+      await flushMicrotasks();
+    });
+    expect(await screen.findByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
+  });
+
+  it('does not let deferred preview redirect override a newer POP', async () => {
+    const commandLoad = deferred<JourneyStory | undefined>();
+    const getPrivateJourneyStory = vi.fn()
+      .mockResolvedValueOnce(story)
+      .mockImplementationOnce(() => commandLoad.promise)
+      .mockResolvedValue(story);
+    const editor = editorStub({ getPrivateJourneyStory });
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor, outbox: outboxStub() }}>
+        <MemoryRouter
+          initialEntries={['/studio', '/studio/journeys/private-tokyo']}
+          initialIndex={1}
+        >
+          <HistoryBackControl />
+          <App />
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.click(screen.getByRole('button', { name: '前往預覽' }));
+    await waitFor(() => expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: '瀏覽器返回' }));
+    expect(await screen.findByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
+
+    await act(async () => {
+      commandLoad.resolve(story);
+      await commandLoad.promise;
+      await flushMicrotasks();
+    });
+
+    expect(screen.getByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '查看已完成旅程' })).not.toBeInTheDocument();
   });
 
   it('demotes a complete journey in the same version-checked update when a required field is removed', async () => {
@@ -1076,8 +1235,8 @@ describe('JourneyEditorPage', () => {
     renderRoute(editor);
     await screen.findByRole('heading', { name: '東京夜行' });
 
-    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
-    fireEvent.click(momentList.getAllByRole('option')[1]);
+    const momentList = within(screen.getByRole('list', { name: '時刻排序' }));
+    fireEvent.click(within(momentList.getAllByRole('listitem')[1]).getByRole('button', { name: /選取/ }));
     await waitFor(() => expect(screen.getByLabelText('歌名')).toHaveValue('Second Song'));
     fireEvent.click(screen.getByRole('button', { name: '刪除時刻' }));
     expect(confirm).toHaveBeenCalled();
@@ -1087,7 +1246,7 @@ describe('JourneyEditorPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '刪除時刻' }));
     await waitFor(() => expect(deleteMoment).toHaveBeenCalledWith('moment-2'));
     expect(screen.getByLabelText('歌名')).toHaveValue('Third Song');
-    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual(['moment-1', 'moment-3']);
+    expect(momentList.getAllByRole('listitem').map((item) => item.dataset.id)).toEqual(['moment-1', 'moment-3']);
   });
 
   it('flushes a debounced moment edit before reorder persistence and keeps both changes after reload', async () => {
@@ -1171,15 +1330,15 @@ describe('JourneyEditorPage', () => {
 
     const nextCaption = 'Saved before reorder';
     fireEvent.change(screen.getByLabelText('時刻文案'), { target: { value: nextCaption } });
-    const momentList = screen.getByRole('listbox', { name: '時刻排序' });
-    const selectedOption = momentList.querySelector<HTMLElement>('[data-id="moment-1"]');
-    const moveDown = selectedOption?.querySelector<HTMLButtonElement>('.moment-order-actions button:last-child');
+    const momentList = screen.getByRole('list', { name: '時刻排序' });
+    const selectedRow = momentList.querySelector<HTMLElement>('[data-moment-row][data-id="moment-1"]');
+    const moveDown = selectedRow?.querySelector<HTMLButtonElement>('.moment-order-actions button:last-child');
     expect(moveDown).not.toBeNull();
     fireEvent.click(moveDown!);
     await act(flushMicrotasks);
 
-    expect(momentList.querySelectorAll('[role="option"]')).toHaveLength(2);
-    expect(within(momentList).getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(momentList.querySelectorAll('[data-moment-row]')).toHaveLength(2);
+    expect(within(momentList).getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       'moment-2',
       'moment-1',
     ]);
@@ -1205,7 +1364,7 @@ describe('JourneyEditorPage', () => {
       await flushMicrotasks();
     });
     expect(operations).toEqual(['moment:start', 'moment:commit', 'reorder:start', 'reorder:commit']);
-    expect(within(momentList).getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(within(momentList).getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       'moment-2',
       'moment-1',
     ]);
@@ -1220,12 +1379,12 @@ describe('JourneyEditorPage', () => {
     renderRoute(editor);
     await act(flushMicrotasks);
 
-    const reloadedList = screen.getByRole('listbox', { name: '時刻排序' });
-    expect(within(reloadedList).getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    const reloadedList = screen.getByRole('list', { name: '時刻排序' });
+    expect(within(reloadedList).getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       'moment-2',
       'moment-1',
     ]);
-    fireEvent.click(reloadedList.querySelector<HTMLElement>('[data-id="moment-1"]')!);
+    fireEvent.click(reloadedList.querySelector<HTMLButtonElement>('[data-moment-select][data-id="moment-1"]')!);
     expect(screen.getByLabelText('時刻文案')).toHaveValue(nextCaption);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
@@ -1253,8 +1412,8 @@ describe('JourneyEditorPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
     await waitFor(() => expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2));
 
-    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
-    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    const momentList = within(screen.getByRole('list', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       secondMoment.id,
       story.moments[0].id,
     ]);
@@ -1293,8 +1452,8 @@ describe('JourneyEditorPage', () => {
     await waitFor(() => expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole('button', { name: '將第三則上移' }));
-    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
-    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    const momentList = within(screen.getByRole('list', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       secondMoment.id,
       thirdMoment.id,
       story.moments[0].id,
@@ -1307,7 +1466,7 @@ describe('JourneyEditorPage', () => {
       await flushMicrotasks();
     });
     expect(reorderMoments).toHaveBeenCalledTimes(2);
-    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    expect(momentList.getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       secondMoment.id,
       thirdMoment.id,
       story.moments[0].id,
@@ -1367,8 +1526,8 @@ describe('JourneyEditorPage', () => {
     expect(reorderMoments).toHaveBeenCalledTimes(1);
     expect(getPrivateJourneyStory).toHaveBeenCalledTimes(3);
 
-    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
-    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    const momentList = within(screen.getByRole('list', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       secondMoment.id,
       story.moments[0].id,
     ]);
@@ -1418,8 +1577,8 @@ describe('JourneyEditorPage', () => {
 
     expect(await screen.findByText('照片已加入但重新載入失敗。')).toBeInTheDocument();
     expect(addMoments).toHaveBeenCalledTimes(1);
-    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
-    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+    const momentList = within(screen.getByRole('list', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('listitem').map((item) => item.dataset.id)).toEqual([
       story.moments[0].id,
       created.id,
     ]);

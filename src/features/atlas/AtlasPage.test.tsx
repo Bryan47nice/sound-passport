@@ -11,6 +11,7 @@ import {
   useJourneyEditorRepository,
 } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
+import type { JourneyRepository } from '../../data/ports';
 import { cleanupDb, uniqueDbName } from '../../test/indexedDb';
 import { seedPrivateReviewJourney } from '../../test/privateJourney';
 import { AtlasPage } from './AtlasPage';
@@ -123,5 +124,47 @@ describe('AtlasPage', () => {
       db.close();
       await cleanupDb(dbName);
     }
+  });
+
+  it('leaves loading, explains a query failure, and retries it', async () => {
+    const user = userEvent.setup();
+    const listCountrySummaries = vi.fn()
+      .mockRejectedValueOnce(new Error('IndexedDB read failed'))
+      .mockResolvedValueOnce([]);
+    const repository: JourneyRepository = {
+      listCountrySummaries,
+      listJourneysByCountry: vi.fn(),
+      getJourneyStory: vi.fn(),
+    };
+    render(
+      <RepositoryProvider services={{ query: repository }}>
+        <MemoryRouter><AtlasPage /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: '無法讀取旅行地圖' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('載入旅行地圖')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重新讀取' }));
+
+    expect(await screen.findByRole('heading', { name: '還沒有旅行' })).toBeInTheDocument();
+    expect(listCountrySummaries).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows fixtures with explicit degradation guidance when private storage fails', async () => {
+    const failingPrivate: JourneyRepository = {
+      async listCountrySummaries() { throw new Error('IndexedDB failed'); },
+      async listJourneysByCountry() { throw new Error('IndexedDB failed'); },
+      async getJourneyStory() { throw new Error('IndexedDB failed'); },
+    };
+    const repository = createCombinedJourneyRepository(fixtureJourneyRepository, failingPrivate);
+    render(
+      <RepositoryProvider services={{ query: repository }}>
+        <MemoryRouter><AtlasPage /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect((await screen.findAllByText('日本')).length).toBeGreaterThan(0);
+    expect(screen.getByRole('alert')).toHaveTextContent('私人旅程暫時無法讀取，目前只顯示示範旅程');
+    expect(screen.getByRole('button', { name: '重新讀取' })).toBeInTheDocument();
   });
 });

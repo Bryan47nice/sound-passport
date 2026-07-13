@@ -6,7 +6,7 @@ import type { NewJourney, NormalizedPhotoInput, PrivateJourneySnapshot } from '.
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
 import { DB_VERSION, openSoundPassportDb, type SoundPassportDb } from './indexedDb';
 import { createIndexedDbJourneyRepository } from './indexedDbJourneyRepository';
-import type { JourneyAutosaveOutboxRecord } from './ports';
+import type { JourneyAutosaveOutboxRecord, MomentAutosaveOutboxRecord } from './ports';
 
 const databaseNames: string[] = [];
 const openDatabases: Array<{ close(): void }> = [];
@@ -77,6 +77,26 @@ function ownerOutboxRecord(
   title: string,
 ): JourneyAutosaveOutboxRecord {
   return outboxRecord(journeyId, generation, title, ownerId);
+}
+
+function momentOutboxRecord(
+  momentId: string,
+  journeyId: string,
+  generation: string,
+  caption: string,
+  ownerId = ownerA,
+): MomentAutosaveOutboxRecord {
+  return {
+    momentId,
+    journeyId,
+    ownerId,
+    generation,
+    envelope: {
+      patch: { caption },
+      base: { caption: '' },
+    },
+    updatedAt: '2026-07-13T00:00:00.000Z',
+  };
 }
 
 function primaryKeys(snapshot: PrivateJourneySnapshot) {
@@ -184,6 +204,26 @@ afterEach(async () => {
 });
 
 describe('indexedDbJourneyRepository', () => {
+  it('keeps moment recovery owner-scoped and removes it only for the exact generation', async () => {
+    const { repository } = await openRepository('moment-outbox-compare-delete');
+    const journey = await repository.createJourney(journeyInput());
+    const [moment] = await repository.addMoments(journey.id, [photoInput('moment-recovery.jpg')]);
+    const first = momentOutboxRecord(moment.id, journey.id, 'generation-1', 'Recover this draft');
+    const second = { ...first, ownerId: ownerB, generation: 'generation-2' };
+    await repository.putMomentOutbox(first);
+    await repository.putMomentOutbox(second);
+
+    await expect(repository.getMomentOutbox(moment.id, ownerA)).resolves.toEqual(first);
+    await expect(repository.getMomentOutbox(moment.id, ownerB)).resolves.toEqual(second);
+    await expect(repository.compareAndDeleteMomentOutbox(moment.id, ownerA, 'stale')).resolves.toBe(false);
+    await expect(repository.compareAndDeleteMomentOutbox(moment.id, ownerA, first.generation)).resolves.toBe(true);
+    await expect(repository.getMomentOutbox(moment.id, ownerA)).resolves.toBeUndefined();
+    await expect(repository.getMomentOutbox(moment.id, ownerB)).resolves.toEqual(second);
+
+    await repository.deleteMoment(moment.id);
+    await expect(repository.getMomentOutbox(moment.id, ownerB)).resolves.toBeUndefined();
+  });
+
   it('atomically overwrites one journey outbox record with its latest generation', async () => {
     const { db, repository } = await openRepository('outbox-overwrite');
     const journey = await repository.createJourney(journeyInput());
@@ -979,6 +1019,34 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('never exposes an invalid completed journey through public Atlas queries', async () => {
+    const { db, repository } = await openRepository('invalid-complete-defense');
+    const { journey, moment } = await createCompleteValidJourney(repository, { title: 'Invalid complete' });
+    const songStore = db.transaction('songs', 'readwrite');
+    const song = await songStore.store.get(moment.songReferenceId);
+    await songStore.store.put({ ...song!, title: '' });
+    await songStore.done;
+
+    await expect(repository.getJourneyStory(journey.id)).resolves.toBeUndefined();
+    await expect(repository.listJourneysByCountry(journey.countryCode)).resolves.toEqual([]);
+    await expect(repository.listCountrySummaries()).resolves.toEqual([]);
+    expect((await repository.getPrivateJourneyStory(journey.id))?.journey.status).toBe('complete');
+    db.close();
+  });
+
+  it('hides a semantically malformed completed journey from every public query', async () => {
+    const { db, repository } = await openRepository('semantic-complete-defense');
+    const { journey } = await createCompleteValidJourney(repository, { title: 'Malformed complete' });
+    const journeyStore = db.transaction('journeys', 'readwrite');
+    await journeyStore.store.put({ ...journey, countryCoordinates: [Number.POSITIVE_INFINITY, 34] });
+    await journeyStore.done;
+
+    await expect(repository.getJourneyStory(journey.id)).resolves.toBeUndefined();
+    await expect(repository.listJourneysByCountry(journey.countryCode)).resolves.toEqual([]);
+    await expect(repository.listCountrySummaries()).resolves.toEqual([]);
+    db.close();
+  });
+
   it('adds an imported snapshot in one transaction while preserving existing records byte-for-byte', async () => {
     const { db, repository } = await openRepository('additive-import');
     const existingJourney = await repository.createJourney(journeyInput({ title: 'Existing' }));
@@ -1087,6 +1155,39 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('atomically rejects a semantically invalid completed snapshot', async () => {
+    const { db, repository } = await openRepository('semantic-import-defense');
+    const journey = await repository.createJourney(journeyInput({ title: 'Existing' }));
+    await repository.addMoments(journey.id, [photoInput('existing.jpg')]);
+    const before = await repository.exportSnapshot();
+    const invalid = prefixedSnapshot(before, 'invalid-');
+    invalid.journeys[0] = { ...invalid.journeys[0], status: 'complete' };
+
+    await expect(repository.importSnapshot(invalid, primaryKeys(before))).rejects.toThrow(/relationship|semantic/i);
+    expect(await repository.exportSnapshot()).toEqual(before);
+    db.close();
+  });
+
+  it.each([
+    ['unsupported journey status', (snapshot: PrivateJourneySnapshot) => {
+      (snapshot.journeys[0] as { status: string }).status = 'archived';
+    }],
+    ['fractional moment order', (snapshot: PrivateJourneySnapshot) => {
+      snapshot.moments[0].sortOrder = 0.5;
+    }],
+  ] as const)('atomically rejects a runtime-invalid semantic snapshot: %s', async (_label, mutate) => {
+    const { db, repository } = await openRepository(`runtime-semantic-${_label}`);
+    const journey = await repository.createJourney(journeyInput({ title: 'Existing' }));
+    await repository.addMoments(journey.id, [photoInput('existing.jpg')]);
+    const before = await repository.exportSnapshot();
+    const invalid = prefixedSnapshot(before, 'invalid-');
+    mutate(invalid);
+
+    await expect(repository.importSnapshot(invalid, primaryKeys(before))).rejects.toThrow(/semantic/i);
+    expect(await repository.exportSnapshot()).toEqual(before);
+    db.close();
+  });
+
   it('upgrades a synthetic version 1 database to version 2 and backfills journey metadata', async () => {
     const name = databaseName('migration');
     const legacyJourney = {
@@ -1191,8 +1292,9 @@ describe('indexedDbJourneyRepository', () => {
     const db = trackDatabase(await openSoundPassportDb(name));
     const repository = createIndexedDbJourneyRepository({ db });
 
-    expect(DB_VERSION).toBe(5);
+    expect(DB_VERSION).toBe(6);
     expect(db.objectStoreNames.contains('journeyAutosaveOutbox')).toBe(true);
+    expect(db.objectStoreNames.contains('momentAutosaveOutbox')).toBe(true);
     await expect(repository.listPrivateJourneys()).resolves.toEqual([existingJourney]);
     await expect(repository.listByJourney(existingJourney.id)).resolves.toEqual([]);
   });
@@ -1240,7 +1342,7 @@ describe('indexedDbJourneyRepository', () => {
     const repository = createIndexedDbJourneyRepository({ db });
     const migrated = { ...legacyRecord, ownerId: 'legacy-v3' };
 
-    expect(db.version).toBe(5);
+    expect(db.version).toBe(6);
     expect(outboxStore.keyPath).toEqual(['journeyId', 'ownerId']);
     expect(Array.from(outboxStore.indexNames)).toContain('journeyId');
     await expect(repository.get(existingJourney.id, 'legacy-v3')).resolves.toEqual(migrated);
@@ -1284,7 +1386,7 @@ describe('indexedDbJourneyRepository', () => {
     const db = trackDatabase(await openSoundPassportDb(name));
     const repository = createIndexedDbJourneyRepository({ db });
 
-    expect(db.version).toBe(5);
+    expect(db.version).toBe(6);
     await expect(repository.get(existingJourney.id, ownerA)).resolves.toEqual(valid);
     const verify = db.transaction('journeyAutosaveOutbox', 'readonly');
     await expect(verify.store.get([orphan.journeyId, ownerB])).resolves.toBeUndefined();

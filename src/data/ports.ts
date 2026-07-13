@@ -70,6 +70,13 @@ export class MomentVersionConflictError extends Error {
   }
 }
 
+export class MomentOrderConflictError extends Error {
+  constructor(readonly journeyId: string) {
+    super('Reorder IDs must exactly match the journey moments.');
+    this.name = 'MomentOrderConflictError';
+  }
+}
+
 export interface JourneyEditorRepository {
   listPrivateJourneys(): Promise<Journey[]>;
   createJourney(input: NewJourney): Promise<Journey>;
@@ -130,6 +137,26 @@ export interface JourneyAutosaveOutboxPort {
   ): Promise<JourneyAutosaveOutboxRecord | undefined>;
   put(record: JourneyAutosaveOutboxRecord): Promise<void>;
   compareAndDelete(journeyId: string, ownerId: string, generation: string): Promise<boolean>;
+}
+
+export interface MomentAutosaveFieldPatchEnvelope {
+  patch: MomentPatch;
+  base: MomentPatch;
+}
+
+export interface MomentAutosaveOutboxRecord {
+  momentId: string;
+  journeyId: string;
+  ownerId: string;
+  generation: string;
+  envelope: MomentAutosaveFieldPatchEnvelope;
+  updatedAt: string;
+}
+
+export interface MomentAutosaveOutboxPort {
+  getMomentOutbox(momentId: string, ownerId: string): Promise<MomentAutosaveOutboxRecord | undefined>;
+  putMomentOutbox(record: MomentAutosaveOutboxRecord): Promise<void>;
+  compareAndDeleteMomentOutbox(momentId: string, ownerId: string, generation: string): Promise<boolean>;
 }
 
 export interface PhotoAssetRepository {

@@ -70,6 +70,7 @@ export interface AutosaveResult<T> extends AutosaveViewState {
   forceRetry: () => void;
   saveNow: (value?: T) => number | undefined;
   flush: () => Promise<void>;
+  discard: () => Promise<void>;
 }
 
 const latestValue = <T,>(_current: T, next: T) => next;
@@ -496,6 +497,35 @@ export function useAutosave<T>({
 
   flushRef.current = flush;
 
+  const discard = useCallback(async () => {
+    cancelDebounce();
+    if (inFlightRef.current) throw new Error('Cannot discard autosave while a write is in flight.');
+    const entry = recoveryEntryRef.current;
+    const persistence = recoveryPersistenceRef.current;
+    if (entry && persistence) {
+      await queueRecoveryOperation(() => persistence.compareAndDelete(entry.generation).then(
+        (matched) => {
+          if (!matched && entry.status === 'persisted') {
+            throw new Error('Autosave recovery changed before it could be discarded.');
+          }
+        },
+      ));
+    }
+
+    pendingRef.current = undefined;
+    recoveryEntryRef.current = undefined;
+    cleanupFailureRef.current = undefined;
+    persistedRevisionRef.current = latestRevisionRef.current;
+    publish((current) => ({
+      ...current,
+      state: 'idle',
+      dirty: false,
+      error: undefined,
+      errorAnnouncement: '',
+    }));
+    resolveFlushesIfClean();
+  }, [cancelDebounce, publish, queueRecoveryOperation, resolveFlushesIfClean]);
+
   useEffect(() => {
     mountedRef.current = true;
     lifecycleRef.current += 1;
@@ -512,5 +542,5 @@ export function useAutosave<T>({
     };
   }, [cancelDebounce]);
 
-  return { ...view, enqueue, retry, forceRetry, saveNow, flush };
+  return { ...view, enqueue, retry, forceRetry, saveNow, flush, discard };
 }

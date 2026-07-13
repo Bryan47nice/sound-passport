@@ -297,6 +297,39 @@ describe('BackupService', () => {
     await expectPlanError(new MemoryPrivateDataPort(populatedSnapshot()), altered, code);
   });
 
+  it.each([
+    ['route-unsafe ID', (manifest: Record<string, any>) => {
+      manifest.journeys[0].id = '../journey';
+      manifest.moments.forEach((moment: Record<string, any>) => { moment.journeyId = '../journey'; });
+    }, 'invalid_manifest'],
+    ['impossible local date', (manifest: Record<string, any>) => {
+      manifest.moments[0].localDate = '2026-02-30';
+    }, 'invalid_manifest'],
+    ['invalid local time', (manifest: Record<string, any>) => {
+      manifest.moments[1].localTime = '24:00';
+    }, 'invalid_manifest'],
+    ['noncanonical timestamp', (manifest: Record<string, any>) => {
+      manifest.journeys[0].updatedAt = '2026-01-04T00:00:00Z';
+    }, 'invalid_manifest'],
+    ['out-of-range longitude', (manifest: Record<string, any>) => {
+      manifest.journeys[0].countryCoordinates = [181, 34];
+    }, 'invalid_manifest'],
+    ['duplicate moment order', (manifest: Record<string, any>) => {
+      manifest.moments[1].sortOrder = manifest.moments[0].sortOrder;
+    }, 'relationship_error'],
+    ['invalid completed lifecycle', (manifest: Record<string, any>) => {
+      manifest.songs[0].title = '';
+    }, 'relationship_error'],
+    ['moment newer than its journey', (manifest: Record<string, any>) => {
+      manifest.moments[0].updatedAt = '2026-01-05T00:00:00.000Z';
+    }, 'relationship_error'],
+  ] as const)('atomically rejects semantic archive violation: %s', async (_label, mutate, code) => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const altered = await alterBackup(backup, (_files, manifest) => mutate(manifest));
+
+    await expectPlanError(new MemoryPrivateDataPort(populatedSnapshot()), altered, code);
+  });
+
   it('rejects noncanonical photo paths even when the referenced bytes exist', async () => {
     const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
     const altered = await alterBackup(backup, (files, manifest) => {
@@ -380,6 +413,40 @@ describe('BackupService', () => {
 
     await expect(service(new MemoryPrivateDataPort(emptySnapshot())).planImport(altered))
       .rejects.toMatchObject({ code: 'limit_exceeded' });
+  });
+
+  it('rejects too many photos before reading any photo blobs', async () => {
+    const snapshot = populatedSnapshot();
+    const arrayBuffer = vi.fn().mockRejectedValue(new Error('photo bytes must not be read'));
+    snapshot.photos = Array.from({ length: BACKUP_LIMITS.maxPhotoCount + 1 }, (_, index) => {
+      const blob = { size: 1, type: 'image/jpeg', arrayBuffer } as unknown as Blob;
+      return { ...snapshot.photos[0], id: `photo-${index}`, blob, byteSize: 1 };
+    });
+    snapshot.journeys[0].coverPhotoAssetId = snapshot.photos[0].id;
+    snapshot.moments[0].photoAssetId = snapshot.photos[0].id;
+    snapshot.moments[1].photoAssetId = snapshot.photos[1].id;
+
+    await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
+      .rejects.toMatchObject({ code: 'limit_exceeded' });
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('rejects aggregate photo bytes before reading any photo blobs', async () => {
+    const snapshot = populatedSnapshot();
+    const photoSize = BACKUP_LIMITS.maxPhotoBytes;
+    const photoCount = Math.floor(BACKUP_LIMITS.maxTotalPhotoBytes / photoSize) + 1;
+    const arrayBuffer = vi.fn().mockRejectedValue(new Error('photo bytes must not be read'));
+    snapshot.photos = Array.from({ length: photoCount }, (_, index) => {
+      const blob = { size: photoSize, type: 'image/jpeg', arrayBuffer } as unknown as Blob;
+      return { ...snapshot.photos[0], id: `photo-${index}`, blob, byteSize: photoSize };
+    });
+    snapshot.journeys[0].coverPhotoAssetId = snapshot.photos[0].id;
+    snapshot.moments[0].photoAssetId = snapshot.photos[0].id;
+    snapshot.moments[1].photoAssetId = snapshot.photos[1].id;
+
+    await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
+      .rejects.toMatchObject({ code: 'limit_exceeded' });
+    expect(arrayBuffer).not.toHaveBeenCalled();
   });
 
   it('deterministically remaps every primary and foreign key when any target ID collides', async () => {

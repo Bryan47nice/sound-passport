@@ -73,7 +73,7 @@ export type MomentPatch = Partial<Pick<Moment,
   'localDate' | 'localTime' | 'cityLabel' | 'placeLabel' | 'caption' |
   'reason' | 'reasonStatus' | 'photoAlt'
 >> & {
-  song?: Pick<SongReference, 'title' | 'artist' | 'sourceUrl'>;
+  song?: Partial<Pick<SongReference, 'title' | 'artist' | 'sourceUrl'>>;
 };
 
 export type NormalizedPhotoInput = Pick<PhotoAsset,

@@ -1,8 +1,21 @@
 import { Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MomentVersionConflictError, type JourneyEditorRepository } from '../../data/ports';
+import {
+  MomentVersionConflictError,
+  type JourneyEditorRepository,
+  type MomentAutosaveOutboxPort,
+} from '../../data/ports';
 import type { JourneyMoment, MomentPatch, SongAvailability } from '../../domain/model';
 import { parseYouTubeVideoId } from '../../domain/youtube';
+import {
+  applyMomentPatch,
+  createMomentPatchEnvelope,
+  mergeMomentPatchEnvelopes,
+  momentPatchConflicts,
+  MomentPatchConflictError,
+  momentPatchMatches,
+  type MomentPatchEnvelope,
+} from './momentPatch';
 import { useAutosave } from './useAutosave';
 
 export interface MomentAutosaveRegistration {
@@ -13,19 +26,37 @@ export interface MomentAutosaveRegistration {
 interface MomentEditorProps {
   moment: JourneyMoment;
   position: number;
-  repository: Pick<JourneyEditorRepository, 'updateMoment'>;
+  repository: Pick<JourneyEditorRepository, 'updateMoment'> &
+    Partial<Pick<JourneyEditorRepository, 'getPrivateJourneyStory'>>;
   onMomentChange: (moment: JourneyMoment) => void;
   onDelete: (momentId: string) => void | Promise<void>;
   onSaved?: () => void | Promise<void>;
   onAutosaveChange?: (registration: MomentAutosaveRegistration | undefined) => void;
+  recovery?: MomentAutosaveOutboxPort;
+  recoveryOwnerId?: string;
 }
 
-function mergeMomentPatches(current: MomentPatch, next: MomentPatch): MomentPatch {
-  return {
-    ...current,
-    ...next,
-    song: next.song ?? current.song,
-  };
+const momentFields = [
+  'localDate', 'localTime', 'cityLabel', 'placeLabel', 'caption', 'reason', 'reasonStatus', 'photoAlt',
+] as const;
+const songFields = ['title', 'artist', 'sourceUrl'] as const;
+
+function carryLocalChanges(
+  previousAccepted: JourneyMoment,
+  currentDraft: JourneyMoment,
+  nextAccepted: JourneyMoment,
+) {
+  let result = nextAccepted;
+  for (const field of momentFields) {
+    if (currentDraft[field] !== previousAccepted[field]) result = { ...result, [field]: currentDraft[field] };
+  }
+  let song = result.song;
+  for (const field of songFields) {
+    if (currentDraft.song[field] !== previousAccepted.song[field]) {
+      song = { ...song, [field]: currentDraft.song[field] };
+    }
+  }
+  return song === result.song ? result : { ...result, song };
 }
 
 function linkState(sourceUrl: string | undefined): SongAvailability {
@@ -42,13 +73,16 @@ export function MomentEditor({
   onDelete,
   onSaved,
   onAutosaveChange,
+  recovery,
+  recoveryOwnerId,
 }: MomentEditorProps) {
   const [draft, setDraft] = useState(moment);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const [refreshState, setRefreshState] = useState<'idle' | 'refreshing' | 'error'>('idle');
+  const [discarding, setDiscarding] = useState(false);
   const draftRef = useRef(moment);
-  const acceptedVersionRef = useRef({ momentId: moment.id, updatedAt: moment.updatedAt });
+  const acceptedMomentRef = useRef(moment);
   const mountedRef = useRef(false);
   const refreshGenerationRef = useRef(0);
 
@@ -73,34 +107,108 @@ export function MomentEditor({
     }
   }, [onSaved]);
 
-  const save = useCallback(async (patch: MomentPatch) => {
-    const momentId = moment.id;
-    const expectedUpdatedAt = acceptedVersionRef.current.updatedAt;
-    const updated = await repository.updateMoment(
-      momentId,
-      patch,
-      { expectedUpdatedAt },
-    );
-    if (acceptedVersionRef.current.momentId !== momentId) return;
-    acceptedVersionRef.current = { momentId, updatedAt: updated.updatedAt };
-    if (mountedRef.current && draftRef.current.id === momentId) {
-      const nextDraft = { ...draftRef.current, updatedAt: updated.updatedAt };
+  const loadRemoteMoment = useCallback(async () => {
+    const story = await repository.getPrivateJourneyStory?.(moment.journeyId);
+    return story?.moments.find(({ id }) => id === moment.id);
+  }, [moment.id, moment.journeyId, repository]);
+
+  const acceptSave = useCallback(async (
+    envelope: MomentPatchEnvelope,
+    persistedBase: JourneyMoment,
+    updatedAt: string,
+  ) => {
+    const previousAccepted = acceptedMomentRef.current;
+    if (previousAccepted.id !== moment.id) return;
+    const nextAccepted = { ...applyMomentPatch(persistedBase, envelope.patch), updatedAt };
+    const nextDraft = carryLocalChanges(previousAccepted, draftRef.current, nextAccepted);
+    acceptedMomentRef.current = nextAccepted;
+    if (mountedRef.current && draftRef.current.id === moment.id) {
       draftRef.current = nextDraft;
       setDraft(nextDraft);
       onMomentChange(nextDraft);
       await refreshAfterSave();
     }
-  }, [moment.id, onMomentChange, refreshAfterSave, repository]);
-  const autosave = useAutosave({
+  }, [moment.id, onMomentChange, refreshAfterSave]);
+
+  const save = useCallback(async (envelope: MomentPatchEnvelope) => {
+    const accepted = acceptedMomentRef.current;
+    try {
+      const updated = await repository.updateMoment(moment.id, envelope.patch, {
+        expectedUpdatedAt: accepted.updatedAt,
+      });
+      await acceptSave(envelope, accepted, updated.updatedAt);
+      return;
+    } catch (error) {
+      if (!(error instanceof MomentVersionConflictError)) throw error;
+    }
+
+    const remote = await loadRemoteMoment();
+    if (!remote) throw new Error('Moment is no longer available.');
+    if (momentPatchMatches(remote, envelope.patch)) {
+      await acceptSave(envelope, remote, remote.updatedAt);
+      return;
+    }
+
+    const conflicts = momentPatchConflicts(remote, envelope);
+    const rebasedDraft = carryLocalChanges(accepted, draftRef.current, remote);
+    acceptedMomentRef.current = remote;
+    if (mountedRef.current) {
+      draftRef.current = rebasedDraft;
+      setDraft(rebasedDraft);
+      onMomentChange(rebasedDraft);
+    }
+    if (conflicts.length > 0) throw new MomentPatchConflictError(remote, conflicts);
+
+    const updated = await repository.updateMoment(moment.id, envelope.patch, {
+      expectedUpdatedAt: remote.updatedAt,
+    });
+    await acceptSave(envelope, remote, updated.updatedAt);
+  }, [acceptSave, loadRemoteMoment, moment.id, onMomentChange, repository]);
+
+  const forceSave = useCallback(async (envelope: MomentPatchEnvelope) => {
+    const remote = await loadRemoteMoment();
+    if (!remote) throw new Error('Moment is no longer available.');
+    const updated = await repository.updateMoment(moment.id, envelope.patch, {
+      expectedUpdatedAt: remote.updatedAt,
+    });
+    await acceptSave(envelope, remote, updated.updatedAt);
+  }, [acceptSave, loadRemoteMoment, moment.id, repository]);
+
+  const persistRecovery = useCallback((
+    envelope: MomentPatchEnvelope,
+    { generation }: { generation: string },
+  ) => {
+    if (!recovery || !recoveryOwnerId) return Promise.resolve();
+    return recovery.putMomentOutbox({
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: recoveryOwnerId,
+      generation,
+      envelope,
+      updatedAt: new Date().toISOString(),
+    });
+  }, [moment.id, moment.journeyId, recovery, recoveryOwnerId]);
+
+  const clearRecovery = useCallback((generation: string) => {
+    if (!recovery || !recoveryOwnerId) return Promise.resolve(true);
+    return recovery.compareAndDeleteMomentOutbox(moment.id, recoveryOwnerId, generation);
+  }, [moment.id, recovery, recoveryOwnerId]);
+
+  const autosave = useAutosave<MomentPatchEnvelope>({
     save,
+    forceSave,
     delay: 500,
-    merge: mergeMomentPatches,
+    merge: mergeMomentPatchEnvelopes,
+    recovery: recovery && recoveryOwnerId ? {
+      put: persistRecovery,
+      compareAndDelete: clearRecovery,
+    } : undefined,
   });
 
   useEffect(() => {
-    const accepted = acceptedVersionRef.current;
-    if (accepted.momentId !== moment.id) {
-      acceptedVersionRef.current = { momentId: moment.id, updatedAt: moment.updatedAt };
+    const accepted = acceptedMomentRef.current;
+    if (accepted.id !== moment.id) {
+      acceptedMomentRef.current = moment;
       draftRef.current = moment;
       setDraft(moment);
       refreshGenerationRef.current += 1;
@@ -108,10 +216,33 @@ export function MomentEditor({
       return;
     }
     if (autosave.dirty || moment.updatedAt < accepted.updatedAt) return;
-    acceptedVersionRef.current = { momentId: moment.id, updatedAt: moment.updatedAt };
+    acceptedMomentRef.current = moment;
     draftRef.current = moment;
     setDraft(moment);
   }, [autosave.dirty, moment]);
+  const restoredRecoveryRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!recovery || !recoveryOwnerId) return;
+    const recoveryKey = `${moment.id}\u0000${recoveryOwnerId}`;
+    if (restoredRecoveryRef.current === recoveryKey) return;
+    restoredRecoveryRef.current = recoveryKey;
+    let active = true;
+    void recovery.getMomentOutbox(moment.id, recoveryOwnerId).then(
+      (record) => {
+        if (!active || !record || autosave.dirty) return;
+        const recovered = applyMomentPatch(moment, record.envelope.patch);
+        draftRef.current = recovered;
+        setDraft(recovered);
+        onMomentChange(recovered);
+        autosave.enqueue(record.envelope);
+      },
+      () => {
+        if (active) restoredRecoveryRef.current = undefined;
+      },
+    );
+    return () => { active = false; };
+  }, [autosave.dirty, autosave.enqueue, moment, onMomentChange, recovery, recoveryOwnerId]);
   const registrationRef = useRef<MomentAutosaveRegistration>({
     dirty: autosave.dirty,
     flush: autosave.flush,
@@ -135,11 +266,12 @@ export function MomentEditor({
   }, [onAutosaveChange]);
 
   const queueDraft = (nextDraft: JourneyMoment, patch: MomentPatch, immediate = false) => {
+    const envelope = createMomentPatchEnvelope(draftRef.current, patch);
     draftRef.current = nextDraft;
     setDraft(nextDraft);
     onMomentChange(nextDraft);
-    if (immediate) autosave.saveNow(patch);
-    else autosave.enqueue(patch);
+    if (immediate) autosave.saveNow(envelope);
+    else autosave.enqueue(envelope);
   };
 
   const updateField = <Key extends keyof Pick<JourneyMoment, 'cityLabel' | 'placeLabel' | 'caption'>>(
@@ -170,12 +302,24 @@ export function MomentEditor({
     };
     const nextDraft = { ...draftRef.current, song };
     queueDraft(nextDraft, {
-      song: {
-        title: song.title,
-        artist: song.artist,
-        sourceUrl: song.sourceUrl,
-      },
+      song: { [field]: song[field] },
     });
+  };
+
+  const discardConflict = async () => {
+    if (!(autosave.error instanceof MomentPatchConflictError) || discarding) return;
+    setDiscarding(true);
+    try {
+      await autosave.discard();
+      const remote = await loadRemoteMoment();
+      if (!remote) throw new Error('Moment is no longer available.');
+      acceptedMomentRef.current = remote;
+      draftRef.current = remote;
+      setDraft(remote);
+      onMomentChange(remote);
+    } finally {
+      if (mountedRef.current) setDiscarding(false);
+    }
   };
 
   const handleDelete = async () => {
@@ -193,6 +337,7 @@ export function MomentEditor({
   };
 
   const availability = linkState(draft.song.sourceUrl);
+  const hasConflict = autosave.error instanceof MomentPatchConflictError;
   const saveLabel = autosave.state === 'saving'
     ? '時刻儲存中'
     : autosave.state === 'saved'
@@ -299,10 +444,15 @@ export function MomentEditor({
       <div className="moment-save-status" aria-live="polite">
         <span>{saveLabel}</span>
         {autosave.state === 'error' && (
-          <button type="button" onClick={autosave.retry}>重試儲存</button>
+          hasConflict ? (
+            <span className="journey-save-actions">
+              <button type="button" disabled={discarding} onClick={autosave.forceRetry}>覆寫遠端內容</button>
+              <button type="button" disabled={discarding} onClick={() => void discardConflict()}>捨棄並重新載入</button>
+            </span>
+          ) : <button type="button" onClick={autosave.retry}>重試儲存</button>
         )}
       </div>
-      {autosave.state === 'error' && autosave.error instanceof MomentVersionConflictError && (
+      {autosave.state === 'error' && hasConflict && (
         <p className="field-error" role="alert">時刻內容已在其他位置更新，本機草稿尚未覆寫。</p>
       )}
       {refreshState === 'error' && (
