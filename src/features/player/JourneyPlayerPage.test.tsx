@@ -30,6 +30,7 @@ describe('JourneyPlayerPage', () => {
     renderPlayer(fixtureJourneyRepository, '/journeys/tokyo-2024/play');
 
     expect(await screen.findByText('1 / 3')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: firstMoment.photoAlt })).toHaveClass('journey-photo', 'player-photo');
     expect(screen.getByRole('img', { name: firstMoment.photoAlt })).toBeInTheDocument();
     expect(document.querySelector('time')).toHaveAttribute('dateTime', firstMoment.localDate);
     expect(screen.getByText('2024.10.03 · 21:42')).toBeInTheDocument();

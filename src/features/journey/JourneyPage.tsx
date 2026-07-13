@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router';
 import { useJourneyRepository } from '../../data/RepositoryContext';
 import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
+import { JourneyPhoto } from '../../media/JourneyPhoto';
 
 export function JourneyPage() {
   const { journeyId = '' } = useParams();
@@ -41,7 +42,12 @@ export function JourneyPage() {
         {story.moments.map((moment) => (
           <li className="moment-row" key={moment.id}>
             <span className="moment-number">{String(moment.sortOrder + 1).padStart(2, '0')}</span>
-            <img className="moment-thumb" src={moment.photoUrl} alt={moment.photoAlt} />
+            <JourneyPhoto
+              className="moment-thumb"
+              photoAssetId={moment.photoAssetId}
+              fixtureUrl={moment.photoUrl}
+              alt={moment.photoAlt}
+            />
             <span className="moment-details">
               <strong>{moment.cityLabel} · {moment.placeLabel}</strong>
               <small>{formatLocalDateTime(moment.localDate, moment.localTime)} · {moment.song.title} · {moment.song.artist}</small>

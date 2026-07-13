@@ -32,6 +32,7 @@ describe('JourneyPage', () => {
     expect(await screen.findByRole('heading', { name: '東京，雨停之後' })).toBeInTheDocument();
     const moments = screen.getAllByRole('listitem');
     expect(moments).toHaveLength(3);
+    expect(screen.getAllByRole('img').every((image) => image.classList.contains('journey-photo'))).toBe(true);
     expect(moments[0]).toHaveTextContent('澀谷十字路口');
     expect(screen.getByRole('img', { name: '雨夜裡的澀谷十字路口' })).toBeInTheDocument();
     expect(moments[0]).toHaveTextContent('2024.10.03 · 21:42');

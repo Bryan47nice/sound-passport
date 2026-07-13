@@ -28,7 +28,8 @@ button { font: inherit; }
 .moment-list { margin: 32px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
 .moment-row { display: grid; grid-template-columns: 42px 104px minmax(190px, 1fr) minmax(220px, 1.4fr); gap: 16px; align-items: start; min-height: 96px; padding: 18px 0; border-bottom: 1px solid var(--line); }
 .moment-number, .moment-details, .moment-row p { min-width: 0; overflow-wrap: anywhere; }
-.moment-thumb { display: block; width: 104px; height: 78px; object-fit: cover; border-radius: var(--radius); background: var(--line); }
+.journey-photo { display: block; max-width: 100%; object-fit: contain; }
+.moment-thumb { width: 104px; height: 78px; border-radius: var(--radius); background: var(--line); }
 .moment-details strong, .moment-details small { display: block; }
 .moment-details small { margin-top: 5px; color: var(--muted); }
 .moment-row p { margin: 0; }
@@ -42,7 +43,7 @@ button { font: inherit; }
 
 .player-stage { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.8fr); min-height: 430px; margin-top: 12px; background: var(--surface); border: 1px solid var(--line); }
 .player-visual { position: relative; min-width: 0; min-height: 430px; margin: 0; overflow: hidden; background: #111513; }
-.player-visual img { display: block; width: 100%; height: 100%; min-height: 430px; object-fit: cover; }
+.player-visual .player-photo { width: 100%; height: 100%; min-height: 430px; }
 .player-visual figcaption { position: absolute; left: 18px; bottom: 16px; padding: 6px 9px; border-radius: var(--radius); background: rgb(17 21 19 / 78%); color: white; font-size: 13px; }
 .player-copy { min-width: 0; padding: 28px; align-self: center; overflow-wrap: anywhere; }
 .player-copy h1 { margin: 12px 0 0; font-size: 28px; letter-spacing: 0; }
@@ -59,7 +60,7 @@ button { font: inherit; }
 .player-controls button:disabled { cursor: default; opacity: 0.45; }
 @media (max-width: 760px) {
   .player-stage { grid-template-columns: minmax(0, 1fr); min-height: 0; }
-  .player-visual, .player-visual img { min-height: 320px; }
+  .player-visual, .player-visual .player-photo { min-height: 320px; }
   .player-copy { padding: 22px 18px; }
   .player-controls button { min-width: 0; flex: 1; }
 }

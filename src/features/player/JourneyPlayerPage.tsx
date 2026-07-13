@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router';
 import { useJourneyRepository } from '../../data/RepositoryContext';
 import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
+import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { YouTubeEmbed } from './YouTubeEmbed';
 
 export function JourneyPlayerPage() {
@@ -54,7 +55,12 @@ export function JourneyPlayerPage() {
       <p className="eyebrow">{story.journey.title}</p>
       <div className="player-stage">
         <figure className="player-visual">
-          <img src={moment.photoUrl} alt={moment.photoAlt} />
+          <JourneyPhoto
+            className="player-photo"
+            photoAssetId={moment.photoAssetId}
+            fixtureUrl={moment.photoUrl}
+            alt={moment.photoAlt}
+          />
           <figcaption>{moment.cityLabel} · {moment.placeLabel}</figcaption>
         </figure>
         <div className="player-copy">
