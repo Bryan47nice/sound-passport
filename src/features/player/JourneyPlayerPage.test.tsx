@@ -9,7 +9,7 @@ import { JourneyPlayerPage } from './JourneyPlayerPage';
 
 function renderPlayer(repository: JourneyRepository, initialEntry: string) {
   return render(
-    <RepositoryProvider repository={repository}>
+    <RepositoryProvider services={{ query: repository }}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/journeys/:journeyId/play" element={<JourneyPlayerPage />} />
@@ -75,7 +75,7 @@ describe('JourneyPlayerPage', () => {
     };
 
     const { container } = render(
-      <RepositoryProvider repository={repository}>
+      <RepositoryProvider services={{ query: repository }}>
         <MemoryRouter initialEntries={['/journeys/tokyo-2024/play']}>
           <Routes>
             <Route

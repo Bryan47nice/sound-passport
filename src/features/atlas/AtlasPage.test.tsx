@@ -29,7 +29,7 @@ describe('AtlasPage', () => {
   it('lists visited countries and opens the selected country', async () => {
     const user = userEvent.setup();
     render(
-      <RepositoryProvider repository={fixtureJourneyRepository}>
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
         <MemoryRouter initialEntries={['/']}>
           <Routes>
             <Route path="/" element={<><AtlasPage /><LocationProbe /></>} />

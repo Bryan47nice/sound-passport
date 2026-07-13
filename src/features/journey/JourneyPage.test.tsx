@@ -20,7 +20,7 @@ describe('JourneyPage', () => {
 
   it('shows curated moments and a deliberate play command', async () => {
     render(
-      <RepositoryProvider repository={fixtureJourneyRepository}>
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
         <MemoryRouter initialEntries={['/journeys/tokyo-2024']}>
           <Routes>
             <Route path="/journeys/:journeyId" element={<JourneyPage />} />
@@ -61,7 +61,7 @@ describe('JourneyPage', () => {
     }
 
     render(
-      <RepositoryProvider repository={repository}>
+      <RepositoryProvider services={{ query: repository }}>
         <MemoryRouter initialEntries={['/journeys/tokyo-2024']}>
           <RouteChange />
           <Routes>

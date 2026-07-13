@@ -74,5 +74,7 @@ describe('createCombinedJourneyRepository', () => {
     );
 
     await expect(combined.listCountrySummaries()).rejects.toThrow('Duplicate journey ID: duplicate');
+    await expect(combined.listJourneysByCountry('JP')).rejects.toThrow('Duplicate journey ID: duplicate');
+    await expect(combined.getJourneyStory('duplicate')).rejects.toThrow('Duplicate journey ID: duplicate');
   });
 });

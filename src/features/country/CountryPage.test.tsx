@@ -11,7 +11,7 @@ import { CountryPage } from './CountryPage';
 describe('CountryPage', () => {
   it('shows repeat visits without starting media', async () => {
     render(
-      <RepositoryProvider repository={fixtureJourneyRepository}>
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
         <MemoryRouter initialEntries={['/countries/JP']}>
           <Routes>
             <Route path="/countries/:countryCode" element={<CountryPage />} />
@@ -40,7 +40,7 @@ describe('CountryPage', () => {
     };
 
     const { container } = render(
-      <RepositoryProvider repository={repository}>
+      <RepositoryProvider services={{ query: repository }}>
         <MemoryRouter initialEntries={['/countries/JP']}>
           <Routes>
             <Route path="/countries/:countryCode" element={<><CountryPage /><Link to="/countries/XX">切換國家</Link></>} />

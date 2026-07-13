@@ -15,14 +15,10 @@ export interface RepositoryServices {
 
 const Context = createContext<RepositoryServices | null>(null);
 
-type RepositoryProviderProps = PropsWithChildren<{
-  services?: RepositoryServices;
-  repository?: JourneyRepository;
-}>;
+type RepositoryProviderProps = PropsWithChildren<{ services: RepositoryServices }>;
 
-export function RepositoryProvider({ services, repository, children }: RepositoryProviderProps) {
-  const value = services ?? (repository ? { query: repository } : undefined);
-  return <Context.Provider value={value ?? null}>{children}</Context.Provider>;
+export function RepositoryProvider({ services, children }: RepositoryProviderProps) {
+  return <Context.Provider value={services}>{children}</Context.Provider>;
 }
 
 export function useJourneyRepository(): JourneyRepository {

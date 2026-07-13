@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { App } from './app/App';
-import { createCombinedJourneyRepository } from './data/combinedJourneyRepository';
+import { bootstrapRepositoryServices } from './bootstrap';
 import { openSoundPassportDb } from './data/indexedDb';
 import { createIndexedDbJourneyRepository } from './data/indexedDbJourneyRepository';
 import { RepositoryProvider, type RepositoryServices } from './data/RepositoryContext';
@@ -22,18 +22,9 @@ function renderApp(services: RepositoryServices) {
   );
 }
 
-renderApp({ query: fixtureJourneyRepository });
-
-void openSoundPassportDb()
-  .then((db) => {
-    const privateRepository = createIndexedDbJourneyRepository({ db });
-    renderApp({
-      query: createCombinedJourneyRepository(fixtureJourneyRepository, privateRepository),
-      editor: privateRepository,
-      photos: privateRepository,
-      privateData: privateRepository,
-    });
-  })
-  .catch(() => {
-    // Fixture query pages remain available when IndexedDB cannot be opened.
-  });
+void bootstrapRepositoryServices({
+  fixtureRepository: fixtureJourneyRepository,
+  renderServices: renderApp,
+  openDatabase: openSoundPassportDb,
+  createPrivateRepository: (db) => createIndexedDbJourneyRepository({ db }),
+});
