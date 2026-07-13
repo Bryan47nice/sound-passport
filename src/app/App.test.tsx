@@ -12,7 +12,7 @@ vi.mock('../features/atlas/WorldMap', () => ({
 describe('App', () => {
   it('renders the Sound Passport shell', async () => {
     render(
-      <RepositoryProvider repository={fixtureJourneyRepository}>
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
         <MemoryRouter><App /></MemoryRouter>
       </RepositoryProvider>,
     );
@@ -22,7 +22,7 @@ describe('App', () => {
   });
   it('shows a not-found page for an unknown route', () => {
     render(
-      <RepositoryProvider repository={fixtureJourneyRepository}>
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
         <MemoryRouter initialEntries={['/not-found']}><App /></MemoryRouter>
       </RepositoryProvider>,
     );
