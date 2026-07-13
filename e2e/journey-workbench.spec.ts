@@ -1,5 +1,6 @@
 import { expect, test, type Download, type Locator, type Page } from '@playwright/test';
 import { unzipSync, zipSync, type Zippable } from 'fflate';
+import { DB_VERSION } from '../src/data/indexedDb';
 import { verifyRouteLayout } from './helpers/layoutAssertions';
 import { makePng } from './helpers/testImages';
 
@@ -243,12 +244,12 @@ async function expectEditorState(
     await expect(journeyRegion.getByRole('listitem', { name: city })).toBeVisible();
   }
 
-  const options = page.getByRole('region', { name: '時刻清單' }).getByRole('option');
-  await expect(options).toHaveCount(expectedMoments.length);
+  const rows = page.getByRole('region', { name: '時刻清單' }).getByRole('listitem');
+  await expect(rows).toHaveCount(expectedMoments.length);
   for (let index = 0; index < expectedMoments.length; index += 1) {
     const fixture = expectedMoments[index];
-    await expect(options.nth(index)).toContainText(fixture.songTitle);
-    await options.nth(index).click();
+    await expect(rows.nth(index)).toContainText(fixture.songTitle);
+    await rows.nth(index).getByRole('button', { name: /^選取第/ }).click();
 
     const region = page.getByRole('region', { name: '時刻資料' });
     await expect(region.getByText(`第 ${index + 1} 則`, { exact: true })).toBeVisible();
@@ -475,8 +476,8 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
     { buffer: portrait, mimeType: 'image/png', name: momentFixtures[0].fileName },
     { buffer: landscape, mimeType: 'image/png', name: momentFixtures[1].fileName },
   ]);
-  const options = page.getByRole('region', { name: '時刻清單' }).getByRole('option');
-  await expect(options).toHaveCount(2, { timeout: 30_000 });
+  const rows = page.getByRole('region', { name: '時刻清單' }).getByRole('listitem');
+  await expect(rows).toHaveCount(2, { timeout: 30_000 });
   await expect(page.locator('.photo-upload-failures')).toHaveCount(0);
   await expectImageDimensions(
     page.locator('.journey-editor-preview-image'),
@@ -486,7 +487,7 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
 
   diagnostics.setStage('first moment autosave');
   await fillMoment(page, momentFixtures[0]);
-  await options.nth(1).click();
+  await rows.nth(1).getByRole('button', { name: /^選取第/ }).click();
   await expectImageDimensions(
     page.locator('.journey-editor-preview-image'),
     momentFixtures[1].width,
@@ -501,9 +502,9 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await expectEditorState(page, momentFixtures, '草稿');
 
   diagnostics.setStage('reorder and reload');
-  const originalIds = await options.evaluateAll((items) => items.map((item) => item.getAttribute('data-id')!));
+  const originalIds = await rows.evaluateAll((items) => items.map((item) => item.getAttribute('data-id')!));
   await page.getByRole('button', { name: '將第二則上移' }).click();
-  await expect(options.nth(0)).toContainText(momentFixtures[1].songTitle);
+  await expect(rows.nth(0)).toContainText(momentFixtures[1].songTitle);
   await expect.poll(async () => (await readPersistedJourney(page, journeyId))?.order).toEqual([
     originalIds[1],
     originalIds[0],
@@ -714,9 +715,9 @@ test('plays a preloaded private journey without mobile editing, overflow, overla
 
   diagnostics.setStage('initialize private IndexedDB');
   await page.goto('/studio');
-  await expect.poll(() => page.evaluate(async () => (
-    (await indexedDB.databases()).some((database) => database.name === 'sound-passport' && database.version === 5)
-  ))).toBe(true);
+  await expect.poll(() => page.evaluate(async (expectedVersion) => (
+    (await indexedDB.databases()).some((database) => database.name === 'sound-passport' && database.version === expectedVersion)
+  ), DB_VERSION)).toBe(true);
   await seedCompletedMobileJourney(page, portrait, landscape);
 
   diagnostics.setStage('mobile Studio guidance routes');
