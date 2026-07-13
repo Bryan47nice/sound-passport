@@ -393,7 +393,7 @@ export function useAutosave<T>({
       value: queued ? mergeRef.current(queued.value, value) : value,
       revision,
       ready: immediate || waitersRef.current.length > 0,
-      mode: queued?.mode ?? 'normal',
+      mode: 'normal',
     };
     cleanupFailureRef.current = undefined;
     persistCurrentRecovery();
@@ -420,10 +420,12 @@ export function useAutosave<T>({
     cancelDebounce();
     if (!pendingRef.current) return undefined;
     pendingRef.current.ready = true;
+    pendingRef.current.mode = 'normal';
     const revision = pendingRef.current.revision;
+    if (recoveryEntryRef.current?.status === 'failed') persistCurrentRecovery(true);
     startNextRef.current();
     return revision;
-  }, [cancelDebounce, queueValue]);
+  }, [cancelDebounce, persistCurrentRecovery, queueValue]);
 
   const retryCleanup = useCallback(() => {
     const failure = cleanupFailureRef.current;

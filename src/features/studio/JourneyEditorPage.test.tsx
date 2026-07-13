@@ -7,18 +7,42 @@ import { App } from '../../app/App';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import {
-  JourneyAutosaveRecoveryConflictError,
   JourneyVersionConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type JourneyEditorRepository,
 } from '../../data/ports';
 import type { Journey, JourneyPatch, JourneyStory } from '../../domain/model';
+import { claimJourneyOutboxOwner } from './journeyOutbox';
 
 const ownerStorageKey = 'sound-passport.journey-autosave-owner-id';
 const ownerA = '11111111-1111-4111-8111-111111111111';
 const ownerB = '22222222-2222-4222-8222-222222222222';
 const ownerC = '33333333-3333-4333-8333-333333333333';
+
+class DeterministicLockManager {
+  private readonly held = new Set<string>();
+
+  async request<T>(
+    name: string,
+    _options: { ifAvailable: true; mode: 'exclusive' },
+    callback: (lock: Lock | null) => T | PromiseLike<T>,
+  ) {
+    if (this.held.has(name)) return callback(null);
+    this.held.add(name);
+    try {
+      return await callback({ name, mode: 'exclusive' } as Lock);
+    } finally {
+      this.held.delete(name);
+    }
+  }
+
+  isHeld(ownerId: string) {
+    return this.held.has(`sound-passport-owner:${ownerId}`);
+  }
+}
+
+let ownerLocks: DeterministicLockManager;
 
 const story: JourneyStory = {
   journey: {
@@ -118,18 +142,14 @@ function outboxStub(initial: JourneyAutosaveOutboxRecord[] = []): InspectableOut
         .filter((record) => record.journeyId === journeyId)
         .sort((left, right) => left.ownerId.localeCompare(right.ownerId))
     )),
-    adopt: vi.fn(async (journeyId, fromOwnerId, toOwnerId) => {
+    adopt: vi.fn(async (journeyId, fromOwnerId, toOwnerId, expectedGeneration?: string) => {
       const exact = records.get(key(journeyId, toOwnerId));
       if (exact) return exact;
-      const candidates = [...records.values()].filter((record) => record.journeyId === journeyId);
-      if (candidates.length === 0) return undefined;
-      if (candidates.length !== 1 || candidates[0].ownerId !== fromOwnerId) {
-        throw new JourneyAutosaveRecoveryConflictError(
-          journeyId,
-          candidates.map((record) => record.ownerId),
-        );
+      const source = records.get(key(journeyId, fromOwnerId));
+      if (!source || (expectedGeneration !== undefined && source.generation !== expectedGeneration)) {
+        return undefined;
       }
-      const adopted = { ...candidates[0], ownerId: toOwnerId };
+      const adopted = { ...source, ownerId: toOwnerId };
       records.delete(key(journeyId, fromOwnerId));
       records.set(key(journeyId, toOwnerId), adopted);
       return adopted;
@@ -203,6 +223,8 @@ function RouteSwitcher() {
 
 describe('JourneyEditorPage', () => {
   beforeEach(() => {
+    ownerLocks = new DeterministicLockManager();
+    vi.stubGlobal('navigator', { locks: ownerLocks });
     window.sessionStorage.setItem(ownerStorageKey, ownerA);
   });
 
@@ -585,7 +607,12 @@ describe('JourneyEditorPage', () => {
     renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
 
     expect(await screen.findByLabelText('旅程標題')).toHaveValue('Migrated pending title');
-    expect(outbox.adopt).toHaveBeenCalledWith(story.journey.id, 'legacy-v3', ownerA);
+    expect(outbox.adopt).toHaveBeenCalledWith(
+      story.journey.id,
+      'legacy-v3',
+      ownerA,
+      legacy.generation,
+    );
     expect(outbox.peek(story.journey.id, 'legacy-v3')).toBeUndefined();
     expect(outbox.peek(story.journey.id, ownerA)).toMatchObject({
       journeyId: story.journey.id,
@@ -594,7 +621,32 @@ describe('JourneyEditorPage', () => {
     });
   });
 
-  it('surfaces multiple owner recovery records without merging or discarding them', async () => {
+  it('rotates before recovery without adopting the opener tab live outbox', async () => {
+    const openerStorage = {
+      getItem: vi.fn(() => ownerA),
+      setItem: vi.fn(),
+    };
+    const openerClaim = await claimJourneyOutboxOwner({ locks: ownerLocks, storage: openerStorage });
+    const pending = recoveryRecord(ownerA, 'Duplicated tab pending title', 'generation-a');
+    const outbox = outboxStub([pending]);
+
+    const view = renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
+
+    expect(await screen.findByLabelText('旅程標題')).toHaveValue(story.journey.title);
+    const rotatedOwnerId = window.sessionStorage.getItem(ownerStorageKey)!;
+    expect(rotatedOwnerId).not.toBe(ownerA);
+    expect(outbox.adopt).not.toHaveBeenCalled();
+    expect(outbox.peek(story.journey.id, ownerA)).toEqual(pending);
+    expect(outbox.peek(story.journey.id, rotatedOwnerId)).toBeUndefined();
+    expect(ownerLocks.isHeld(rotatedOwnerId)).toBe(true);
+
+    view.unmount();
+    await act(flushMicrotasks);
+    expect(ownerLocks.isHeld(rotatedOwnerId)).toBe(false);
+    await openerClaim.release();
+  });
+
+  it('lets the user choose one abandoned version and retains every unselected owner', async () => {
     window.sessionStorage.setItem(ownerStorageKey, ownerC);
     const first = recoveryRecord(ownerA, 'Owner A pending title', 'generation-a');
     const second = recoveryRecord(ownerB, 'Owner B pending title', 'generation-b');
@@ -602,12 +654,29 @@ describe('JourneyEditorPage', () => {
 
     renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
 
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('偵測到多份尚未儲存的編輯內容');
-    expect(screen.getByRole('button', { name: '重新檢查' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '找到多個未儲存版本' })).toBeInTheDocument();
+    expect(screen.queryByText('Owner A pending title')).not.toBeInTheDocument();
+    expect(screen.queryByText('Owner B pending title')).not.toBeInTheDocument();
+    const commands = screen.getAllByRole('button', { name: /載入此版本/ });
+    expect(commands).toHaveLength(2);
+
+    fireEvent.click(commands[1]);
+
+    expect(await screen.findByLabelText('旅程標題')).toHaveValue('Owner B pending title');
     expect(outbox.peek(story.journey.id, ownerA)).toEqual(first);
-    expect(outbox.peek(story.journey.id, ownerB)).toEqual(second);
-    expect(outbox.adopt).not.toHaveBeenCalled();
+    expect(outbox.peek(story.journey.id, ownerB)).toBeUndefined();
+    expect(outbox.peek(story.journey.id, ownerC)).toMatchObject({
+      ownerId: ownerC,
+      generation: expect.any(String),
+      envelope: second.envelope,
+    });
+    expect(outbox.peek(story.journey.id, ownerC)?.generation).not.toBe(second.generation);
+    expect(outbox.adopt).toHaveBeenCalledWith(
+      story.journey.id,
+      ownerB,
+      ownerC,
+      second.generation,
+    );
   });
 
   it('recovers the latest outbox envelope after a rejected bare-unmount flush', async () => {
@@ -752,7 +821,9 @@ describe('JourneyEditorPage', () => {
     renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
     await act(flushMicrotasks);
     expect(screen.getByLabelText('旅程標題')).toHaveValue('跨實例復原');
-    const newerGeneration = outbox.peek('private-tokyo')!.generation;
+    const remountOwnerId = window.sessionStorage.getItem(ownerStorageKey)!;
+    expect(remountOwnerId).not.toBe(ownerA);
+    const newerGeneration = outbox.peek('private-tokyo', remountOwnerId)!.generation;
     expect(newerGeneration).not.toBe(oldGeneration);
 
     persisted = {
@@ -761,12 +832,12 @@ describe('JourneyEditorPage', () => {
       updatedAt: versionAfter(persisted.updatedAt),
     };
     await act(async () => { oldWrite.resolve(persisted); await oldWrite.promise; await flushMicrotasks(); });
-    expect(outbox.peek('private-tokyo')?.generation).toBe(newerGeneration);
+    expect(outbox.peek('private-tokyo', remountOwnerId)?.generation).toBe(newerGeneration);
 
     await act(() => vi.advanceTimersByTimeAsync(500));
     await act(flushMicrotasks);
     expect(updateJourney).toHaveBeenCalledTimes(1);
-    expect(outbox.peek('private-tokyo')).toBeUndefined();
+    expect(outbox.peek('private-tokyo', remountOwnerId)).toBeUndefined();
   });
 
   it('marks and describes both date inputs when the range is invalid', async () => {

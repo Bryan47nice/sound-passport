@@ -3,8 +3,9 @@ import type { Journey, JourneyStatus, Moment, PhotoAsset, SongReference } from '
 import type { JourneyAutosaveOutboxRecord } from './ports';
 
 export const DB_NAME = 'sound-passport';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 export const LEGACY_OUTBOX_OWNER_ID = 'legacy-v3';
+export const DATABASE_BLOCKED_MESSAGE = '請關閉其他分頁後重新嘗試';
 
 export interface SoundPassportDb extends DBSchema {
   journeys: {
@@ -60,7 +61,7 @@ function migrateToVersion2(
   moments.createIndex('journeyIdSortOrder', ['journeyId', 'sortOrder']);
 
   const migratedAt = new Date().toISOString();
-  const backfill = async () => {
+  return (async () => {
     let cursor = await journeys.openCursor();
     while (cursor) {
       const legacy = cursor.value as Partial<Journey> & Pick<Journey, 'id'>;
@@ -73,56 +74,87 @@ function migrateToVersion2(
       } as Journey);
       cursor = await cursor.continue();
     }
-  };
-
-  void backfill().catch(() => {
-    try {
-      tx.abort();
-    } catch {
-      // The upgrade transaction may already have aborted because of the failed request.
-    }
-  });
+  })();
 }
 
 function migrateToVersion3(db: IDBPDatabase<SoundPassportDb>) {
   db.createObjectStore('journeyAutosaveOutbox', { keyPath: 'journeyId' });
 }
 
-function migrateToVersion4(
+async function migrateToVersion4(
   db: IDBPDatabase<SoundPassportDb>,
   tx: IDBPTransaction<SoundPassportDb, SoundPassportStore[], 'versionchange'>,
 ) {
   const legacyStore = tx.objectStore('journeyAutosaveOutbox');
-  const migrate = async () => {
-    const legacyRecords = await legacyStore.getAll();
-    db.deleteObjectStore('journeyAutosaveOutbox');
-    const ownerStore = db.createObjectStore('journeyAutosaveOutbox', {
-      keyPath: ['journeyId', 'ownerId'],
-    });
-    ownerStore.createIndex('journeyId', 'journeyId');
-    for (const record of legacyRecords) {
+  const legacyRecords = await legacyStore.getAll();
+  db.deleteObjectStore('journeyAutosaveOutbox');
+  const ownerStore = db.createObjectStore('journeyAutosaveOutbox', {
+    keyPath: ['journeyId', 'ownerId'],
+  });
+  ownerStore.createIndex('journeyId', 'journeyId');
+  const journeys = tx.objectStore('journeys');
+  for (const record of legacyRecords) {
+    if (await journeys.get(record.journeyId)) {
       await ownerStore.put({ ...record, ownerId: LEGACY_OUTBOX_OWNER_ID });
     }
-  };
+  }
+}
 
-  void migrate().catch(() => {
-    try {
-      tx.abort();
-    } catch {
-      // The upgrade transaction may already have aborted because of the failed request.
+async function migrateToVersion5(
+  tx: IDBPTransaction<SoundPassportDb, SoundPassportStore[], 'versionchange'>,
+) {
+  const journeys = tx.objectStore('journeys');
+  const outbox = tx.objectStore('journeyAutosaveOutbox');
+  let cursor = await outbox.openCursor();
+  while (cursor) {
+    if (!(await journeys.get(cursor.value.journeyId))) {
+      await cursor.delete();
     }
-  });
+    cursor = await cursor.continue();
+  }
 }
 
 export function openSoundPassportDb(name = DB_NAME) {
-  return openDB<SoundPassportDb>(name, DB_VERSION, {
+  let blocked = false;
+  let closeWhenOpened = false;
+  let openedConnection: IDBPDatabase<SoundPassportDb> | undefined;
+  let rejectBlocked!: (error: Error) => void;
+  const blockedResult = new Promise<never>((_resolve, reject) => { rejectBlocked = reject; });
+  const opening = openDB<SoundPassportDb>(name, DB_VERSION, {
     upgrade(db, oldVersion, _newVersion, tx) {
       if (oldVersion < 1) createVersion1Stores(db);
-      if (oldVersion < 2) migrateToVersion2(tx);
+      const version2Migration = oldVersion < 2 ? migrateToVersion2(tx) : undefined;
       if (oldVersion < 3) migrateToVersion3(db);
-      if (oldVersion < 4) migrateToVersion4(db, tx);
+      const migrate = async () => {
+        if (version2Migration) await version2Migration;
+        if (oldVersion < 4) await migrateToVersion4(db, tx);
+        if (oldVersion < 5) await migrateToVersion5(tx);
+      };
+      void migrate().catch(() => {
+        try {
+          tx.abort();
+        } catch {
+          // The upgrade transaction may already have aborted because of the failed request.
+        }
+      });
+    },
+    blocked() {
+      if (blocked) return;
+      blocked = true;
+      rejectBlocked(new Error(DATABASE_BLOCKED_MESSAGE));
+    },
+    blocking() {
+      closeWhenOpened = true;
+      openedConnection?.close();
     },
   });
+
+  const trackedOpening = opening.then((db) => {
+    openedConnection = db;
+    if (blocked || closeWhenOpened) db.close();
+    return db;
+  });
+  return Promise.race([trackedOpening, blockedResult]);
 }
 
 export async function deleteSoundPassportDb(name = DB_NAME) {

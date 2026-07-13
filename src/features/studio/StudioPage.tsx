@@ -1,7 +1,7 @@
 import { Download, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { GuardedLink } from '../../app/navigationGuard';
-import { useOptionalJourneyEditorRepository } from '../../data/RepositoryContext';
+import { useOptionalJourneyEditorRepository, usePrivateStorageError } from '../../data/RepositoryContext';
 import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStatus, JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
@@ -52,6 +52,7 @@ const updatedAtFormatter = new Intl.DateTimeFormat('zh-TW', {
 
 export function StudioPage({ onBootstrapRetry = () => window.location.reload() }: StudioPageProps) {
   const editor = useOptionalJourneyEditorRepository();
+  const privateStorageError = usePrivateStorageError();
   const isMobile = useMobileStudio();
   const [status, setStatus] = useState<JourneyStatus>('draft');
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -104,7 +105,7 @@ export function StudioPage({ onBootstrapRetry = () => window.location.reload() }
       <section className="page studio-guidance">
         <p className="eyebrow">整理工作台</p>
         <h1 className="page-title">本機儲存空間暫時無法使用</h1>
-        <p className="muted">請確認瀏覽器允許本機儲存後重新開啟；世界地圖的示範旅程仍可使用。</p>
+        <p className="muted">{privateStorageError ?? '請確認瀏覽器允許本機儲存後重新開啟；世界地圖的示範旅程仍可使用。'}</p>
         <button className="secondary-command studio-state-action" type="button" onClick={onBootstrapRetry}>
           <RefreshCw size={17} aria-hidden="true" />重新嘗試
         </button>

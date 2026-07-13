@@ -1,6 +1,5 @@
 import type { Journey } from '../../domain/model';
 import {
-  JourneyAutosaveRecoveryConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
 } from '../../data/ports';
@@ -9,6 +8,30 @@ import type { JourneyPatchEnvelope, JourneyUserPatch } from './journeyPatch';
 export const JOURNEY_OUTBOX_OWNER_STORAGE_KEY = 'sound-passport.journey-autosave-owner-id';
 const ownerIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 let volatileOwnerId: string | undefined;
+
+type OwnerStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
+export interface JourneyOutboxLockManager {
+  request<T>(
+    name: string,
+    options: { ifAvailable: true; mode: 'exclusive' },
+    callback: (lock: Lock | null) => T | PromiseLike<T>,
+  ): Promise<T>;
+}
+
+export interface JourneyOutboxOwnerClaim {
+  ownerId: string;
+  release(): Promise<void>;
+}
+
+export type JourneyOutboxOwnerClaimer = (
+  ownerId: string,
+) => Promise<JourneyOutboxOwnerClaim | undefined>;
+
+interface JourneyOutboxOwnerClaimOptions {
+  storage?: OwnerStorage;
+  locks?: JourneyOutboxLockManager;
+}
 
 function createOwnerId() {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
@@ -23,24 +46,132 @@ function createOwnerId() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export function getJourneyOutboxOwnerId(
-  storage: Pick<Storage, 'getItem' | 'setItem'> | undefined = globalThis.sessionStorage,
-) {
-  if (!storage) {
+function defaultOwnerStorage() {
+  try {
+    return globalThis.sessionStorage as OwnerStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function defaultLockManager() {
+  try {
+    return globalThis.navigator?.locks as unknown as JourneyOutboxLockManager | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function storeFreshOwnerId(storage?: OwnerStorage) {
+  const ownerId = createOwnerId();
+  volatileOwnerId = ownerId;
+  if (storage) {
+    try {
+      storage.setItem(JOURNEY_OUTBOX_OWNER_STORAGE_KEY, ownerId);
+    } catch {
+      // The in-memory UUID remains safe when session storage is inaccessible.
+    }
+  }
+  return ownerId;
+}
+
+export function getJourneyOutboxOwnerId(storage?: OwnerStorage) {
+  const availableStorage = storage ?? defaultOwnerStorage();
+  if (!availableStorage) {
     volatileOwnerId ??= createOwnerId();
     return volatileOwnerId;
   }
 
   try {
-    const stored = storage.getItem(JOURNEY_OUTBOX_OWNER_STORAGE_KEY);
+    const stored = availableStorage.getItem(JOURNEY_OUTBOX_OWNER_STORAGE_KEY);
     if (stored && ownerIdPattern.test(stored)) return stored;
-    const ownerId = createOwnerId();
-    storage.setItem(JOURNEY_OUTBOX_OWNER_STORAGE_KEY, ownerId);
-    return ownerId;
+    return storeFreshOwnerId(availableStorage);
   } catch {
     volatileOwnerId ??= createOwnerId();
     return volatileOwnerId;
   }
+}
+
+function tryClaimOwner(
+  ownerId: string,
+  locks: JourneyOutboxLockManager,
+): Promise<JourneyOutboxOwnerClaim | undefined> {
+  return new Promise((resolve, reject) => {
+    let releaseLock!: () => void;
+    let settled = false;
+    const hold = new Promise<void>((release) => { releaseLock = release; });
+    let request: Promise<unknown>;
+
+    try {
+      request = Promise.resolve(locks.request(
+        `sound-passport-owner:${ownerId}`,
+        { ifAvailable: true, mode: 'exclusive' },
+        async (lock) => {
+          if (!lock) {
+            settled = true;
+            resolve(undefined);
+            return;
+          }
+
+          let released = false;
+          settled = true;
+          resolve({
+            ownerId,
+            release: async () => {
+              if (!released) {
+                released = true;
+                releaseLock();
+              }
+              await request;
+            },
+          });
+          await hold;
+        },
+      ));
+      void request.catch((error: unknown) => {
+        if (!settled) reject(error);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+export function tryClaimJourneyOutboxOwner(
+  ownerId: string,
+  locks: JourneyOutboxLockManager | undefined = defaultLockManager(),
+) {
+  if (!locks) {
+    return Promise.resolve({ ownerId, release: async () => undefined });
+  }
+  return tryClaimOwner(ownerId, locks).catch(() => undefined);
+}
+
+export async function claimJourneyOutboxOwner({
+  storage,
+  locks,
+}: JourneyOutboxOwnerClaimOptions = {}): Promise<JourneyOutboxOwnerClaim> {
+  const availableStorage = storage ?? defaultOwnerStorage();
+  const availableLocks = locks ?? defaultLockManager();
+  let ownerId = getJourneyOutboxOwnerId(availableStorage);
+
+  if (!availableLocks) {
+    ownerId = storeFreshOwnerId(availableStorage);
+    return { ownerId, release: async () => undefined };
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const claim = await tryClaimOwner(ownerId, availableLocks);
+      if (claim) return claim;
+    } catch {
+      ownerId = storeFreshOwnerId(availableStorage);
+      return { ownerId, release: async () => undefined };
+    }
+    ownerId = storeFreshOwnerId(availableStorage);
+  }
+
+  throw new Error('Unable to claim a unique journey autosave owner.');
 }
 
 const patchKeys = [
@@ -56,6 +187,17 @@ const patchKeys = [
 ] as const;
 
 type PatchKey = typeof patchKeys[number];
+
+export interface JourneyOutboxRecoveryCandidate {
+  ownerId: string;
+  generation: string;
+  updatedAt: string;
+}
+
+export type JourneyOutboxRecoveryResult =
+  | { kind: 'none' }
+  | { kind: 'recovered'; record: JourneyAutosaveOutboxRecord }
+  | { kind: 'candidates'; candidates: JourneyOutboxRecoveryCandidate[] };
 
 function hasOwn(value: object, key: PropertyKey) {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -127,26 +269,86 @@ export async function readJourneyOutbox(
   outbox: JourneyAutosaveOutboxPort,
   journeyId: string,
   ownerId: string,
-) {
+  claimOwner: JourneyOutboxOwnerClaimer = tryClaimJourneyOutboxOwner,
+): Promise<JourneyOutboxRecoveryResult> {
   const exact = normalizeRecord(await outbox.get(journeyId, ownerId), journeyId, ownerId);
-  if (exact) return exact;
+  if (exact) return { kind: 'recovered', record: exact };
 
   const outstanding = (await outbox.listByJourney(journeyId))
     .map((record) => normalizeRecord(record, journeyId))
     .filter((record): record is JourneyAutosaveOutboxRecord => record !== undefined);
-  if (outstanding.length === 0) return undefined;
-  if (outstanding.length > 1) {
-    throw new JourneyAutosaveRecoveryConflictError(
-      journeyId,
-      outstanding.map((record) => record.ownerId),
-    );
+  if (outstanding.length === 0) return { kind: 'none' };
+
+  const claimable: Array<{
+    record: JourneyAutosaveOutboxRecord;
+    claim: JourneyOutboxOwnerClaim;
+  }> = [];
+  try {
+    for (const record of outstanding) {
+      const claim = await claimOwner(record.ownerId);
+      if (claim) claimable.push({ record, claim });
+    }
+  } catch (error) {
+    await Promise.allSettled(claimable.map(({ claim }) => claim.release()));
+    throw error;
+  }
+  if (claimable.length === 0) return { kind: 'none' };
+
+  if (claimable.length > 1) {
+    const candidates = claimable
+      .map(({ record: { ownerId: candidateOwnerId, generation, updatedAt } }) => ({
+        ownerId: candidateOwnerId,
+        generation,
+        updatedAt,
+      }))
+      .sort((left, right) => (
+        right.updatedAt.localeCompare(left.updatedAt) || left.ownerId.localeCompare(right.ownerId)
+      ));
+    await Promise.all(claimable.map(({ claim }) => claim.release()));
+    return { kind: 'candidates', candidates };
   }
 
-  return normalizeRecord(
-    await outbox.adopt(journeyId, outstanding[0].ownerId, ownerId),
-    journeyId,
-    ownerId,
-  );
+  const [{ record, claim }] = claimable;
+  try {
+    const adopted = normalizeRecord(
+      await outbox.adopt(
+        journeyId,
+        record.ownerId,
+        ownerId,
+        record.generation,
+      ),
+      journeyId,
+      ownerId,
+    );
+    return adopted ? { kind: 'recovered', record: adopted } : { kind: 'none' };
+  } finally {
+    await claim.release();
+  }
+}
+
+export async function adoptJourneyOutboxCandidate(
+  outbox: JourneyAutosaveOutboxPort,
+  journeyId: string,
+  ownerId: string,
+  candidate: JourneyOutboxRecoveryCandidate,
+  claimOwner: JourneyOutboxOwnerClaimer = tryClaimJourneyOutboxOwner,
+) {
+  const claim = await claimOwner(candidate.ownerId);
+  if (!claim) return undefined;
+  try {
+    return normalizeRecord(
+      await outbox.adopt(
+        journeyId,
+        candidate.ownerId,
+        ownerId,
+        candidate.generation,
+      ),
+      journeyId,
+      ownerId,
+    );
+  } finally {
+    await claim.release();
+  }
 }
 
 export async function writeJourneyOutbox(

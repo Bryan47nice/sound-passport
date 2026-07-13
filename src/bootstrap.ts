@@ -1,4 +1,5 @@
 import { createCombinedJourneyRepository } from './data/combinedJourneyRepository';
+import { DATABASE_BLOCKED_MESSAGE } from './data/indexedDb';
 import type {
   JourneyAutosaveOutboxPort,
   JourneyEditorRepository,
@@ -40,6 +41,13 @@ export function bootstrapRepositoryServices<Database>({
         privateData: privateRepository,
       });
     },
-    () => undefined,
+    (error: unknown) => {
+      renderServices({
+        query: fixtureRepository,
+        privateStorageError: error instanceof Error && error.message === DATABASE_BLOCKED_MESSAGE
+          ? DATABASE_BLOCKED_MESSAGE
+          : '本機儲存空間暫時無法使用',
+      });
+    },
   );
 }

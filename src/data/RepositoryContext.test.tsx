@@ -16,6 +16,7 @@ import {
   useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
   usePhotoAssetRepository,
+  usePrivateStorageError,
   usePrivateDataPort,
 } from './RepositoryContext';
 
@@ -32,6 +33,7 @@ const editor = {} as JourneyEditorRepository;
 const outbox = {} as JourneyAutosaveOutboxPort;
 const photos = {} as PhotoAssetRepository;
 const privateData = {} as PrivateDataPort;
+const privateStorageError = '請關閉其他分頁後重新嘗試';
 
 function AllServicesProvider({ children }: PropsWithChildren) {
   return (
@@ -41,6 +43,7 @@ function AllServicesProvider({ children }: PropsWithChildren) {
       outbox,
       photos,
       privateData,
+      privateStorageError,
     }}>
       {children}
     </RepositoryProvider>
@@ -67,6 +70,8 @@ describe('repository service hooks', () => {
       .toBe(photos);
     expect(renderHook(usePrivateDataPort, { wrapper: AllServicesProvider }).result.current)
       .toBe(privateData);
+    expect(renderHook(usePrivateStorageError, { wrapper: AllServicesProvider }).result.current)
+      .toBe(privateStorageError);
   });
 
   it('throws the exact query-service error outside the provider', () => {
@@ -80,6 +85,8 @@ describe('repository service hooks', () => {
 
   it('returns undefined from the optional editor hook when local storage is unavailable', () => {
     expect(renderHook(useOptionalJourneyEditorRepository, { wrapper: QueryOnlyProvider }).result.current)
+      .toBeUndefined();
+    expect(renderHook(usePrivateStorageError, { wrapper: QueryOnlyProvider }).result.current)
       .toBeUndefined();
   });
 

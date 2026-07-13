@@ -222,6 +222,19 @@ describe('StudioPage', () => {
     expect(screen.queryByRole('link', { name: '新增旅程' })).not.toBeInTheDocument();
   });
 
+  it('shows the exact blocked-database guidance propagated by bootstrap', () => {
+    render(
+      <RepositoryProvider services={{
+        query: fixtureJourneyRepository,
+        privateStorageError: '請關閉其他分頁後重新嘗試',
+      }}>
+        <MemoryRouter><StudioPage /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(screen.getByText('請關閉其他分頁後重新嘗試')).toBeInTheDocument();
+  });
+
   it('retries bootstrap when the editor service is unavailable', async () => {
     const user = userEvent.setup();
     const onBootstrapRetry = vi.fn();

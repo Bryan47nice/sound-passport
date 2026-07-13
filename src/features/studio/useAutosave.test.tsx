@@ -414,6 +414,105 @@ describe('useAutosave', () => {
     expect(forceSave).toHaveBeenCalledWith('Force this value', { revision: 1 });
   });
 
+  const forcePreflightSupersessionCases = [
+    ['later saveNow', 'immediate'],
+    ['later saveNow of the current envelope', 'current'],
+    ['navigation flush', 'navigation'],
+    ['unmount flush', 'unmount'],
+  ] as const;
+
+  it.each(['pending', 'failed'] as const)(
+    'binds force to its exact envelope when preflight is %s',
+    async (preflightState) => {
+      vi.useFakeTimers();
+
+      for (const [pathName, path] of forcePreflightSupersessionCases) {
+        const forcePreflight = deferred();
+        const recovery: AutosaveRecoveryPersistence<string> = {
+          put: vi.fn()
+            .mockResolvedValueOnce(undefined)
+            .mockImplementationOnce(() => forcePreflight.promise)
+            .mockResolvedValue(undefined),
+          compareAndDelete: vi.fn(async () => true),
+        };
+        const save = vi.fn<Save>()
+          .mockRejectedValueOnce(new Error('initial conflict'))
+          .mockResolvedValue(undefined);
+        const forceSave = vi.fn<Save>(async () => undefined);
+        let autosave!: AutosaveApi;
+        const view = render(
+          <AutosaveHarness
+            save={save}
+            forceSave={forceSave}
+            recovery={recovery}
+            capture={(api) => { autosave = api; }}
+          />,
+        );
+
+        act(() => { autosave.saveNow('Force candidate'); });
+        await act(flushMicrotasks);
+        expect(save, pathName).toHaveBeenCalledTimes(1);
+
+        act(() => autosave.forceRetry());
+        await act(flushMicrotasks);
+        expect(recovery.put, pathName).toHaveBeenCalledTimes(2);
+        expect(forceSave, pathName).not.toHaveBeenCalled();
+
+        if (preflightState === 'failed') {
+          await act(async () => {
+            forcePreflight.reject(new Error('force preflight failed'));
+            await forcePreflight.promise.catch(() => undefined);
+            await flushMicrotasks();
+          });
+        }
+
+        let navigationFlush: Promise<void> | undefined;
+        if (path === 'immediate') {
+          act(() => { autosave.saveNow('Later immediate value'); });
+        } else if (path === 'current') {
+          act(() => { autosave.saveNow(); });
+        } else if (path === 'navigation') {
+          act(() => {
+            autosave.enqueue('Later navigation value');
+            navigationFlush = autosave.flush();
+          });
+        } else {
+          act(() => { autosave.enqueue('Later unmount value'); });
+          view.unmount();
+        }
+
+        if (preflightState === 'pending') {
+          await act(async () => {
+            forcePreflight.resolve(undefined);
+            await forcePreflight.promise;
+            await flushMicrotasks();
+          });
+        } else {
+          await act(flushMicrotasks);
+        }
+        if (navigationFlush) await act(async () => { await navigationFlush; });
+        await act(flushMicrotasks);
+
+        expect(save, pathName).toHaveBeenCalledTimes(2);
+        expect(save, pathName).toHaveBeenLastCalledWith(
+          path === 'immediate'
+            ? 'Later immediate value'
+            : path === 'current'
+              ? 'Force candidate'
+            : path === 'navigation'
+              ? 'Later navigation value'
+              : 'Later unmount value',
+          { revision: path === 'current' ? 1 : 2 },
+        );
+        expect(forceSave, pathName).not.toHaveBeenCalled();
+
+        view.unmount();
+        await act(flushMicrotasks);
+        vi.clearAllTimers();
+      }
+    },
+  );
+
   const forceFailureCases = [
     ['generic failure', new Error('repository unavailable')],
     [

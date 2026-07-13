@@ -89,6 +89,7 @@ export interface JourneyAutosaveOutboxPort {
     journeyId: string,
     fromOwnerId: string,
     toOwnerId: string,
+    expectedGeneration: string,
   ): Promise<JourneyAutosaveOutboxRecord | undefined>;
   put(record: JourneyAutosaveOutboxRecord): Promise<void>;
   compareAndDelete(journeyId: string, ownerId: string, generation: string): Promise<boolean>;

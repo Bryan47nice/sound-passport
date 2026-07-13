@@ -13,6 +13,7 @@ export interface RepositoryServices {
   outbox?: JourneyAutosaveOutboxPort;
   photos?: PhotoAssetRepository;
   privateData?: PrivateDataPort;
+  privateStorageError?: string;
 }
 
 const Context = createContext<RepositoryServices | null>(null);
@@ -47,6 +48,10 @@ export function useJourneyAutosaveOutbox(): JourneyAutosaveOutboxPort {
 
 export function useOptionalJourneyAutosaveOutbox(): JourneyAutosaveOutboxPort | undefined {
   return useContext(Context)?.outbox;
+}
+
+export function usePrivateStorageError(): string | undefined {
+  return useContext(Context)?.privateStorageError;
 }
 
 export function usePhotoAssetRepository(): PhotoAssetRepository {

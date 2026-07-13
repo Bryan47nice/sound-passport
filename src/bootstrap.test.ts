@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fixtureJourneyRepository } from './data/fixtureJourneyRepository';
+import { DATABASE_BLOCKED_MESSAGE } from './data/indexedDb';
 import type { IndexedDbJourneyRepository } from './data/indexedDbJourneyRepository';
 import type { JourneyRepository } from './data/ports';
 import type { RepositoryServices } from './data/RepositoryContext';
@@ -90,12 +91,15 @@ describe('bootstrapRepositoryServices', () => {
     await bootstrapRepositoryServices({
       fixtureRepository: fixtureJourneyRepository,
       renderServices,
-      openDatabase: vi.fn(async () => { throw new Error('IndexedDB unavailable'); }),
+      openDatabase: vi.fn(async () => { throw new Error(DATABASE_BLOCKED_MESSAGE); }),
       createPrivateRepository: vi.fn(),
     });
 
-    expect(renderServices).toHaveBeenCalledTimes(1);
-    expect(renderServices).toHaveBeenLastCalledWith({ query: fixtureJourneyRepository });
+    expect(renderServices).toHaveBeenCalledTimes(2);
+    expect(renderServices).toHaveBeenLastCalledWith({
+      query: fixtureJourneyRepository,
+      privateStorageError: DATABASE_BLOCKED_MESSAGE,
+    });
   });
 
   it('opens the database exactly once', async () => {

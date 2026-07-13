@@ -14,7 +14,6 @@ import {
   useOptionalJourneyEditorRepository,
 } from '../../data/RepositoryContext';
 import {
-  JourneyAutosaveRecoveryConflictError,
   JourneyVersionConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
@@ -36,9 +35,12 @@ import {
   type JourneyUserPatch,
 } from './journeyPatch';
 import {
+  adoptJourneyOutboxCandidate,
+  claimJourneyOutboxOwner,
   clearJourneyOutbox,
-  getJourneyOutboxOwnerId,
   readJourneyOutbox,
+  type JourneyOutboxRecoveryCandidate,
+  type JourneyOutboxOwnerClaim,
   writeJourneyOutbox,
 } from './journeyOutbox';
 import { useAutosave } from './useAutosave';
@@ -54,17 +56,39 @@ type LoadState =
       recoveredOutbox?: JourneyAutosaveOutboxRecord;
     }
   | { kind: 'not-found'; journeyId: string }
-  | { kind: 'recovery-conflict'; journeyId: string }
+  | {
+      kind: 'recovery-choice';
+      journeyId: string;
+      story: JourneyStory;
+      candidates: JourneyOutboxRecoveryCandidate[];
+      selectingOwnerId?: string;
+    }
   | { kind: 'error'; journeyId: string };
 
 type JourneyEditorPageProps = { onBootstrapRetry?: () => void };
 type AdjustablePanel = 'list' | 'details';
+type OwnerClaimState =
+  | {
+      kind: 'ready';
+      editor: JourneyEditorRepository;
+      outbox: JourneyAutosaveOutboxPort;
+      claim: JourneyOutboxOwnerClaim;
+    }
+  | {
+      kind: 'error';
+      editor: JourneyEditorRepository;
+      outbox: JourneyAutosaveOutboxPort;
+    };
 
 const panelLimits = {
   list: { min: 180, max: 340 },
   details: { min: 300, max: 480 },
 } as const;
 const panelStep = 16;
+const recoveryTimeFormatter = new Intl.DateTimeFormat('zh-TW', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+});
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -73,6 +97,62 @@ function clamp(value: number, minimum: number, maximum: number) {
 function formatSavedTime(date: Date) {
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function useJourneyOutboxOwnerClaim(
+  editor: JourneyEditorRepository | undefined,
+  outbox: JourneyAutosaveOutboxPort | undefined,
+) {
+  const [state, setState] = useState<OwnerClaimState>();
+  const lifecycleRef = useRef(0);
+  const requestRef = useRef<{
+    editor: JourneyEditorRepository;
+    outbox: JourneyAutosaveOutboxPort;
+    promise: Promise<JourneyOutboxOwnerClaim>;
+  } | undefined>(undefined);
+
+  useEffect(() => {
+    lifecycleRef.current += 1;
+    if (!editor || !outbox) return;
+
+    let request = requestRef.current;
+    if (request && (request.editor !== editor || request.outbox !== outbox)) {
+      void request.promise.then((claim) => claim.release(), () => undefined);
+      request = undefined;
+    }
+    if (!request) {
+      request = { editor, outbox, promise: claimJourneyOutboxOwner() };
+      requestRef.current = request;
+    }
+
+    let active = true;
+    void request.promise.then(
+      (claim) => {
+        if (active && requestRef.current === request) {
+          setState({ kind: 'ready', editor, outbox, claim });
+        }
+      },
+      () => {
+        if (active && requestRef.current === request) {
+          setState({ kind: 'error', editor, outbox });
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+      lifecycleRef.current += 1;
+      const cleanupLifecycle = lifecycleRef.current;
+      queueMicrotask(() => {
+        if (lifecycleRef.current !== cleanupLifecycle) return;
+        if (requestRef.current === request) requestRef.current = undefined;
+        void request.promise.then((claim) => claim.release(), () => undefined);
+      });
+    };
+  }, [editor, outbox]);
+
+  if (!editor || !outbox || state?.editor !== editor || state.outbox !== outbox) return undefined;
+  return state;
 }
 
 function SaveStatus({ autosave }: {
@@ -442,29 +522,50 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   const editor = useOptionalJourneyEditorRepository();
   const outbox = useOptionalJourneyAutosaveOutbox();
   const isMobile = useMobileStudio();
-  const [outboxOwnerId] = useState(getJourneyOutboxOwnerId);
+  const ownerClaimState = useJourneyOutboxOwnerClaim(editor, outbox);
+  const outboxOwnerId = ownerClaimState?.kind === 'ready' ? ownerClaimState.claim.ownerId : undefined;
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [loadState, setLoadState] = useState<LoadState>(() => ({ kind: 'loading', journeyId }));
+  const pageMountedRef = useRef(false);
+  const journeyIdRef = useRef(journeyId);
+  journeyIdRef.current = journeyId;
 
   useEffect(() => {
-    if (!editor || !outbox) return;
+    pageMountedRef.current = true;
+    return () => { pageMountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!editor || !outbox || !outboxOwnerId) return;
     let active = true;
     setLoadState({ kind: 'loading', journeyId });
     void Promise.all([
       editor.getPrivateJourneyStory(journeyId),
       readJourneyOutbox(outbox, journeyId, outboxOwnerId),
     ])
-      .then(([nextStory, recoveredOutbox]) => {
+      .then(([nextStory, recovery]) => {
         if (!active) return;
-        setLoadState(nextStory
-          ? { kind: 'ready', journeyId, story: nextStory, recoveredOutbox }
-          : { kind: 'not-found', journeyId });
+        if (!nextStory) {
+          setLoadState({ kind: 'not-found', journeyId });
+        } else if (recovery.kind === 'candidates') {
+          setLoadState({
+            kind: 'recovery-choice',
+            journeyId,
+            story: nextStory,
+            candidates: recovery.candidates,
+          });
+        } else {
+          setLoadState({
+            kind: 'ready',
+            journeyId,
+            story: nextStory,
+            recoveredOutbox: recovery.kind === 'recovered' ? recovery.record : undefined,
+          });
+        }
       })
-      .catch((error: unknown) => {
+      .catch(() => {
         if (!active) return;
-        setLoadState(error instanceof JourneyAutosaveRecoveryConflictError
-          ? { kind: 'recovery-conflict', journeyId }
-          : { kind: 'error', journeyId });
+        setLoadState({ kind: 'error', journeyId });
       });
     return () => { active = false; };
   }, [editor, journeyId, loadAttempt, outbox, outboxOwnerId]);
@@ -472,6 +573,38 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   const currentLoadState: LoadState = loadState.journeyId === journeyId
     ? loadState
     : { kind: 'loading', journeyId };
+
+  const selectRecoveryCandidate = (candidate: JourneyOutboxRecoveryCandidate) => {
+    if (
+      currentLoadState.kind !== 'recovery-choice' ||
+      !outbox ||
+      !outboxOwnerId ||
+      currentLoadState.selectingOwnerId
+    ) return;
+
+    const choice = currentLoadState;
+    setLoadState({ ...choice, selectingOwnerId: candidate.ownerId });
+    void adoptJourneyOutboxCandidate(outbox, choice.journeyId, outboxOwnerId, candidate).then(
+      (record) => {
+        if (!pageMountedRef.current || journeyIdRef.current !== choice.journeyId) return;
+        if (!record) {
+          setLoadAttempt((attempt) => attempt + 1);
+          return;
+        }
+        setLoadState({
+          kind: 'ready',
+          journeyId: choice.journeyId,
+          story: choice.story,
+          recoveredOutbox: record,
+        });
+      },
+      () => {
+        if (pageMountedRef.current && journeyIdRef.current === choice.journeyId) {
+          setLoadState({ kind: 'error', journeyId: choice.journeyId });
+        }
+      },
+    );
+  };
 
   if (isMobile && currentLoadState.kind !== 'ready') {
     return <section className="studio-mobile-only"><h1>請使用電腦整理旅程</h1></section>;
@@ -486,24 +619,47 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
     );
   }
 
+  if (ownerClaimState?.kind === 'error') {
+    return (
+      <section className="page studio-editor-state" role="alert">
+        <h1>無法載入旅程</h1>
+        <button className="secondary-command studio-state-action" type="button" onClick={onBootstrapRetry}>
+          <RefreshCw size={17} aria-hidden="true" />重新嘗試
+        </button>
+      </section>
+    );
+  }
+
   if (currentLoadState.kind === 'loading') {
     return <section className="page studio-editor-state"><p>正在載入旅程…</p></section>;
   }
   if (currentLoadState.kind === 'not-found') {
     return <section className="page studio-editor-state"><h1>找不到這趟私人旅程</h1></section>;
   }
-  if (currentLoadState.kind === 'recovery-conflict') {
+  if (currentLoadState.kind === 'recovery-choice') {
     return (
-      <section className="page studio-editor-state" role="alert">
-        <h1>偵測到多份尚未儲存的編輯內容</h1>
-        <p>請先回到原本的編輯分頁完成儲存，再重新檢查。</p>
-        <button
-          className="secondary-command studio-state-action"
-          type="button"
-          onClick={() => setLoadAttempt((attempt) => attempt + 1)}
-        >
-          <RefreshCw size={17} aria-hidden="true" />重新檢查
-        </button>
+      <section className="page studio-editor-state">
+        <h1>找到多個未儲存版本</h1>
+        <p>請選擇要載入的版本；其他版本會繼續保留。</p>
+        <ol className="journey-recovery-candidates">
+          {currentLoadState.candidates.map((candidate, index) => (
+            <li key={`${candidate.ownerId}:${candidate.generation}`}>
+              <span>版本 {index + 1}</span>
+              <time dateTime={candidate.updatedAt}>
+                最後更新：{recoveryTimeFormatter.format(new Date(candidate.updatedAt))}
+              </time>
+              <button
+                className="secondary-command"
+                type="button"
+                aria-label={`載入此版本：版本 ${index + 1}`}
+                disabled={currentLoadState.selectingOwnerId !== undefined}
+                onClick={() => selectRecoveryCandidate(candidate)}
+              >
+                載入此版本
+              </button>
+            </li>
+          ))}
+        </ol>
       </section>
     );
   }
@@ -524,7 +680,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
       editor={editor}
       isMobile={isMobile}
       outbox={outbox}
-      outboxOwnerId={outboxOwnerId}
+      outboxOwnerId={outboxOwnerId!}
       recoveredOutbox={currentLoadState.recoveredOutbox}
       story={currentLoadState.story}
     />

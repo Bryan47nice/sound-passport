@@ -16,7 +16,6 @@ import type {
 import { validateJourneyForReview } from '../domain/journeyValidation';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
-  JourneyAutosaveRecoveryConflictError,
   JourneyVersionConflictError,
   PrivateDataStateConflictError,
   type JourneyAutosaveOutboxPort,
@@ -228,6 +227,12 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       if (isQuotaExceededError(error)) throw new StorageCapacityError(error);
       throw error;
     }
+  }
+
+  async function deleteJourneyOutboxes(tx: OutboxWriteTransaction, journeyId: string) {
+    const store = tx.objectStore('journeyAutosaveOutbox');
+    const keys = await store.index('journeyId').getAllKeys(journeyId);
+    for (const key of keys) await store.delete(key);
   }
 
   async function readSnapshot() {
@@ -492,35 +497,45 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     },
 
     async get(journeyId: string, ownerId: string) {
-      const tx = db.transaction('journeyAutosaveOutbox', 'readonly');
-      const record = await tx.store.get([journeyId, ownerId]);
-      await tx.done;
-      return record;
+      return runOutboxWrite(async (tx) => {
+        if (!(await tx.objectStore('journeys').get(journeyId))) {
+          await deleteJourneyOutboxes(tx, journeyId);
+          return undefined;
+        }
+        return tx.objectStore('journeyAutosaveOutbox').get([journeyId, ownerId]);
+      });
     },
 
     async listByJourney(journeyId: string) {
-      const tx = db.transaction('journeyAutosaveOutbox', 'readonly');
-      const records = await tx.store.index('journeyId').getAll(journeyId);
-      await tx.done;
-      return records.sort((left, right) => left.ownerId.localeCompare(right.ownerId));
+      return runOutboxWrite(async (tx) => {
+        if (!(await tx.objectStore('journeys').get(journeyId))) {
+          await deleteJourneyOutboxes(tx, journeyId);
+          return [];
+        }
+        const records = await tx.objectStore('journeyAutosaveOutbox').index('journeyId').getAll(journeyId);
+        return records.sort((left, right) => left.ownerId.localeCompare(right.ownerId));
+      });
     },
 
-    async adopt(journeyId: string, fromOwnerId: string, toOwnerId: string) {
+    async adopt(
+      journeyId: string,
+      fromOwnerId: string,
+      toOwnerId: string,
+      expectedGeneration: string,
+    ) {
       return runOutboxWrite(async (tx) => {
+        if (!(await tx.objectStore('journeys').get(journeyId))) {
+          await deleteJourneyOutboxes(tx, journeyId);
+          return undefined;
+        }
         const store = tx.objectStore('journeyAutosaveOutbox');
         const exact = await store.get([journeyId, toOwnerId]);
         if (exact) return exact;
 
-        const records = await store.index('journeyId').getAll(journeyId);
-        if (records.length === 0) return undefined;
-        if (records.length !== 1 || records[0].ownerId !== fromOwnerId) {
-          throw new JourneyAutosaveRecoveryConflictError(
-            journeyId,
-            records.map((record) => record.ownerId),
-          );
-        }
+        const source = await store.get([journeyId, fromOwnerId]);
+        if (!source || source.generation !== expectedGeneration) return undefined;
 
-        const adopted = { ...records[0], ownerId: toOwnerId };
+        const adopted = { ...source, ownerId: toOwnerId };
         await store.delete([journeyId, fromOwnerId]);
         await store.put(adopted);
         return adopted;

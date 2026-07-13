@@ -192,7 +192,7 @@ describe('indexedDbJourneyRepository', () => {
       Array.isArray(stores) &&
       stores.join(',') === 'journeys,journeyAutosaveOutbox' &&
       mode === 'readwrite'
-    ))).toHaveLength(2);
+    ))).toHaveLength(3);
   });
 
   it('deletes an outbox record only when its generation exactly matches', async () => {
@@ -257,14 +257,14 @@ describe('indexedDbJourneyRepository', () => {
     await expect(outbox.get(journey.id, ownerB)).resolves.toEqual(secondOwner);
   });
 
-  it('atomically adopts one outstanding owner record but preserves multiple records as a conflict', async () => {
+  it('atomically adopts the selected owner generation while retaining unselected records', async () => {
     const { repository } = await openRepository('owner-adoption');
     const journey = await repository.createJourney(journeyInput());
     const outbox = repository;
     const outstanding = ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Outstanding title');
     await outbox.put(outstanding);
 
-    await expect(outbox.adopt(journey.id, ownerA, ownerB)).resolves.toEqual({
+    await expect(outbox.adopt(journey.id, ownerA, ownerB, outstanding.generation)).resolves.toEqual({
       ...outstanding,
       ownerId: ownerB,
     });
@@ -273,11 +273,13 @@ describe('indexedDbJourneyRepository', () => {
 
     const independent = ownerOutboxRecord(journey.id, ownerC, 'generation-c', 'Independent title');
     await outbox.put(independent);
-    await expect(outbox.adopt(journey.id, ownerB, ownerA)).rejects.toMatchObject({
-      name: 'JourneyAutosaveRecoveryConflictError',
+    await expect(outbox.adopt(journey.id, ownerB, ownerA, 'stale-generation')).resolves.toBeUndefined();
+    await expect(outbox.adopt(journey.id, ownerB, ownerA, outstanding.generation)).resolves.toEqual({
+      ...outstanding,
+      ownerId: ownerA,
     });
     await expect(outbox.listByJourney(journey.id)).resolves.toEqual([
-      { ...outstanding, ownerId: ownerB },
+      { ...outstanding, ownerId: ownerA },
       independent,
     ]);
   });
@@ -290,6 +292,34 @@ describe('indexedDbJourneyRepository', () => {
     await expect(outbox.put(orphan)).rejects.toThrow(/Journey missing-journey was not found/);
     await expect(outbox.listByJourney('missing-journey')).resolves.toEqual([]);
   });
+
+  it.each(['get', 'list', 'adopt'] as const)(
+    'verifies the parent and removes a runtime orphan during outbox %s',
+    async (operation) => {
+      const { db, repository } = await openRepository(`outbox-runtime-orphan-${operation}`);
+      const orphan = ownerOutboxRecord('missing-journey', ownerA, 'generation-a', 'Orphan title');
+      const seed = db.transaction('journeyAutosaveOutbox', 'readwrite');
+      await seed.store.put(orphan);
+      await seed.done;
+
+      if (operation === 'get') {
+        await expect(repository.get(orphan.journeyId, ownerA)).resolves.toBeUndefined();
+      } else if (operation === 'list') {
+        await expect(repository.listByJourney(orphan.journeyId)).resolves.toEqual([]);
+      } else {
+        await expect(repository.adopt(
+          orphan.journeyId,
+          ownerA,
+          ownerB,
+          orphan.generation,
+        )).resolves.toBeUndefined();
+      }
+
+      const verify = db.transaction('journeyAutosaveOutbox', 'readonly');
+      await expect(verify.store.get([orphan.journeyId, ownerA])).resolves.toBeUndefined();
+      await verify.done;
+    },
+  );
 
   it('deletes every owner outbox in the same journey cascade transaction', async () => {
     const { db, repository } = await openRepository('outbox-delete-cascade');
@@ -881,13 +911,13 @@ describe('indexedDbJourneyRepository', () => {
     const db = trackDatabase(await openSoundPassportDb(name));
     const repository = createIndexedDbJourneyRepository({ db });
 
-    expect(DB_VERSION).toBe(4);
+    expect(DB_VERSION).toBe(5);
     expect(db.objectStoreNames.contains('journeyAutosaveOutbox')).toBe(true);
     await expect(repository.listPrivateJourneys()).resolves.toEqual([existingJourney]);
     await expect(repository.listByJourney(existingJourney.id)).resolves.toEqual([]);
   });
 
-  it('migrates a version 3 journey-keyed outbox into the v4 legacy owner without dropping its patch', async () => {
+  it('migrates only parented version 3 outboxes into the owner-scoped store', async () => {
     const name = databaseName('owner-outbox-migration');
     const existingJourney = {
       ...journeyInput(),
@@ -902,6 +932,11 @@ describe('indexedDbJourneyRepository', () => {
       'legacy-generation',
       'Legacy private pending title',
     );
+    const { ownerId: _orphanOwnerId, ...orphanRecord } = outboxRecord(
+      'missing-v3-journey',
+      'orphan-generation',
+      'Orphan pending title',
+    );
     const version3Db = trackDatabase(await openDB(name, 3, {
       upgrade(db, _oldVersion, _newVersion, tx) {
         const journeys = db.createObjectStore('journeys', { keyPath: 'id' });
@@ -915,6 +950,7 @@ describe('indexedDbJourneyRepository', () => {
         db.createObjectStore('journeyAutosaveOutbox', { keyPath: 'journeyId' });
         journeys.put(existingJourney);
         tx.objectStore('journeyAutosaveOutbox').put(legacyRecord);
+        tx.objectStore('journeyAutosaveOutbox').put(orphanRecord);
       },
     }));
     version3Db.close();
@@ -924,10 +960,54 @@ describe('indexedDbJourneyRepository', () => {
     const repository = createIndexedDbJourneyRepository({ db });
     const migrated = { ...legacyRecord, ownerId: 'legacy-v3' };
 
-    expect(db.version).toBe(4);
+    expect(db.version).toBe(5);
     expect(outboxStore.keyPath).toEqual(['journeyId', 'ownerId']);
     expect(Array.from(outboxStore.indexNames)).toContain('journeyId');
     await expect(repository.get(existingJourney.id, 'legacy-v3')).resolves.toEqual(migrated);
     await expect(repository.listByJourney(existingJourney.id)).resolves.toEqual([migrated]);
+    await expect(repository.get(orphanRecord.journeyId, 'legacy-v3')).resolves.toBeUndefined();
+  });
+
+  it('removes owner-scoped orphans while upgrading an existing version 4 database to v5', async () => {
+    const name = databaseName('v5-orphan-cleanup');
+    const existingJourney = {
+      ...journeyInput(),
+      id: 'existing-v4-journey',
+      status: 'draft' as const,
+      source: 'private' as const,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+    };
+    const valid = ownerOutboxRecord(existingJourney.id, ownerA, 'valid-generation', 'Valid pending title');
+    const orphan = ownerOutboxRecord('missing-v4-journey', ownerB, 'orphan-generation', 'Orphan title');
+    const version4Db = trackDatabase(await openDB(name, 4, {
+      upgrade(db) {
+        const journeys = db.createObjectStore('journeys', { keyPath: 'id' });
+        journeys.createIndex('countryCode', 'countryCode');
+        journeys.createIndex('status', 'status');
+        const moments = db.createObjectStore('moments', { keyPath: 'id' });
+        moments.createIndex('journeyId', 'journeyId');
+        moments.createIndex('journeyIdSortOrder', ['journeyId', 'sortOrder']);
+        db.createObjectStore('songs', { keyPath: 'id' });
+        db.createObjectStore('photos', { keyPath: 'id' });
+        const outbox = db.createObjectStore('journeyAutosaveOutbox', {
+          keyPath: ['journeyId', 'ownerId'],
+        });
+        outbox.createIndex('journeyId', 'journeyId');
+        journeys.put(existingJourney);
+        outbox.put(valid);
+        outbox.put(orphan);
+      },
+    }));
+    version4Db.close();
+
+    const db = trackDatabase(await openSoundPassportDb(name));
+    const repository = createIndexedDbJourneyRepository({ db });
+
+    expect(db.version).toBe(5);
+    await expect(repository.get(existingJourney.id, ownerA)).resolves.toEqual(valid);
+    const verify = db.transaction('journeyAutosaveOutbox', 'readonly');
+    await expect(verify.store.get([orphan.journeyId, ownerB])).resolves.toBeUndefined();
+    await verify.done;
   });
 });
