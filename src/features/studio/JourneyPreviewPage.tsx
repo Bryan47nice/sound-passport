@@ -46,6 +46,7 @@ export function JourneyPreviewPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [completionBusy, setCompletionBusy] = useState(false);
   const [completionError, setCompletionError] = useState('');
+  const completionPendingRef = useRef(false);
   const journeyIdRef = useRef(journeyId);
   journeyIdRef.current = journeyId;
 
@@ -102,8 +103,9 @@ export function JourneyPreviewPage() {
 
   const { story } = currentState;
   const completeJourney = async () => {
-    if (completionBusy || story.journey.status !== 'review' || !validation?.valid) return;
+    if (completionPendingRef.current || story.journey.status !== 'review' || !validation?.valid) return;
     const targetJourneyId = story.journey.id;
+    completionPendingRef.current = true;
     setCompletionBusy(true);
     setCompletionError('');
     try {
@@ -124,6 +126,7 @@ export function JourneyPreviewPage() {
         setCompletionError('無法完成旅程，請再試一次。');
       }
     } finally {
+      completionPendingRef.current = false;
       if (journeyIdRef.current === targetJourneyId) setCompletionBusy(false);
     }
   };

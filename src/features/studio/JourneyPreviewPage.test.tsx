@@ -1,11 +1,11 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import { JourneyVersionConflictError, type JourneyEditorRepository } from '../../data/ports';
-import type { JourneyStory } from '../../domain/model';
+import type { Journey, JourneyStory } from '../../domain/model';
 import { JourneyPreviewPage } from './JourneyPreviewPage';
 
 const story: JourneyStory = {
@@ -76,6 +76,16 @@ const story: JourneyStory = {
     },
   ],
 };
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
 
 function editorStub(
   nextStory: JourneyStory | undefined = story,
@@ -156,6 +166,40 @@ describe('JourneyPreviewPage', () => {
       'complete',
       { expectedUpdatedAt: reviewStory.journey.updatedAt },
     ));
+    expect(await screen.findByLabelText('目前路徑')).toHaveTextContent(`/journeys/${reviewStory.journey.id}`);
+  });
+
+  it('submits one completion while pending and recovers for retry after an error', async () => {
+    const user = userEvent.setup();
+    const reviewStory = { ...story, journey: { ...story.journey, status: 'review' as const } };
+    const firstRequest = deferred<Journey>();
+    const completed = { ...reviewStory.journey, status: 'complete' as const };
+    const setJourneyStatus = vi.fn()
+      .mockImplementationOnce(() => firstRequest.promise)
+      .mockResolvedValueOnce(completed);
+    renderPreview(editorStub(reviewStory, { setJourneyStatus }));
+
+    await user.click(await screen.findByRole('button', { name: '完成旅程' }));
+    const dialog = screen.getByRole('dialog', { name: '完成旅程' });
+    const confirm = within(dialog).getByRole('button', { name: '確認完成旅程' });
+    act(() => {
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+    });
+
+    expect(setJourneyStatus).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByRole('button', { name: '返回預覽' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: '完成中' })).toBeDisabled();
+
+    await act(async () => {
+      firstRequest.reject(new Error('transaction aborted'));
+      await firstRequest.promise.catch(() => undefined);
+    });
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('無法完成旅程，請再試一次。');
+    expect(within(dialog).getByRole('button', { name: '確認完成旅程' })).toBeEnabled();
+
+    await user.click(within(dialog).getByRole('button', { name: '確認完成旅程' }));
+    expect(setJourneyStatus).toHaveBeenCalledTimes(2);
     expect(await screen.findByLabelText('目前路徑')).toHaveTextContent(`/journeys/${reviewStory.journey.id}`);
   });
 

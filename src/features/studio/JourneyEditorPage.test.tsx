@@ -381,6 +381,41 @@ describe('JourneyEditorPage', () => {
     expect(screen.getByText('草稿')).toBeInTheDocument();
   });
 
+  it('focuses the mapped invalid field after switching to a different moment', async () => {
+    const invalidStory: JourneyStory = {
+      journey: { ...story.journey, status: 'draft' },
+      moments: [
+        story.moments[0],
+        {
+          ...story.moments[0],
+          id: 'moment-2',
+          photoUrl: '/tokyo-second.jpg',
+          photoAlt: '東京第二張街景',
+          songReferenceId: 'song-2',
+          sortOrder: 1,
+          song: {
+            ...story.moments[0].song,
+            id: 'song-2',
+            title: '',
+          },
+        },
+      ],
+    };
+    const editor = editorStub({
+      getPrivateJourneyStory: vi.fn(async () => invalidStory),
+    });
+    renderRoute(editor);
+
+    await screen.findByRole('heading', { name: story.journey.title });
+    expect(screen.getByRole('textbox', { name: '歌名' })).toHaveValue('Night Walk');
+    fireEvent.click(screen.getByRole('button', { name: '前往預覽' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('請填寫第 2 則時刻的歌名。');
+    const invalidSongTitle = screen.getByRole('textbox', { name: '歌名' });
+    expect(invalidSongTitle).toHaveValue('');
+    expect(invalidSongTitle).toHaveFocus();
+  });
+
   it('synchronously suppresses the loaded journey when the route id changes', async () => {
     const nextLoad = deferred<JourneyStory | undefined>();
     const nextStory: JourneyStory = {
@@ -802,7 +837,9 @@ describe('JourneyEditorPage', () => {
       generation: expect.any(String),
       envelope: second.envelope,
     });
-    expect(outbox.peek(story.journey.id, ownerC)?.generation).not.toBe(second.generation);
+    await waitFor(() => {
+      expect(outbox.peek(story.journey.id, ownerC)?.generation).not.toBe(second.generation);
+    });
     expect(outbox.adopt).toHaveBeenCalledWith(
       story.journey.id,
       ownerB,

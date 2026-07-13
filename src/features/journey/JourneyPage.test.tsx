@@ -15,10 +15,12 @@ import { JourneyPage } from './JourneyPage';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function editorStub(overrides: Partial<JourneyEditorRepository> = {}): JourneyEditorRepository {
@@ -139,6 +141,66 @@ describe('JourneyPage', () => {
 
     expect(deleteJourney).toHaveBeenCalledTimes(1);
     expect(deleteJourney).toHaveBeenCalledWith(privateStory.journey.id);
+    expect(await screen.findByLabelText('目前路徑')).toHaveTextContent('/studio');
+  });
+
+  it('submits one deletion while pending and recovers for retry after an error', async () => {
+    const user = userEvent.setup();
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('tokyo-2024') as JourneyStory;
+    const privateStory: JourneyStory = {
+      journey: {
+        ...fixtureStory.journey,
+        id: 'private-pending-delete',
+        source: 'private',
+      },
+      moments: fixtureStory.moments.map((moment) => ({
+        ...moment,
+        journeyId: 'private-pending-delete',
+      })),
+    };
+    const firstRequest = deferred<void>();
+    const deleteJourney = vi.fn()
+      .mockImplementationOnce(() => firstRequest.promise)
+      .mockResolvedValueOnce(undefined);
+    const query: JourneyRepository = {
+      ...fixtureJourneyRepository,
+      getJourneyStory: vi.fn(async () => privateStory),
+    };
+    render(
+      <RepositoryProvider services={{ query, editor: editorStub({ deleteJourney }) }}>
+        <MemoryRouter initialEntries={[`/journeys/${privateStory.journey.id}`]}>
+          <Routes>
+            <Route path="/journeys/:journeyId" element={<JourneyPage />} />
+            <Route path="/studio" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '刪除旅程' }));
+    const dialog = screen.getByRole('dialog');
+    const confirm = screen.getByRole('button', { name: '確認刪除旅程' });
+    act(() => {
+      fireEvent.click(confirm);
+      fireEvent.click(confirm);
+    });
+
+    expect(deleteJourney).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '刪除中' })).toBeDisabled();
+
+    await act(async () => {
+      firstRequest.reject(new Error('transaction aborted'));
+      await firstRequest.promise.catch(() => undefined);
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '無法刪除旅程，資料仍完整保留，請再試一次。',
+    );
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '確認刪除旅程' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: '確認刪除旅程' }));
+    expect(deleteJourney).toHaveBeenCalledTimes(2);
     expect(await screen.findByLabelText('目前路徑')).toHaveTextContent('/studio');
   });
 

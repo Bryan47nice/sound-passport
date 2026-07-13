@@ -1,5 +1,5 @@
 import { Pencil, Trash2 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { GuardedLink } from '../../app/navigationGuard';
 import {
@@ -26,6 +26,7 @@ export function JourneyPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const deletePendingRef = useRef(false);
   const deleteDescriptionId = useId();
 
   useEffect(() => {
@@ -51,7 +52,8 @@ export function JourneyPage() {
 
   const canManage = story.journey.source === 'private' && editor !== undefined;
   const deleteJourney = async () => {
-    if (!canManage || deleteBusy) return;
+    if (!canManage || deletePendingRef.current) return;
+    deletePendingRef.current = true;
     setDeleteBusy(true);
     setDeleteError('');
     try {
@@ -61,6 +63,7 @@ export function JourneyPage() {
     } catch {
       setDeleteError('無法刪除旅程，資料仍完整保留，請再試一次。');
     } finally {
+      deletePendingRef.current = false;
       setDeleteBusy(false);
     }
   };

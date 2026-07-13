@@ -347,6 +347,40 @@ describe('indexedDbJourneyRepository', () => {
     ))).toBe(true);
   });
 
+  it('rolls back every entity and owner outbox when a late cascade delete request fails', async () => {
+    const { db, repository } = await openRepository('delete-cascade-request-failure');
+    const journey = await repository.createJourney(journeyInput());
+    const [moment] = await repository.addMoments(journey.id, [photoInput('rollback-delete.jpg')]);
+    await repository.updateJourney(journey.id, { coverPhotoAssetId: moment.photoAssetId });
+    const ownerARecord = ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Owner A title');
+    const ownerBRecord = ownerOutboxRecord(journey.id, ownerB, 'generation-b', 'Owner B title');
+    await repository.put(ownerARecord);
+    await repository.put(ownerBRecord);
+    const beforeDelete = await repository.exportSnapshot();
+    const forcedFailure = new Error('forced photo delete failure');
+    const originalDelete = IDBObjectStore.prototype.delete;
+    let queuedDeleteRequests = 0;
+    const deleteSpy = vi.spyOn(IDBObjectStore.prototype, 'delete').mockImplementation(function (
+      this: IDBObjectStore,
+      key: IDBValidKey | IDBKeyRange,
+    ) {
+      if (this.name === 'photos') throw forcedFailure;
+      queuedDeleteRequests += 1;
+      return originalDelete.call(this, key);
+    });
+
+    try {
+      await expect(repository.deleteJourney(journey.id)).rejects.toBe(forcedFailure);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+
+    expect(queuedDeleteRequests).toBeGreaterThanOrEqual(5);
+    expect(await repository.exportSnapshot()).toEqual(beforeDelete);
+    await expect(repository.listByJourney(journey.id)).resolves.toEqual([ownerARecord, ownerBRecord]);
+    db.close();
+  });
+
   it.each(['put-first', 'delete-first'] as const)(
     'leaves no orphan for a deterministic put-vs-delete race: %s',
     async (order) => {
@@ -529,6 +563,81 @@ describe('indexedDbJourneyRepository', () => {
     });
     expect(complete.status).toBe('complete');
     db.close();
+  });
+
+  it.each([
+    ['missing options', undefined],
+    ['missing token', {}],
+    ['blank token', { expectedUpdatedAt: '   ' }],
+  ])('rejects a runtime %s before lifecycle validation', async (_label, options) => {
+    const { db, repository } = await openRepository(`status-token-${_label}`);
+    const journey = await repository.createJourney(journeyInput());
+    const runtimeSetJourneyStatus = repository.setJourneyStatus as unknown as (
+      id: string,
+      status: 'review',
+      unsafeOptions?: { expectedUpdatedAt?: string },
+    ) => Promise<unknown>;
+
+    await expect(runtimeSetJourneyStatus(journey.id, 'review', options)).rejects.toMatchObject({
+      name: 'JourneyVersionConflictError',
+      journeyId: journey.id,
+      actualUpdatedAt: journey.updatedAt,
+    });
+    expect((await repository.getPrivateJourneyStory(journey.id))?.journey.status).toBe('draft');
+    db.close();
+  });
+
+  it('rejects a stale direct completion before checking the draft transition', async () => {
+    const { db, repository } = await openRepository('stale-direct-completion');
+    const created = await repository.createJourney(journeyInput());
+    const [moment] = await repository.addMoments(created.id, [photoInput('stale-complete.jpg')]);
+    await repository.updateMoment(moment.id, {
+      song: { title: 'Valid title', artist: 'Valid artist', sourceUrl: '' },
+    });
+    const staleStory = await repository.getPrivateJourneyStory(created.id);
+    const latest = await repository.updateJourney(
+      created.id,
+      { summary: 'A concurrent summary.' },
+      { expectedUpdatedAt: staleStory!.journey.updatedAt },
+    );
+
+    await expect(repository.setJourneyStatus(created.id, 'complete', {
+      expectedUpdatedAt: staleStory!.journey.updatedAt,
+    })).rejects.toMatchObject({
+      name: 'JourneyVersionConflictError',
+      actualUpdatedAt: latest.updatedAt,
+    });
+    expect((await repository.getPrivateJourneyStory(created.id))?.journey.status).toBe('draft');
+    db.close();
+  });
+
+  it('uses freshly loaded monotonic versions for both transitions in the same millisecond', async () => {
+    const fixedNow = new Date('2099-06-07T08:09:10.000Z');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(fixedNow.getTime());
+    try {
+      const { db, repository } = await openRepository('same-millisecond-status-versions');
+      const created = await repository.createJourney(journeyInput());
+      const [moment] = await repository.addMoments(created.id, [photoInput('same-millisecond.jpg')]);
+      await repository.updateMoment(moment.id, {
+        song: { title: 'Valid title', artist: 'Valid artist', sourceUrl: '' },
+      });
+      const readyStory = await repository.getPrivateJourneyStory(created.id);
+
+      const review = await repository.setJourneyStatus(created.id, 'review', {
+        expectedUpdatedAt: readyStory!.journey.updatedAt,
+      });
+      const reviewStory = await repository.getPrivateJourneyStory(created.id);
+      expect(reviewStory?.journey.updatedAt).toBe(review.updatedAt);
+
+      const complete = await repository.setJourneyStatus(created.id, 'complete', {
+        expectedUpdatedAt: reviewStory!.journey.updatedAt,
+      });
+      expect(Date.parse(review.updatedAt)).toBe(Date.parse(readyStory!.journey.updatedAt) + 1);
+      expect(Date.parse(complete.updatedAt)).toBe(Date.parse(review.updatedAt) + 1);
+      db.close();
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('demotes a complete journey in the same journey-field save and removes it from live queries', async () => {

@@ -23,6 +23,10 @@ export interface UpdateJourneyOptions {
   expectedUpdatedAt?: string;
 }
 
+export interface SetJourneyStatusOptions {
+  expectedUpdatedAt: string;
+}
+
 export class JourneyVersionConflictError extends Error {
   constructor(
     readonly journeyId: string,
@@ -76,7 +80,7 @@ export interface JourneyEditorRepository {
   updateMoment(id: string, patch: MomentPatch, options?: UpdateMomentOptions): Promise<Moment>;
   deleteMoment(id: string): Promise<void>;
   reorderMoments(journeyId: string, orderedIds: string[]): Promise<void>;
-  setJourneyStatus(id: string, status: JourneyStatus, options?: UpdateJourneyOptions): Promise<Journey>;
+  setJourneyStatus(id: string, status: JourneyStatus, options: SetJourneyStatusOptions): Promise<Journey>;
 }
 
 export type JourneyAutosaveField =

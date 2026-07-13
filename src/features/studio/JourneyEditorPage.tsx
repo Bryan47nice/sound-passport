@@ -2,6 +2,7 @@ import { RefreshCw } from 'lucide-react';
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
@@ -224,6 +225,7 @@ function JourneyEditorWorkspace({
   const [selectedMomentId, setSelectedMomentId] = useState(story.moments[0]?.id);
   const [momentDirty, setMomentDirty] = useState(false);
   const [validationIssues, setValidationIssues] = useState<JourneyValidationIssue[]>([]);
+  const [validationFocus, setValidationFocus] = useState<{ field: string; momentId?: string }>();
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const draftRef = useRef(initialDraft);
@@ -233,7 +235,7 @@ function JourneyEditorWorkspace({
   const mountedRef = useRef(false);
   const storyRefreshGenerationRef = useRef(0);
   const momentAutosaveRef = useRef<MomentAutosaveRegistration | undefined>(undefined);
-  const pendingValidationFocusRef = useRef<{ field: string; momentId?: string } | undefined>(undefined);
+  const editorPageRef = useRef<HTMLElement>(null);
   const previewBusyRef = useRef(false);
   selectedMomentIdRef.current = selectedMomentId;
 
@@ -456,37 +458,42 @@ function JourneyEditorWorkspace({
   const presentValidation = useCallback((issues: JourneyValidationIssue[], currentStory: JourneyStory) => {
     setValidationIssues(issues);
     const firstIssue = issues[0];
-    if (!firstIssue) return;
+    if (!firstIssue) {
+      setValidationFocus(undefined);
+      return;
+    }
     const momentMatch = /^moments\.(\d+)\.(.+)$/.exec(firstIssue.field);
     if (!momentMatch) {
-      pendingValidationFocusRef.current = { field: firstIssue.field };
+      setValidationFocus({ field: firstIssue.field });
       return;
     }
 
     const moment = currentStory.moments[Number(momentMatch[1])];
     if (!moment) {
-      pendingValidationFocusRef.current = { field: 'moments' };
+      setValidationFocus({ field: 'moments' });
       return;
     }
-    pendingValidationFocusRef.current = { field: momentMatch[2], momentId: moment.id };
+    setValidationFocus({ field: momentMatch[2], momentId: moment.id });
     setSelectedMomentId(moment.id);
   }, []);
 
-  useEffect(() => {
-    const pending = pendingValidationFocusRef.current;
+  useLayoutEffect(() => {
+    const pending = validationFocus;
     if (!pending || (pending.momentId && pending.momentId !== selectedMomentId)) return;
 
+    const page = editorPageRef.current;
+    if (!page) return;
     let target: HTMLElement | undefined;
     if (pending.field === 'photo' && pending.momentId) {
-      target = [...document.querySelectorAll<HTMLElement>('[role="option"][data-id]')]
+      target = [...page.querySelectorAll<HTMLElement>('[role="option"][data-id]')]
         .find((option) => option.dataset.id === pending.momentId);
     } else {
-      target = document.querySelector<HTMLElement>(`[data-validation-field="${pending.field}"]`) ?? undefined;
+      target = page.querySelector<HTMLElement>(`[data-validation-field="${pending.field}"]`) ?? undefined;
     }
     if (!target) return;
-    pendingValidationFocusRef.current = undefined;
+    setValidationFocus((current) => current === pending ? undefined : current);
     target.focus();
-  }, [selectedMomentId, validationIssues]);
+  }, [selectedMomentId, validationFocus]);
 
   const selectMoment = useCallback((momentId: string) => {
     if (momentId === selectedMomentId) return;
@@ -560,6 +567,7 @@ function JourneyEditorWorkspace({
         return;
       }
       setValidationIssues([]);
+      setValidationFocus(undefined);
 
       if (currentStory.journey.status === 'draft') {
         await editor.setJourneyStatus(story.journey.id, 'review', {
@@ -605,7 +613,7 @@ function JourneyEditorWorkspace({
   }
 
   return (
-    <section className="journey-editor-page">
+    <section ref={editorPageRef} className="journey-editor-page">
       <header className="journey-editor-header">
         <div className="journey-editor-title">
           <p className="eyebrow">{draft.countryName} · {draft.startDate} 至 {draft.endDate}</p>

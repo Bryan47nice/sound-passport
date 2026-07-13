@@ -24,6 +24,7 @@ import {
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type PrivateDataPrimaryKeys,
+  type SetJourneyStatusOptions,
   type UpdateMomentOptions,
   JourneyEditorRepository,
   JourneyRepository,
@@ -518,13 +519,22 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       });
     },
 
-    async setJourneyStatus(id: string, status: JourneyStatus, options?: { expectedUpdatedAt?: string }) {
+    async setJourneyStatus(id: string, status: JourneyStatus, options: SetJourneyStatusOptions) {
       return runWrite(async (tx) => {
         const journeyStore = tx.objectStore('journeys');
         const journey = await journeyStore.get(id);
         if (!journey) throw missingRecord('Journey', id);
-        if (options?.expectedUpdatedAt !== undefined && journey.updatedAt !== options.expectedUpdatedAt) {
-          throw new JourneyVersionConflictError(id, options.expectedUpdatedAt, journey.updatedAt);
+        const expectedUpdatedAt = options?.expectedUpdatedAt;
+        if (
+          typeof expectedUpdatedAt !== 'string' ||
+          expectedUpdatedAt.trim() === '' ||
+          journey.updatedAt !== expectedUpdatedAt
+        ) {
+          throw new JourneyVersionConflictError(
+            id,
+            typeof expectedUpdatedAt === 'string' ? expectedUpdatedAt : '',
+            journey.updatedAt,
+          );
         }
         if (status === journey.status) return journey;
 

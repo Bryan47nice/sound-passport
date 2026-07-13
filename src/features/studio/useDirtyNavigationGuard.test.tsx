@@ -242,10 +242,12 @@ describe('useDirtyNavigationGuard', () => {
 
     await act(async () => { pending.resolve(undefined); await pending.promise; });
 
-    await waitFor(() => expect(window.location.pathname).toBe('/previous'));
-    expect(locations()[0]).toHaveTextContent('/previous');
-    expect(locations()[1]).toHaveTextContent('/previous');
-    expect(screen.getByRole('heading', { name: '上一頁' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/previous');
+      expect(locations()[0]).toHaveTextContent('/previous');
+      expect(locations()[1]).toHaveTextContent('/previous');
+      expect(screen.getByRole('heading', { name: '上一頁' })).toBeInTheDocument();
+    });
     expect(flush).toHaveBeenCalledTimes(1);
   });
 
