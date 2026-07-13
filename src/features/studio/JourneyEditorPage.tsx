@@ -343,6 +343,9 @@ function JourneyEditorWorkspace({
     momentAutosaveRef.current = registration;
     setMomentDirty(registration?.dirty ?? false);
   }, []);
+  const flushMomentBeforeReorder = useCallback(() => (
+    momentAutosaveRef.current?.flush() ?? Promise.resolve()
+  ), []);
   const flushWorkspace = useCallback(async () => {
     await Promise.all([
       autosave.flush(),
@@ -543,6 +546,7 @@ function JourneyEditorWorkspace({
           selectedMomentId={selectedMomentId}
           repository={editor}
           onSelect={selectMoment}
+          onBeforeReorder={flushMomentBeforeReorder}
           onOrderChange={updateMomentOrder}
           onReordered={(orderedIds) => refreshStory({ expectedMomentOrder: orderedIds }).then(() => undefined)}
           headerActions={(

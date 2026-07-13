@@ -8,11 +8,13 @@ import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import {
   JourneyVersionConflictError,
+  MomentVersionConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type JourneyEditorRepository,
+  type UpdateMomentOptions,
 } from '../../data/ports';
-import type { Journey, JourneyPatch, JourneyStory, Moment } from '../../domain/model';
+import type { Journey, JourneyPatch, JourneyStory, Moment, MomentPatch } from '../../domain/model';
 import { claimJourneyOutboxOwner } from './journeyOutbox';
 
 const ownerStorageKey = 'sound-passport.journey-autosave-owner-id';
@@ -931,6 +933,152 @@ describe('JourneyEditorPage', () => {
     expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual(['moment-1', 'moment-3']);
   });
 
+  it('flushes a debounced moment edit before reorder persistence and keeps both changes after reload', async () => {
+    const secondMoment = {
+      ...story.moments[0],
+      id: 'moment-2',
+      photoUrl: '/second.jpg',
+      photoAlt: 'Second moment',
+      songReferenceId: 'song-2',
+      sortOrder: 1,
+      song: { ...story.moments[0].song, id: 'song-2', title: 'Second Song' },
+    };
+    let persistedStory: JourneyStory = {
+      journey: { ...story.journey, cityLabels: [...story.journey.cityLabels] },
+      moments: [
+        { ...story.moments[0], song: { ...story.moments[0].song } },
+        secondMoment,
+      ],
+    };
+    const momentWrite = deferred();
+    const reorderWrite = deferred();
+    const operations: string[] = [];
+    const snapshot = (): JourneyStory => ({
+      journey: { ...persistedStory.journey, cityLabels: [...persistedStory.journey.cityLabels] },
+      moments: persistedStory.moments.map((moment) => ({ ...moment, song: { ...moment.song } })),
+    });
+    const getPrivateJourneyStory = vi.fn(async (id: string) => (
+      id === persistedStory.journey.id ? snapshot() : undefined
+    ));
+    const updateMoment = vi.fn(async (
+      id: string,
+      patch: MomentPatch,
+      options?: UpdateMomentOptions,
+    ): Promise<Moment> => {
+      operations.push('moment:start');
+      const current = persistedStory.moments.find((moment) => moment.id === id);
+      if (!current) throw new Error(`Missing moment ${id}`);
+      if (options?.expectedUpdatedAt !== undefined && options.expectedUpdatedAt !== current.updatedAt) {
+        throw new MomentVersionConflictError(id, options.expectedUpdatedAt, current.updatedAt);
+      }
+      await momentWrite.promise;
+      const { song: songPatch, ...momentPatch } = patch;
+      const updated = {
+        ...current,
+        ...momentPatch,
+        updatedAt: versionAfter(current.updatedAt),
+        song: songPatch ? { ...current.song, ...songPatch } : current.song,
+      };
+      persistedStory = {
+        journey: {
+          ...persistedStory.journey,
+          updatedAt: versionAfter(persistedStory.journey.updatedAt),
+        },
+        moments: persistedStory.moments.map((moment) => moment.id === id ? updated : moment),
+      };
+      operations.push('moment:commit');
+      return updated;
+    });
+    const reorderMoments = vi.fn(async (journeyId: string, orderedIds: string[]) => {
+      if (journeyId !== persistedStory.journey.id) throw new Error(`Missing journey ${journeyId}`);
+      operations.push('reorder:start');
+      await reorderWrite.promise;
+      const momentsById = new Map(persistedStory.moments.map((moment) => [moment.id, moment]));
+      persistedStory = {
+        journey: {
+          ...persistedStory.journey,
+          updatedAt: versionAfter(persistedStory.journey.updatedAt),
+        },
+        moments: orderedIds.map((id, sortOrder) => {
+          const moment = momentsById.get(id);
+          if (!moment) throw new Error(`Missing moment ${id}`);
+          return { ...moment, sortOrder, updatedAt: versionAfter(moment.updatedAt) };
+        }),
+      };
+      operations.push('reorder:commit');
+    });
+    const editor = editorStub({ getPrivateJourneyStory, updateMoment, reorderMoments });
+    const view = renderRoute(editor);
+    await screen.findByRole('heading', { name: story.journey.title });
+    vi.useFakeTimers();
+
+    const nextCaption = 'Saved before reorder';
+    fireEvent.change(screen.getByLabelText('時刻文案'), { target: { value: nextCaption } });
+    const momentList = screen.getByRole('listbox', { name: '時刻排序' });
+    const selectedOption = momentList.querySelector<HTMLElement>('[data-id="moment-1"]');
+    const moveDown = selectedOption?.querySelector<HTMLButtonElement>('.moment-order-actions button:last-child');
+    expect(moveDown).not.toBeNull();
+    fireEvent.click(moveDown!);
+    await act(flushMicrotasks);
+
+    expect(momentList.querySelectorAll('[role="option"]')).toHaveLength(2);
+    expect(within(momentList).getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      'moment-2',
+      'moment-1',
+    ]);
+    expect(operations).toEqual(['moment:start']);
+    expect(updateMoment).toHaveBeenCalledWith(
+      'moment-1',
+      { caption: nextCaption },
+      { expectedUpdatedAt: story.moments[0].updatedAt },
+    );
+    expect(reorderMoments).not.toHaveBeenCalled();
+
+    await act(async () => {
+      momentWrite.resolve();
+      await momentWrite.promise;
+      await flushMicrotasks();
+    });
+    expect(operations).toEqual(['moment:start', 'moment:commit', 'reorder:start']);
+    expect(reorderMoments).toHaveBeenCalledWith(story.journey.id, ['moment-2', 'moment-1']);
+
+    await act(async () => {
+      reorderWrite.resolve();
+      await reorderWrite.promise;
+      await flushMicrotasks();
+    });
+    expect(operations).toEqual(['moment:start', 'moment:commit', 'reorder:start', 'reorder:commit']);
+    expect(within(momentList).getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      'moment-2',
+      'moment-1',
+    ]);
+    expect(screen.getByLabelText('時刻文案')).toHaveValue(nextCaption);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重試儲存' })).not.toBeInTheDocument();
+    expect(updateMoment).toHaveBeenCalledTimes(1);
+    expect(reorderMoments).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+    await act(flushMicrotasks);
+    renderRoute(editor);
+    await act(flushMicrotasks);
+
+    const reloadedList = screen.getByRole('listbox', { name: '時刻排序' });
+    expect(within(reloadedList).getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      'moment-2',
+      'moment-1',
+    ]);
+    fireEvent.click(reloadedList.querySelector<HTMLElement>('[data-id="moment-1"]')!);
+    expect(screen.getByLabelText('時刻文案')).toHaveValue(nextCaption);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole('link', { name: '整理' }));
+    expect(await screen.findByRole('heading', { name: '整理旅程' })).toBeInTheDocument();
+    expect(updateMoment).toHaveBeenCalledTimes(1);
+    expect(reorderMoments).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the selected position aligned with the committed order when refresh returns stale ordering', async () => {
     const secondMoment = {
       ...story.moments[0],
@@ -1016,7 +1164,7 @@ describe('JourneyEditorPage', () => {
     });
   });
 
-  it('ignores an older moment refresh that resolves after a newer reorder refresh', async () => {
+  it('waits for an in-flight moment refresh before reordering without losing the committed draft', async () => {
     const olderRefresh = deferred<JourneyStory | undefined>();
     const secondMoment = {
       ...story.moments[0],
@@ -1051,14 +1199,16 @@ describe('JourneyEditorPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
     await act(flushMicrotasks);
-    expect(reorderMoments).toHaveBeenCalledTimes(1);
-    expect(getPrivateJourneyStory).toHaveBeenCalledTimes(3);
+    expect(reorderMoments).not.toHaveBeenCalled();
+    expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       olderRefresh.resolve(twoMomentStory);
       await olderRefresh.promise;
       await flushMicrotasks();
     });
+    expect(reorderMoments).toHaveBeenCalledTimes(1);
+    expect(getPrivateJourneyStory).toHaveBeenCalledTimes(3);
 
     const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
     expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([

@@ -353,6 +353,51 @@ describe('MomentList', () => {
     ]);
   });
 
+  it('does not persist a reorder until a failed pre-reorder flush is retried', async () => {
+    const onBeforeReorder = vi.fn()
+      .mockRejectedValueOnce(new Error('moment save failed'))
+      .mockResolvedValueOnce(undefined);
+    const reorderMoments = vi.fn(async () => undefined);
+    render(
+      <MomentList
+        journeyId="journey-1"
+        moments={moments}
+        selectedMomentId="first"
+        repository={{ reorderMoments }}
+        onSelect={vi.fn()}
+        onBeforeReorder={onBeforeReorder}
+      />,
+    );
+
+    const firstOption = screen.getAllByRole('option')[0];
+    const moveDown = firstOption.querySelector<HTMLButtonElement>('.moment-order-actions button:last-child');
+    expect(moveDown).not.toBeNull();
+    fireEvent.click(moveDown!);
+    await act(flushMicrotasks);
+
+    expect(onBeforeReorder).toHaveBeenCalledTimes(1);
+    expect(reorderMoments).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      'second',
+      'first',
+      'third',
+    ]);
+    const alert = await screen.findByRole('alert');
+    const retry = alert.querySelector<HTMLButtonElement>('button');
+    expect(retry).not.toBeNull();
+
+    fireEvent.click(retry!);
+    await waitFor(() => expect(reorderMoments).toHaveBeenCalledTimes(1));
+
+    expect(onBeforeReorder).toHaveBeenCalledTimes(2);
+    expect(reorderMoments).toHaveBeenCalledWith('journey-1', ['second', 'first', 'third']);
+    expect(screen.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      'second',
+      'first',
+      'third',
+    ]);
+  });
+
   it('retries the latest failed persistence with the same full order', async () => {
     const reorderMoments = vi.fn()
       .mockRejectedValueOnce(new Error('write failed'))

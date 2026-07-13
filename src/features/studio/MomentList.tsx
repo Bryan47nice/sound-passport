@@ -34,6 +34,7 @@ interface MomentListProps {
   selectedMomentId?: string;
   repository: Pick<JourneyEditorRepository, 'reorderMoments'>;
   onSelect: (momentId: string) => void;
+  onBeforeReorder?: () => void | Promise<void>;
   onOrderChange?: (orderedIds: string[]) => void;
   onReordered?: (orderedIds: string[]) => void | Promise<void>;
   headerActions?: ReactNode;
@@ -172,6 +173,7 @@ export function MomentList({
   selectedMomentId,
   repository,
   onSelect,
+  onBeforeReorder,
   onOrderChange,
   onReordered,
   headerActions,
@@ -251,6 +253,7 @@ export function MomentList({
 
     const persist = async () => {
       try {
+        await onBeforeReorder?.();
         await repository.reorderMoments(journeyId, orderedIds);
       } catch {
         if (mountedRef.current && generation === latestGenerationRef.current) {
