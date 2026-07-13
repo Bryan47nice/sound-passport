@@ -1,8 +1,8 @@
-import { openDB } from 'idb';
+import { openDB, type IDBPDatabase } from 'idb';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { NewJourney, NormalizedPhotoInput, PrivateJourneySnapshot } from '../domain/model';
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
-import { DB_VERSION, openSoundPassportDb } from './indexedDb';
+import { DB_VERSION, openSoundPassportDb, type SoundPassportDb } from './indexedDb';
 import { createIndexedDbJourneyRepository } from './indexedDbJourneyRepository';
 
 const databaseNames: string[] = [];
@@ -51,6 +51,41 @@ async function openRepository(testName: string) {
   return { db, name, repository: createIndexedDbJourneyRepository({ db }) };
 }
 
+function withMutationAfterReorderPreflight(
+  db: IDBPDatabase<SoundPassportDb>,
+  afterPreflight: () => Promise<void>,
+) {
+  let intercepted = false;
+
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property !== 'transaction') {
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+
+      return (...args: Parameters<IDBPDatabase<SoundPassportDb>['transaction']>) => {
+        const transaction = target.transaction(...args);
+        if (intercepted || args[0] !== 'moments' || args[1] !== 'readonly') return transaction;
+        intercepted = true;
+
+        return new Proxy(transaction, {
+          get(transactionTarget, transactionProperty, transactionReceiver) {
+            if (transactionProperty === 'done') {
+              return (async () => {
+                await transactionTarget.done;
+                await afterPreflight();
+              })();
+            }
+            const value = Reflect.get(transactionTarget, transactionProperty, transactionReceiver);
+            return typeof value === 'function' ? value.bind(transactionTarget) : value;
+          },
+        });
+      };
+    },
+  }) as IDBPDatabase<SoundPassportDb>;
+}
+
 afterEach(async () => {
   openDatabases.splice(0).forEach((db) => db.close());
   await Promise.all(databaseNames.splice(0).map(cleanupDb));
@@ -72,7 +107,7 @@ describe('indexedDbJourneyRepository', () => {
   });
 
   it('updates selected journey fields while preserving the rest and refreshing updatedAt', async () => {
-    const { db, repository } = await openRepository('update');
+    const { db, name, repository } = await openRepository('update');
     const created = await repository.createJourney(journeyInput());
     await new Promise((resolve) => setTimeout(resolve, 2));
 
@@ -82,6 +117,11 @@ describe('indexedDbJourneyRepository', () => {
     expect(updated).toMatchObject({ ...unchangedFields, title: 'Renamed Journey' });
     expect(updated.updatedAt).not.toBe(created.updatedAt);
     db.close();
+
+    const reopenedDb = trackDatabase(await openSoundPassportDb(name));
+    const persisted = await createIndexedDbJourneyRepository({ db: reopenedDb }).listPrivateJourneys();
+    expect(persisted).toEqual([updated]);
+    reopenedDb.close();
   });
 
   it('adds moments, songs, and photo assets in photo selection order', async () => {
@@ -120,6 +160,24 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('rejects a reorder when a concurrent delete changes the current moment set', async () => {
+    const { db, repository } = await openRepository('reorder-concurrent-delete');
+    const journey = await repository.createJourney(journeyInput());
+    const [deleted, retained] = await repository.addMoments(journey.id, [photoInput('one.jpg'), photoInput('two.jpg')]);
+    const reorderingRepository = createIndexedDbJourneyRepository({
+      db: withMutationAfterReorderPreflight(db, () => repository.deleteMoment(deleted.id)),
+    });
+
+    await expect(reorderingRepository.reorderMoments(journey.id, [retained.id, deleted.id])).rejects.toThrow(
+      'Reorder IDs must exactly match the journey moments.',
+    );
+
+    expect((await repository.getPrivateJourneyStory(journey.id))?.moments).toEqual([
+      expect.objectContaining({ id: retained.id, sortOrder: 1 }),
+    ]);
+    db.close();
+  });
+
   it('deletes a moment with its unreferenced song and photo in one transaction', async () => {
     const { db, repository } = await openRepository('delete-moment');
     const journey = await repository.createJourney(journeyInput());
@@ -151,6 +209,28 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('retains shared photo and song records when one moment owner is deleted', async () => {
+    const { db, repository } = await openRepository('shared-moment-references');
+    const journey = await repository.createJourney(journeyInput());
+    const [firstMoment] = await repository.addMoments(journey.id, [photoInput('shared.jpg')]);
+    const snapshot = await repository.exportSnapshot();
+    const secondMoment = {
+      ...firstMoment,
+      id: 'second-shared-moment',
+      sortOrder: 1,
+    };
+    await repository.importSnapshot({ ...snapshot, moments: [firstMoment, secondMoment] });
+
+    await repository.deleteMoment(firstMoment.id);
+
+    const afterDelete = await repository.exportSnapshot();
+    expect(afterDelete.moments).toEqual([secondMoment]);
+    expect(afterDelete.songs.map((song) => song.id)).toEqual([firstMoment.songReferenceId]);
+    expect(afterDelete.photos.map((photo) => photo.id)).toEqual([firstMoment.photoAssetId]);
+    expect(await repository.getPhotoAsset(firstMoment.photoAssetId!)).toBeDefined();
+    db.close();
+  });
+
   it('atomically deletes a journey and all records that belong to it', async () => {
     const { db, repository } = await openRepository('delete-journey');
     const deletedJourney = await repository.createJourney(journeyInput({ title: 'Delete' }));
@@ -171,11 +251,13 @@ describe('indexedDbJourneyRepository', () => {
   it('exposes complete journeys to queries and every private status to editor reads', async () => {
     const { db, repository } = await openRepository('visibility');
     const draft = await repository.createJourney(journeyInput({ title: 'Draft' }));
+    const review = await repository.createJourney(journeyInput({ title: 'Review' }));
     const complete = await repository.createJourney(journeyInput({ title: 'Complete' }));
+    await repository.setJourneyStatus(review.id, 'review');
     await repository.setJourneyStatus(complete.id, 'complete');
 
     expect(new Set((await repository.listPrivateJourneys()).map((journey) => journey.id))).toEqual(
-      new Set([draft.id, complete.id]),
+      new Set([draft.id, review.id, complete.id]),
     );
     expect((await repository.listJourneysByCountry('ZZ')).map((journey) => journey.id)).toEqual([complete.id]);
     expect(await repository.listCountrySummaries()).toMatchObject([{ journeyCount: 1, latestJourneyTitle: 'Complete' }]);

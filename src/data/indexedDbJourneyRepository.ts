@@ -93,6 +93,16 @@ function assertUniqueIds<T extends { id: string }>(kind: string, records: T[]) {
   return ids;
 }
 
+function assertExactReorderSet(journeyMoments: Moment[], orderedIds: string[]) {
+  const expectedIds = new Set(journeyMoments.map((moment) => moment.id));
+  const submittedIds = new Set(orderedIds);
+  const isExactSet =
+    expectedIds.size === orderedIds.length &&
+    submittedIds.size === orderedIds.length &&
+    orderedIds.every((id) => expectedIds.has(id));
+  if (!isExactSet) throw new Error('Reorder IDs must exactly match the journey moments.');
+}
+
 export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyRepositoryOptions): IndexedDbJourneyRepository {
   async function runWrite<T>(work: (tx: WriteTransaction) => Promise<T>) {
     const tx = db.transaction(stores, 'readwrite');
@@ -344,19 +354,16 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       const readTx = db.transaction('moments', 'readonly');
       const journeyMoments = await readTx.store.index('journeyId').getAll(journeyId);
       await readTx.done;
-      const expectedIds = new Set(journeyMoments.map((moment) => moment.id));
-      const submittedIds = new Set(orderedIds);
-      const isExactSet =
-        expectedIds.size === orderedIds.length &&
-        submittedIds.size === orderedIds.length &&
-        orderedIds.every((id) => expectedIds.has(id));
-      if (!isExactSet) throw new Error('Reorder IDs must exactly match the journey moments.');
+      assertExactReorderSet(journeyMoments, orderedIds);
 
       await runWrite(async (tx) => {
         const momentStore = tx.objectStore('moments');
+        const currentJourneyMoments = await momentStore.index('journeyId').getAll(journeyId);
+        assertExactReorderSet(currentJourneyMoments, orderedIds);
+        const momentsById = new Map(currentJourneyMoments.map((moment) => [moment.id, moment]));
         const timestamp = new Date().toISOString();
         for (const [sortOrder, id] of orderedIds.entries()) {
-          const moment = journeyMoments.find((item) => item.id === id)!;
+          const moment = momentsById.get(id)!;
           await momentStore.put({ ...moment, sortOrder, updatedAt: timestamp });
         }
       });
