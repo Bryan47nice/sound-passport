@@ -127,6 +127,69 @@ async function readPersistedJourney(page: Page, journeyId: string) {
   }, journeyId);
 }
 
+async function readCanonicalPrivateSnapshot(page: Page) {
+  return page.evaluate(async () => {
+    type StoredRecord = { id: string } & Record<string, unknown>;
+    type StoredPhoto = StoredRecord & { blob: Blob };
+    const storeNames = ['journeys', 'moments', 'songs', 'photos'] as const;
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('sound-passport');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const requestResult = <T>(request: IDBRequest<T>) => new Promise<T>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const stableByPrimaryKey = <T extends StoredRecord>(records: T[]) => (
+      [...records].sort((left, right) => left.id.localeCompare(right.id))
+    );
+
+    try {
+      const transaction = database.transaction(storeNames, 'readonly');
+      const completion = new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      const [journeys, moments, songs, photos] = await Promise.all([
+        requestResult(transaction.objectStore('journeys').getAll()) as Promise<StoredRecord[]>,
+        requestResult(transaction.objectStore('moments').getAll()) as Promise<StoredRecord[]>,
+        requestResult(transaction.objectStore('songs').getAll()) as Promise<StoredRecord[]>,
+        requestResult(transaction.objectStore('photos').getAll()) as Promise<StoredPhoto[]>,
+      ]);
+      await completion;
+
+      const canonicalPhotos = await Promise.all(stableByPrimaryKey(photos).map(async ({ blob, ...metadata }) => {
+        const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+        return {
+          ...metadata,
+          blob: {
+            sha256: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+            size: blob.size,
+            type: blob.type,
+          },
+        };
+      }));
+
+      return {
+        counts: {
+          journeys: journeys.length,
+          moments: moments.length,
+          photos: photos.length,
+          songs: songs.length,
+        },
+        journeys: stableByPrimaryKey(journeys),
+        moments: stableByPrimaryKey(moments),
+        photos: canonicalPhotos,
+        songs: stableByPrimaryKey(songs),
+      };
+    } finally {
+      database.close();
+    }
+  });
+}
+
 async function downloadBuffer(download: Download) {
   const stream = await download.createReadStream();
   const chunks: Buffer[] = [];
@@ -450,11 +513,11 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await expectEditorState(page, reorderedMoments, '草稿');
 
   diagnostics.setStage('draft preview without status mutation or autoplay');
-  const draftState = await readPersistedJourney(page, journeyId);
+  const draftSnapshotBeforePreview = await readCanonicalPrivateSnapshot(page);
   await page.goto(`/studio/journeys/${journeyId}/preview`);
   await expect(page.getByRole('heading', { level: 1, name: journeyFixture.title })).toBeVisible();
   await expect(page.getByRole('button', { name: '完成旅程' })).toHaveCount(0);
-  expect(await readPersistedJourney(page, journeyId)).toEqual(draftState);
+  expect(await readCanonicalPrivateSnapshot(page)).toEqual(draftSnapshotBeforePreview);
   const draftPreviewFrame = page.getByTitle('YouTube player');
   await expect(draftPreviewFrame).toHaveAttribute('src', /youtube-nocookie\.com/);
   await expect(draftPreviewFrame).toHaveAttribute('src', /autoplay=0/);
@@ -468,7 +531,7 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await expect(page).toHaveURL(new RegExp(`/studio/journeys/${journeyId}/preview$`));
   await expect(page.getByRole('button', { name: '完成旅程' })).toBeVisible();
   await expect.poll(async () => (await readPersistedJourney(page, journeyId))?.status).toBe('review');
-  const previewState = await readPersistedJourney(page, journeyId);
+  const reviewSnapshotBeforePreview = await readCanonicalPrivateSnapshot(page);
   const previewFrame = page.getByTitle('YouTube player');
   await expect(previewFrame).toHaveCount(1);
   await expect(previewFrame).toHaveAttribute('src', /youtube-nocookie\.com/);
@@ -479,7 +542,7 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await verifyRouteLayout(page);
   await page.reload();
   await expect(page.getByRole('button', { name: '完成旅程' })).toBeVisible();
-  expect(await readPersistedJourney(page, journeyId)).toEqual(previewState);
+  expect(await readCanonicalPrivateSnapshot(page)).toEqual(reviewSnapshotBeforePreview);
 
   diagnostics.setStage('explicit completion');
   await page.getByRole('button', { name: '完成旅程' }).click();
@@ -535,6 +598,8 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   const backup = await downloadBuffer(download);
   const backupFiles = unzipSync(new Uint8Array(backup));
   expect(Object.keys(backupFiles).filter((path) => path.startsWith('photos/'))).toHaveLength(2);
+  const snapshotBeforeClear = await readCanonicalPrivateSnapshot(page);
+  expect(snapshotBeforeClear.counts).toEqual({ journeys: 1, moments: 2, photos: 2, songs: 2 });
 
   diagnostics.setStage('clear private data');
   await page.getByRole('button', { name: '清除私人資料' }).click();
@@ -542,6 +607,13 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await clearDialog.getByLabel('輸入確認文字').fill('清除我的私人旅程');
   await clearDialog.getByRole('button', { name: '永久清除私人資料' }).click();
   await expect(clearDialog).toHaveCount(0);
+  expect(await readCanonicalPrivateSnapshot(page)).toEqual({
+    counts: { journeys: 0, moments: 0, photos: 0, songs: 0 },
+    journeys: [],
+    moments: [],
+    photos: [],
+    songs: [],
+  });
   await page.getByRole('link', { name: '世界地圖' }).click();
   await expect(page.getByLabel('旅行世界地圖')).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
   await expect(page.getByRole('button', { name: '台灣，1 趟旅程' })).toHaveCount(0);
@@ -550,8 +622,10 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
 
   diagnostics.setStage('real backup import and complete restore');
   await page.getByRole('link', { name: '整理' }).click();
-  const importInput = page.locator('input[type="file"][accept=".soundpassport"]');
-  await importInput.setInputFiles({
+  const validFileChooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: '匯入私人備份' }).click();
+  const validFileChooser = await validFileChooserPromise;
+  await validFileChooser.setFiles({
     buffer: backup,
     mimeType: 'application/vnd.sound-passport.backup',
     name: 'synthetic-journey.soundpassport',
@@ -564,15 +638,55 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await expect(importDialog.getByText('匯入完成', { exact: true })).toBeVisible();
   await importDialog.getByRole('button', { name: '完成' }).click();
   await expect(importDialog).toHaveCount(0);
+  const snapshotAfterRestore = await readCanonicalPrivateSnapshot(page);
+  expect(snapshotAfterRestore.counts).toEqual(snapshotBeforeClear.counts);
+  expect(snapshotAfterRestore).toEqual(snapshotBeforeClear);
   await page.getByRole('tab', { name: '已完成' }).click();
   await expect(page.getByRole('link', { name: journeyFixture.title })).toHaveCount(1);
   await page.getByRole('link', { name: journeyFixture.title }).click();
   await expectEditorState(page, reorderedMoments, '已完成');
 
+  diagnostics.setStage('post-restore atlas to country to complete playback');
+  await page.getByRole('link', { name: '世界地圖' }).click();
+  await expect(page.getByLabel('旅行世界地圖')).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
+  const restoredTaiwanMarker = page.getByRole('button', { name: '台灣，1 趟旅程' });
+  await expect(restoredTaiwanMarker).toBeVisible();
+  await verifyRouteLayout(page);
+  await restoredTaiwanMarker.click();
+  await expect(page).toHaveURL(/\/countries\/TW$/);
+  await expect(page.getByRole('heading', { level: 1, name: journeyFixture.countryName })).toBeVisible();
+  await verifyRouteLayout(page);
+  await page.getByRole('link', { name: new RegExp(journeyFixture.title) }).click();
+  await expect(page).toHaveURL(new RegExp(`/journeys/${journeyId}$`));
+  await expectLoadedImages(page.locator('.moment-row img'), 2);
+  const restoredJourneyRows = page.locator('.moment-row');
+  await expect(restoredJourneyRows.nth(0)).toContainText(momentFixtures[1].caption);
+  await expect(restoredJourneyRows.nth(1)).toContainText(momentFixtures[0].caption);
+  await verifyRouteLayout(page);
+  await page.getByRole('link', { name: '播放這趟旅程' }).click();
+  await expect(page.getByText('1 / 2', { exact: true })).toBeVisible();
+  await expect(page.locator('.player-copy h1')).toHaveText(momentFixtures[1].songTitle);
+  await expectImageDimensions(page.locator('.player-photo'), momentFixtures[1].width, momentFixtures[1].height);
+  await expect(page.getByTitle('YouTube player')).toHaveCount(0);
+  await verifyRouteLayout(page);
+  await page.getByRole('button', { name: '下一個時刻' }).click();
+  await expect(page.getByText('2 / 2', { exact: true })).toBeVisible();
+  await expect(page.locator('.player-copy h1')).toHaveText(momentFixtures[0].songTitle);
+  await expectImageDimensions(page.locator('.player-photo'), momentFixtures[0].width, momentFixtures[0].height);
+  const restoredPlayerFrame = page.getByTitle('YouTube player');
+  await expect(restoredPlayerFrame).toHaveAttribute('src', /youtube-nocookie\.com/);
+  await expect(restoredPlayerFrame).toHaveAttribute('src', /autoplay=0/);
+  await expect(restoredPlayerFrame).not.toHaveAttribute('allow', /autoplay/);
+  await verifyRouteLayout(page);
+
   diagnostics.setStage('corrupted photo import rejection');
   const corruptedBackup = corruptFirstPhoto(backup);
   await page.getByRole('link', { name: '整理' }).click();
-  await importInput.setInputFiles({
+  const snapshotBeforeDamagedImport = await readCanonicalPrivateSnapshot(page);
+  const damagedFileChooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: '匯入私人備份' }).click();
+  const damagedFileChooser = await damagedFileChooserPromise;
+  await damagedFileChooser.setFiles({
     buffer: corruptedBackup,
     mimeType: 'application/vnd.sound-passport.backup',
     name: 'synthetic-journey-corrupted.soundpassport',
@@ -581,6 +695,7 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   await expect(invalidDialog.getByRole('alert')).toHaveText('備份照片驗證失敗，無法匯入。');
   await invalidDialog.getByRole('button', { name: '關閉' }).click();
   await expect(invalidDialog).toHaveCount(0);
+  expect(await readCanonicalPrivateSnapshot(page)).toEqual(snapshotBeforeDamagedImport);
   await page.getByRole('tab', { name: '已完成' }).click();
   await expect(page.getByRole('link', { name: journeyFixture.title })).toHaveCount(1);
   await page.getByRole('link', { name: journeyFixture.title }).click();
