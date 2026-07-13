@@ -16,6 +16,12 @@ function editorStub(): JourneyEditorRepository {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
 function renderPage(editor = editorStub()) {
   render(
     <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
@@ -31,7 +37,7 @@ function renderPage(editor = editorStub()) {
 }
 
 describe('JourneyCreatePage', () => {
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
   it('requires a title, selected country, and valid date range', async () => {
     const user = userEvent.setup();
@@ -69,5 +75,43 @@ describe('JourneyCreatePage', () => {
       title: '春天散步', countryCode: 'JP', countryName: '日本', countryCoordinates: findCountry('JP')?.coordinates, cityLabels: ['東京'],
     }));
     expect(await screen.findByRole('heading', { name: '編輯器目標' })).toBeInTheDocument();
+  });
+
+  it('disables submission and creates exactly once during a deferred double-click', async () => {
+    const user = userEvent.setup();
+    const creation = deferred<Awaited<ReturnType<JourneyEditorRepository['createJourney']>>>();
+    const editor = editorStub();
+    vi.mocked(editor.createJourney).mockImplementation(() => creation.promise);
+    renderPage(editor);
+    await user.type(screen.getByLabelText('旅程標題'), '春天散步');
+    await user.type(screen.getByLabelText('國家'), '日本');
+    await user.type(screen.getByLabelText('開始日期'), '2024-05-01');
+    await user.type(screen.getByLabelText('結束日期'), '2024-05-03');
+
+    await user.dblClick(screen.getByRole('button', { name: '建立旅程' }));
+
+    expect(editor.createJourney).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: '建立中…' })).toBeDisabled();
+    creation.resolve({
+      id: 'new-journey', title: '春天散步', countryCode: 'JP', countryName: '日本', countryCoordinates: [139.6917, 35.6895],
+      cityLabels: [], startDate: '2024-05-01', endDate: '2024-05-03', summary: '', status: 'draft', source: 'private',
+      createdAt: '2024-05-01T00:00:00.000Z', updatedAt: '2024-05-01T00:00:00.000Z',
+    });
+    expect(await screen.findByRole('heading', { name: '編輯器目標' })).toBeInTheDocument();
+  });
+
+  it('shows mobile guidance and suppresses every editable control', () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    renderPage();
+
+    expect(screen.getByRole('heading', { name: '請使用電腦整理旅程' })).toBeInTheDocument();
+    expect(document.querySelector('form')).not.toBeInTheDocument();
+    expect(document.querySelector('input')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '建立旅程' })).not.toBeInTheDocument();
   });
 });

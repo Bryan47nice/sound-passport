@@ -28,4 +28,18 @@ describe('filterJourneysByStudioStatus', () => {
   ] as const)('returns only %s journeys', (status, ids) => {
     expect(filterJourneysByStudioStatus(journeys, status).map((journey) => journey.id)).toEqual(ids);
   });
+
+  it('sorts a copied status subset by updated time descending and then ID', () => {
+    const input = [
+      { ...journeys[0], id: 'draft-b', updatedAt: '2024-02-01T00:00:00.000Z' },
+      { ...journeys[0], id: 'draft-new', updatedAt: '2024-03-01T00:00:00.000Z' },
+      { ...journeys[0], id: 'draft-a', updatedAt: '2024-02-01T00:00:00.000Z' },
+      journeys[1],
+    ];
+
+    expect(filterJourneysByStudioStatus(input, 'draft').map((journey) => journey.id))
+      .toEqual(['draft-new', 'draft-a', 'draft-b']);
+    expect(input.map((journey) => journey.id))
+      .toEqual(['draft-b', 'draft-new', 'draft-a', 'review']);
+  });
 });

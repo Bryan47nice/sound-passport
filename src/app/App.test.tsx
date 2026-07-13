@@ -35,6 +35,20 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: '本機儲存空間暫時無法使用' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '找不到這個頁面' })).not.toBeInTheDocument();
   });
+
+  it('renders an explicit Task 6 transition at the editor route with a path back to Studio', () => {
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
+        <MemoryRouter initialEntries={['/studio/journeys/new-journey']}><App /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(screen.getByRole('heading', { name: '旅程編輯功能即將開放' })).toBeInTheDocument();
+    expect(screen.getByText('旅程已建立，下一階段將在這裡提供完整編輯功能。')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '回到整理工作台' })).toHaveAttribute('href', '/studio');
+    expect(screen.queryByRole('heading', { name: '旅程編輯器' })).not.toBeInTheDocument();
+  });
+
   it('shows a not-found page for an unknown route', () => {
     render(
       <RepositoryProvider services={{ query: fixtureJourneyRepository }}>

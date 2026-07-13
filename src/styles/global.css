@@ -29,6 +29,7 @@ button { font: inherit; }
 .journey-arrow { font-size: 24px; line-height: 1; text-align: center; }
 .primary-command { display: inline-flex; align-items: center; min-height: 44px; max-width: 100%; margin-top: 20px; padding: 0 16px; border-radius: var(--radius); background: var(--coral); color: white; font-weight: 800; overflow-wrap: anywhere; }
 .primary-command { gap: 8px; border: 0; cursor: pointer; }
+.primary-command:disabled { cursor: wait; opacity: .62; }
 .moment-list { margin: 32px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
 .moment-row { display: grid; grid-template-columns: 42px 104px minmax(190px, 1fr) minmax(220px, 1.4fr); gap: 16px; align-items: start; min-height: 96px; padding: 18px 0; border-bottom: 1px solid var(--line); }
 .moment-number, .moment-details, .moment-row p { min-width: 0; overflow-wrap: anywhere; }
@@ -80,14 +81,24 @@ button { font: inherit; }
 .studio-tabs button { min-height: 42px; padding: 0; color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; font-weight: 800; cursor: pointer; }
 .studio-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--coral); }
 .studio-table-wrap { overflow-x: auto; }
-.studio-table { width: 100%; min-width: 800px; border-collapse: collapse; text-align: left; }
-.studio-table th, .studio-table td { padding: 16px 12px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: middle; white-space: nowrap; }
+.studio-table { width: 100%; min-width: 980px; border-collapse: collapse; text-align: left; }
+.studio-table th, .studio-table td { height: 68px; padding: 12px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: middle; white-space: nowrap; }
 .studio-table thead th { color: var(--muted); font-size: 12px; font-weight: 800; }
-.studio-table tbody th { padding-left: 0; font-size: 15px; }
+.studio-table tbody th { font-size: 15px; }
 .studio-table tbody th a:hover { color: var(--coral); }
-.studio-empty, .studio-loading { min-height: 220px; padding: 48px 0; border-bottom: 1px solid var(--line); }
+.studio-cover-cell { width: 68px; }
+.studio-cover-frame { display: grid; width: 52px; height: 40px; place-items: center; overflow: hidden; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; }
+.studio-cover-thumb { width: 100%; height: 100%; object-fit: cover; }
+.studio-cover-placeholder { color: var(--muted); font-size: 10px; font-weight: 800; }
+.studio-missing-badges { display: flex; align-items: center; gap: 5px; }
+.studio-missing-badges span { display: inline-flex; align-items: baseline; gap: 4px; min-height: 24px; padding: 3px 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; background: var(--paper); font-size: 11px; font-weight: 700; }
+.studio-missing-badges strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.studio-empty, .studio-loading, .studio-error { min-height: 220px; padding: 48px 0; border-bottom: 1px solid var(--line); }
 .studio-empty p { margin: 0; color: var(--muted); }
 .studio-empty .primary-command { margin-top: 16px; }
+.studio-loading p, .studio-error p { margin: 0; color: var(--muted); }
+.studio-error h2 { margin: 0 0 8px; font-size: 20px; letter-spacing: 0; }
+.studio-state-action { display: inline-flex; align-items: center; gap: 7px; margin-top: 18px; }
 .studio-guidance { display: grid; min-height: calc(100vh - 56px); align-content: center; max-width: 720px; }
 .studio-guidance p { max-width: 500px; line-height: 1.7; }
 .journey-create-page { padding-top: 32px; }
@@ -107,7 +118,9 @@ button { font: inherit; }
 .city-chips button:hover, .city-chips button:focus-visible { color: var(--coral); background: var(--paper); }
 .form-actions { display: flex; justify-content: flex-end; }
 .form-actions .primary-command { margin-top: 0; }
-.studio-route-target { padding-top: 32px; }
+.studio-route-target { max-width: 760px; padding-top: 64px; }
+.studio-route-target .page-title { max-width: 680px; font-size: 34px; }
+.studio-route-target .muted { margin: 14px 0 0; line-height: 1.7; }
 @media (max-width: 640px) {
   .app-header { gap: 8px; padding: 0 14px; }
   .app-navigation a { padding: 0 8px; font-size: 13px; }

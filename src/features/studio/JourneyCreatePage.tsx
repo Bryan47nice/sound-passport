@@ -1,27 +1,12 @@
 import { Plus, X } from 'lucide-react';
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useOptionalJourneyEditorRepository } from '../../data/RepositoryContext';
 import { listCountries, type CountryOption } from '../../domain/countryCatalog';
+import { useMobileStudio } from './useMobileStudio';
 
 type FieldName = 'title' | 'country' | 'startDate' | 'endDate';
 type ValidationErrors = Partial<Record<FieldName, string>>;
-
-function useMobileStudio() {
-  const query = '(max-width: 640px)';
-  const [isMobile, setIsMobile] = useState(() => window.matchMedia?.(query).matches ?? false);
-
-  useEffect(() => {
-    const media = window.matchMedia?.(query);
-    if (!media) return;
-    const update = () => setIsMobile(media.matches);
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, []);
-
-  return isMobile;
-}
 
 function fieldError(errors: ValidationErrors, name: FieldName) {
   return errors[name] ? <p className="field-error" id={`${name}-error`}>{errors[name]}</p> : null;
@@ -41,6 +26,8 @@ export function JourneyCreatePage() {
   const [summary, setSummary] = useState('');
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [submitError, setSubmitError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   if (isMobile) {
     return <section className="page studio-guidance"><h1 className="page-title">請使用電腦整理旅程</h1></section>;
@@ -64,6 +51,8 @@ export function JourneyCreatePage() {
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (submittingRef.current) return;
+
     const nextErrors: ValidationErrors = {};
     if (!title.trim()) nextErrors.title = '請填寫此欄位';
     if (!country) nextErrors.country = '請填寫此欄位';
@@ -74,6 +63,8 @@ export function JourneyCreatePage() {
     setSubmitError('');
     if (Object.keys(nextErrors).length > 0 || !country) return;
 
+    submittingRef.current = true;
+    setIsSubmitting(true);
     try {
       const journey = await editor.createJourney({
         title: title.trim(),
@@ -88,6 +79,9 @@ export function JourneyCreatePage() {
       navigate(`/studio/journeys/${journey.id}`);
     } catch {
       setSubmitError('無法建立旅程，請再試一次');
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
@@ -129,7 +123,11 @@ export function JourneyCreatePage() {
           <textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={5} />
         </label>
         {submitError && <p className="form-wide field-error" role="alert">{submitError}</p>}
-        <div className="form-wide form-actions"><button className="primary-command" type="submit"><Plus size={18} aria-hidden="true" />建立旅程</button></div>
+        <div className="form-wide form-actions">
+          <button className="primary-command" type="submit" disabled={isSubmitting}>
+            <Plus size={18} aria-hidden="true" />{isSubmitting ? '建立中…' : '建立旅程'}
+          </button>
+        </div>
       </form>
     </section>
   );
