@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { App } from './app/App';
+import { BackupService } from './backup/backupService';
 import { bootstrapRepositoryServices } from './bootstrap';
 import { openSoundPassportDb } from './data/indexedDb';
 import { createIndexedDbJourneyRepository } from './data/indexedDbJourneyRepository';
@@ -27,4 +28,5 @@ void bootstrapRepositoryServices({
   renderServices: renderApp,
   openDatabase: openSoundPassportDb,
   createPrivateRepository: (db) => createIndexedDbJourneyRepository({ db }),
+  createBackupService: (privateData) => new BackupService(privateData),
 });

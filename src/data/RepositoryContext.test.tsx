@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
 import type { ComponentProps, PropsWithChildren } from 'react';
 import { describe, expect, it } from 'vitest';
+import type { BackupService } from '../backup/backupService';
 import { fixtureJourneyRepository } from './fixtureJourneyRepository';
 import type {
   JourneyAutosaveOutboxPort,
@@ -10,10 +11,12 @@ import type {
 } from './ports';
 import {
   RepositoryProvider,
+  useBackupService,
   useJourneyAutosaveOutbox,
   useJourneyEditorRepository,
   useJourneyRepository,
   useInvalidateRepositoryQueries,
+  useOptionalBackupService,
   useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
   usePhotoAssetRepository,
@@ -35,6 +38,7 @@ const editor = {} as JourneyEditorRepository;
 const outbox = {} as JourneyAutosaveOutboxPort;
 const photos = {} as PhotoAssetRepository;
 const privateData = {} as PrivateDataPort;
+const backup = {} as BackupService;
 const privateStorageError = '請關閉其他分頁後重新嘗試';
 
 function AllServicesProvider({ children }: PropsWithChildren) {
@@ -45,6 +49,7 @@ function AllServicesProvider({ children }: PropsWithChildren) {
       outbox,
       photos,
       privateData,
+      backup,
       privateStorageError,
     }}>
       {children}
@@ -72,6 +77,8 @@ describe('repository service hooks', () => {
       .toBe(photos);
     expect(renderHook(usePrivateDataPort, { wrapper: AllServicesProvider }).result.current)
       .toBe(privateData);
+    expect(renderHook(useBackupService, { wrapper: AllServicesProvider }).result.current)
+      .toBe(backup);
     expect(renderHook(usePrivateStorageError, { wrapper: AllServicesProvider }).result.current)
       .toBe(privateStorageError);
   });
@@ -107,6 +114,13 @@ describe('repository service hooks', () => {
   it('throws the exact private-data error when private data is absent', () => {
     expect(() => renderHook(usePrivateDataPort, { wrapper: QueryOnlyProvider }))
       .toThrowError(/^PrivateDataPort is not available$/);
+  });
+
+  it('keeps backup commands unavailable in fixture-only services', () => {
+    expect(renderHook(useOptionalBackupService, { wrapper: QueryOnlyProvider }).result.current)
+      .toBeUndefined();
+    expect(() => renderHook(useBackupService, { wrapper: QueryOnlyProvider }))
+      .toThrowError(/^BackupService is not available$/);
   });
 
   it('advances a provider-local query revision only when a caller invalidates live repository reads', () => {

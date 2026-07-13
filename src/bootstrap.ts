@@ -1,4 +1,5 @@
 import { createCombinedJourneyRepository } from './data/combinedJourneyRepository';
+import type { BackupService } from './backup/backupService';
 import { DATABASE_BLOCKED_MESSAGE } from './data/indexedDb';
 import type {
   JourneyAutosaveOutboxPort,
@@ -20,6 +21,7 @@ interface BootstrapRepositoryServicesOptions<Database> {
   renderServices: (services: RepositoryServices) => void;
   openDatabase: () => Promise<Database>;
   createPrivateRepository: (database: Database) => PrivateRepository;
+  createBackupService: (privateData: PrivateDataPort) => BackupService;
 }
 
 export function bootstrapRepositoryServices<Database>({
@@ -27,18 +29,21 @@ export function bootstrapRepositoryServices<Database>({
   renderServices,
   openDatabase,
   createPrivateRepository,
+  createBackupService,
 }: BootstrapRepositoryServicesOptions<Database>): Promise<void> {
   renderServices({ query: fixtureRepository });
 
   return openDatabase().then(
     (database) => {
       const privateRepository = createPrivateRepository(database);
+      const backup = createBackupService(privateRepository);
       renderServices({
         query: createCombinedJourneyRepository(fixtureRepository, privateRepository),
         editor: privateRepository,
         outbox: privateRepository,
         photos: privateRepository,
         privateData: privateRepository,
+        backup,
       });
     },
     (error: unknown) => {

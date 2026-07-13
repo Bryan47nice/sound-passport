@@ -6,6 +6,7 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
+import type { BackupService } from '../backup/backupService';
 import type {
   JourneyAutosaveOutboxPort,
   JourneyEditorRepository,
@@ -20,6 +21,7 @@ export interface RepositoryServices {
   outbox?: JourneyAutosaveOutboxPort;
   photos?: PhotoAssetRepository;
   privateData?: PrivateDataPort;
+  backup?: BackupService;
   privateStorageError?: string;
 }
 
@@ -95,4 +97,14 @@ export function usePrivateDataPort(): PrivateDataPort {
   const privateData = useContext(Context)?.privateData;
   if (!privateData) throw new Error('PrivateDataPort is not available');
   return privateData;
+}
+
+export function useBackupService(): BackupService {
+  const backup = useContext(Context)?.backup;
+  if (!backup) throw new Error('BackupService is not available');
+  return backup;
+}
+
+export function useOptionalBackupService(): BackupService | undefined {
+  return useContext(Context)?.backup;
 }

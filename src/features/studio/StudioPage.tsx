@@ -1,8 +1,9 @@
-import { Download, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Plus, RefreshCw } from 'lucide-react';
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { GuardedLink } from '../../app/navigationGuard';
 import {
   useOptionalJourneyEditorRepository,
+  useOptionalBackupService,
   usePrivateStorageError,
   useRepositoryRevision,
 } from '../../data/RepositoryContext';
@@ -10,6 +11,7 @@ import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStatus, JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { filterJourneysByStudioStatus } from './studioFilters';
+import { BackupControls } from './BackupControls';
 import { useMobileStudio } from './useMobileStudio';
 
 type JourneyRow = {
@@ -56,6 +58,7 @@ const updatedAtFormatter = new Intl.DateTimeFormat('zh-TW', {
 
 export function StudioPage({ onBootstrapRetry = () => window.location.reload() }: StudioPageProps) {
   const editor = useOptionalJourneyEditorRepository();
+  const backup = useOptionalBackupService();
   const privateStorageError = usePrivateStorageError();
   const repositoryRevision = useRepositoryRevision();
   const isMobile = useMobileStudio();
@@ -148,20 +151,19 @@ export function StudioPage({ onBootstrapRetry = () => window.location.reload() }
           <p className="eyebrow">私人旅程</p>
           <h1 className="page-title">整理旅程</h1>
         </div>
-        <div className="studio-toolbar" role="toolbar" aria-label="旅程工具">
-          <GuardedLink className="primary-command studio-create-command" to="/studio/journeys/new">
-            <Plus size={18} aria-hidden="true" />新增旅程
-          </GuardedLink>
-          <button className="icon-command" type="button" disabled title="即將可用" aria-label="匯出備份，即將可用">
-            <Download size={18} aria-hidden="true" />
-          </button>
-          <button className="icon-command" type="button" disabled title="即將可用" aria-label="匯入備份，即將可用">
-            <Upload size={18} aria-hidden="true" />
-          </button>
-          <button className="icon-command" type="button" disabled title="即將可用" aria-label="清除私人資料，即將可用">
-            <Trash2 size={18} aria-hidden="true" />
-          </button>
-        </div>
+        {backup ? (
+          <BackupControls>
+            <GuardedLink className="primary-command studio-create-command" to="/studio/journeys/new">
+              <Plus size={18} aria-hidden="true" />新增旅程
+            </GuardedLink>
+          </BackupControls>
+        ) : (
+          <div className="studio-toolbar" role="toolbar" aria-label="旅程工具">
+            <GuardedLink className="primary-command studio-create-command" to="/studio/journeys/new">
+              <Plus size={18} aria-hidden="true" />新增旅程
+            </GuardedLink>
+          </div>
+        )}
       </div>
 
       <div className="studio-tabs" role="tablist" aria-label="旅程狀態">

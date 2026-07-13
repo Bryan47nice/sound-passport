@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { BackupService } from '../../backup/backupService';
 import { RepositoryProvider, useInvalidateRepositoryQueries } from '../../data/RepositoryContext';
 import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStory } from '../../domain/model';
@@ -58,9 +59,18 @@ function editorStub(overrides: Partial<JourneyEditorRepository> = {}): JourneyEd
   };
 }
 
-function renderPage(editor = editorStub()) {
+function backupStub(): BackupService {
+  return {
+    exportBackup: vi.fn(async () => new Blob()),
+    planImport: vi.fn(),
+    commitImport: vi.fn(),
+    clearPrivateData: vi.fn(),
+  } as unknown as BackupService;
+}
+
+function renderPage(editor = editorStub(), backup = backupStub()) {
   return render(
-    <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
+    <RepositoryProvider services={{ query: fixtureJourneyRepository, editor, backup }}>
       <MemoryRouter><StudioPage /></MemoryRouter>
     </RepositoryProvider>,
   );
@@ -228,13 +238,14 @@ describe('StudioPage', () => {
     expect(listPrivateJourneys).toHaveBeenCalledTimes(2);
   });
 
-  it('uses the new journey route and labels unavailable controls truthfully', async () => {
+  it('uses the new journey route and exposes functional private data controls', async () => {
     renderPage();
     expect(await screen.findByRole('link', { name: '新增旅程' })).toHaveAttribute('href', '/studio/journeys/new');
-    expect(screen.getByRole('button', { name: '匯出備份，即將可用' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '匯入備份，即將可用' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '清除私人資料，即將可用' })).toBeDisabled();
-    expect(within(screen.getByRole('toolbar')).getAllByTitle('即將可用')).toHaveLength(3);
+    expect(screen.getByRole('button', { name: '匯出私人備份' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '匯入私人備份' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '清除私人資料' })).toBeEnabled();
+    expect(screen.getByLabelText('選擇 Sound Passport 備份檔')).toHaveAttribute('accept', '.soundpassport');
+    expect(screen.getByText('備份檔包含您的私人照片與文字，請妥善保管。')).toBeVisible();
   });
 
   it('shows local storage guidance when the editor service is unavailable', () => {
