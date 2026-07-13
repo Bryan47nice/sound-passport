@@ -64,51 +64,6 @@ function crc32(bytes: Uint8Array) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function isPlausibleEocd(view: DataView, offset: number, boundary: number) {
-  if (offset > boundary - MINIMUM_EOCD_BYTES) return false;
-  const commentLength = view.getUint16(offset + 20, true);
-  if (offset + MINIMUM_EOCD_BYTES + commentLength > boundary) return false;
-
-  const diskNumber = view.getUint16(offset + 4, true);
-  const centralDirectoryDisk = view.getUint16(offset + 6, true);
-  const diskEntryCount = view.getUint16(offset + 8, true);
-  const entryCount = view.getUint16(offset + 10, true);
-  const centralSize = view.getUint32(offset + 12, true);
-  const centralOffset = view.getUint32(offset + 16, true);
-  if (
-    diskNumber !== 0 || centralDirectoryDisk !== 0 || diskEntryCount !== entryCount ||
-    entryCount === ZIP64_UINT16 || centralSize === ZIP64_UINT32 || centralOffset === ZIP64_UINT32 ||
-    centralOffset > offset || centralSize !== offset - centralOffset
-  ) {
-    return false;
-  }
-
-  let cursor = centralOffset;
-  for (let index = 0; index < entryCount; index += 1) {
-    if (cursor > offset - 46 || view.getUint32(cursor, true) !== CENTRAL_HEADER_SIGNATURE) return false;
-    const recordLength = 46 + view.getUint16(cursor + 28, true) +
-      view.getUint16(cursor + 30, true) + view.getUint16(cursor + 32, true);
-    if (recordLength > offset - cursor) return false;
-    cursor += recordLength;
-  }
-  return cursor === offset;
-}
-
-function assertSingleEocd(bytes: Uint8Array, view: DataView, finalOffset: number) {
-  for (
-    let offset = bytes.indexOf(0x50);
-    offset >= 0 && offset < finalOffset;
-    offset = bytes.indexOf(0x50, offset + 1)
-  ) {
-    if (
-      view.getUint32(offset, true) === END_OF_CENTRAL_DIRECTORY_SIGNATURE &&
-      isPlausibleEocd(view, offset, finalOffset)
-    ) {
-      invalidContainer('multiple end-of-central-directory records are ambiguous');
-    }
-  }
-}
-
 function assertNoZip64EndRecords(bytes: Uint8Array, view: DataView, eocdOffset: number) {
   const locatorOffset = eocdOffset - 20;
   if (
@@ -135,7 +90,6 @@ function findEndOfCentralDirectory(bytes: Uint8Array, view: DataView) {
   }
   if (view.getUint16(offset + 20, true) !== 0) invalidContainer('ZIP comments are not supported');
   assertNoZip64EndRecords(bytes, view, offset);
-  assertSingleEocd(bytes, view, offset);
   return offset;
 }
 

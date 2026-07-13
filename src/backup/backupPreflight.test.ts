@@ -32,6 +32,15 @@ interface SyntheticZipOptions {
   comment?: Uint8Array;
 }
 
+class MarkerCountingBytes extends Uint8Array {
+  markerSearches = 0;
+
+  override indexOf(searchElement: number, fromIndex?: number) {
+    this.markerSearches += 1;
+    return super.indexOf(searchElement, fromIndex);
+  }
+}
+
 class EmptyPrivateDataPort implements PrivateDataPort {
   async exportSnapshot(): Promise<PrivateJourneySnapshot> {
     return { journeys: [], moments: [], songs: [], photos: [] };
@@ -220,6 +229,18 @@ describe('backup ZIP central-directory preflight', () => {
 
   it('rejects a hybrid ZIP64 locator and EOCD before decompression', async () => {
     await expectPreflightError(hybridZip64LocatorZip(), 'invalid_container');
+  });
+
+  it('does not scan dense payload markers while locating the physical-end EOCD', async () => {
+    const payload = new MarkerCountingBytes(16 * 1024);
+    payload.fill(0x50);
+    const archive = new MarkerCountingBytes(await syntheticZip([{
+      name: 'manifest.json',
+      data: payload,
+    }]).arrayBuffer());
+
+    expect(preflightZip(archive)).toHaveLength(1);
+    expect(archive.markerSearches).toBe(0);
   });
 
   it.each(['../manifest.json', '/manifest.json', 'photos\\photo.jpg', 'photos//photo.jpg'])(
