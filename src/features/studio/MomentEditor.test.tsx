@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MomentVersionConflictError, type UpdateMomentOptions } from '../../data/ports';
 import { STORAGE_CAPACITY_GUIDANCE, StorageCapacityError } from '../../data/storageErrors';
 import type { JourneyMoment, MomentPatch } from '../../domain/model';
-import { claimJourneyOutboxOwner } from './journeyOutbox';
 import { MomentEditor } from './MomentEditor';
 
 const moment: JourneyMoment = {
@@ -65,18 +64,6 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
-}
-
-function fallbackOwnerStorage(initialOwnerId?: string) {
-  const values = new Map<string, string>();
-  if (initialOwnerId) {
-    values.set('sound-passport.journey-autosave-owner-id', initialOwnerId);
-  }
-  return {
-    getItem: vi.fn((key: string) => values.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => { values.set(key, value); }),
-    removeItem: vi.fn((key: string) => { values.delete(key); }),
-  };
 }
 
 function renderEditor(
@@ -420,6 +407,7 @@ describe('MomentEditor', () => {
     let stored: any;
     const recovery = {
       getMomentOutbox: vi.fn(async () => stored),
+      listMomentOutboxesByJourney: vi.fn(async () => []),
       putMomentOutbox: vi.fn(async (record: any) => { stored = record; }),
       compareAndDeleteMomentOutbox: vi.fn(async (_momentId: string, _ownerId: string, generation: string) => {
         if (stored?.generation !== generation) return false;
@@ -436,6 +424,7 @@ describe('MomentEditor', () => {
       recoveryOwnerId: 'owner-a',
     });
 
+    await act(flushMicrotasks);
     fireEvent.change(screen.getByLabelText('時刻文案'), { target: { value: '本機待捨棄文案' } });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(500);
@@ -458,6 +447,7 @@ describe('MomentEditor', () => {
     let stored: any;
     const recovery = {
       getMomentOutbox: vi.fn(async () => stored),
+      listMomentOutboxesByJourney: vi.fn(async () => []),
       putMomentOutbox: vi.fn(async (record: any) => { stored = record; }),
       compareAndDeleteMomentOutbox: vi.fn(async () => false),
     };
@@ -468,6 +458,7 @@ describe('MomentEditor', () => {
       recoveryOwnerId: 'owner-a',
     });
 
+    await act(flushMicrotasks);
     fireEvent.change(screen.getByLabelText('時刻文案'), { target: { value: '重新載入後仍要保留' } });
     await act(flushMicrotasks);
     expect(recovery.putMomentOutbox).toHaveBeenCalled();
@@ -606,100 +597,69 @@ describe('MomentEditor', () => {
     );
   });
 
-  it('does not adopt or autosave a same-moment record from an unrelated no-lock owner', async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('navigator', {});
-    const sourcePage = await claimJourneyOutboxOwner({
-      storage: fallbackOwnerStorage('11111111-1111-4111-8111-111111111111'),
-    });
-    const storage = fallbackOwnerStorage(sourcePage.ownerId);
-    const pageClaim = await claimJourneyOutboxOwner({ storage });
-    const unrelated = {
+  it('shows a no-lock recovery prompt and performs zero writes before a choice', async () => {
+    const pending = {
       momentId: moment.id,
       journeyId: moment.journeyId,
-      ownerId: sourcePage.ownerId,
-      generation: 'live-generation',
+      ownerId: '11111111-1111-4111-8111-111111111111',
+      generation: 'pending-generation',
       envelope: {
-        patch: { caption: '另一個分頁仍在編輯的文案' },
+        patch: { caption: '另一個分頁的未儲存文案' },
         base: { caption: moment.caption },
       },
       updatedAt: '2026-07-13T00:00:00.005Z',
     };
     const recovery = {
       getMomentOutbox: vi.fn(async () => undefined),
-      listMomentOutboxesByJourney: vi.fn(async () => [unrelated]),
-      adoptMomentOutbox: vi.fn(async () => ({ ...unrelated, ownerId: pageClaim.ownerId })),
+      listMomentOutboxesByJourney: vi.fn(async () => [pending]),
+      adoptMomentOutbox: vi.fn(async () => ({ ...pending, ownerId: 'owner-current' })),
       putMomentOutbox: vi.fn(async () => undefined),
       compareAndDeleteMomentOutbox: vi.fn(async () => true),
     };
     const updateMoment = vi.fn(async () => moment);
     const { onMomentChange } = renderEditor(updateMoment, undefined, {
       recovery,
-      recoveryClaimOwner: pageClaim.claimRecoveryOwner,
-      recoveryOwnerId: pageClaim.ownerId,
+      recoveryClaimOwner: vi.fn(async () => undefined),
+      recoveryOwnerId: 'owner-current',
     });
 
     await act(flushMicrotasks);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
-      await flushMicrotasks();
-    });
 
+    expect(screen.getByRole('heading', { name: '找到未儲存的時刻內容' })).toBeInTheDocument();
+    expect(screen.getByText('另一個分頁可能仍在編輯這則時刻。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '復原未儲存內容' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '忽略' })).toBeEnabled();
+    expect(screen.queryByLabelText('時刻文案')).not.toBeInTheDocument();
+    expect(recovery.adoptMomentOutbox).not.toHaveBeenCalled();
+    expect(recovery.putMomentOutbox).not.toHaveBeenCalled();
+    expect(recovery.compareAndDeleteMomentOutbox).not.toHaveBeenCalled();
+    expect(updateMoment).not.toHaveBeenCalled();
+    expect(onMomentChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '忽略' }));
     expect(screen.getByLabelText('時刻文案')).toHaveValue(moment.caption);
     expect(recovery.adoptMomentOutbox).not.toHaveBeenCalled();
     expect(recovery.putMomentOutbox).not.toHaveBeenCalled();
-    expect(updateMoment).not.toHaveBeenCalled();
-    expect(onMomentChange).not.toHaveBeenCalled();
-    await pageClaim.release();
-    await sourcePage.release();
   });
 
-  it('adopts one prior no-lock owner under StrictMode exactly once without crossing journey or moment scope', async () => {
-    vi.stubGlobal('navigator', {});
-    const storage = fallbackOwnerStorage('11111111-1111-4111-8111-111111111111');
-    const previousPage = await claimJourneyOutboxOwner({ storage });
-    const oldOwnerId = previousPage.ownerId;
-    await previousPage.release();
-    const pageClaim = await claimJourneyOutboxOwner({ storage });
-    expect(pageClaim.ownerId).not.toBe(oldOwnerId);
-
+  it('adopts an explicitly recovered no-lock candidate exactly once under StrictMode', async () => {
+    const currentOwner = '33333333-3333-4333-8333-333333333333';
     let stored = {
       momentId: moment.id,
       journeyId: moment.journeyId,
-      ownerId: oldOwnerId,
+      ownerId: '11111111-1111-4111-8111-111111111111',
       generation: 'abandoned-generation',
       envelope: {
-        patch: { caption: '輪替後找回的文案' },
+        patch: { caption: '確認後找回的文案' },
         base: { caption: moment.caption },
       },
       updatedAt: '2026-07-13T00:00:00.005Z',
-    };
-    const foreignJourneyRecord = {
-      ...stored,
-      journeyId: 'journey-elsewhere',
-      ownerId: '22222222-2222-4222-8222-222222222222',
-      envelope: {
-        patch: { caption: '不可洩漏的其他旅程文案' },
-        base: { caption: moment.caption },
-      },
-    };
-    const foreignMomentRecord = {
-      ...stored,
-      momentId: 'moment-elsewhere',
-      envelope: {
-        patch: { caption: '不可洩漏的其他時刻文案' },
-        base: { caption: moment.caption },
-      },
     };
     const recovery = {
       getMomentOutbox: vi.fn(async (_momentId: string, ownerId: string) => (
         stored.ownerId === ownerId ? stored : undefined
       )),
-      listMomentOutboxesByJourney: vi.fn(async () => [
-        stored,
-        foreignJourneyRecord,
-        foreignMomentRecord,
-      ]),
+      listMomentOutboxesByJourney: vi.fn(async () => [stored]),
       adoptMomentOutbox: vi.fn(async (
         _momentId: string,
         _journeyId: string,
@@ -715,28 +675,176 @@ describe('MomentEditor', () => {
       compareAndDeleteMomentOutbox: vi.fn(async () => true),
     };
     const { onMomentChange } = renderEditor(vi.fn(async () => moment), undefined, {
-      getPrivateJourneyStory: vi.fn(async () => storyWithMoment(moment)),
       recovery,
-      recoveryClaimOwner: pageClaim.claimRecoveryOwner,
-      recoveryOwnerId: pageClaim.ownerId,
+      recoveryClaimOwner: vi.fn(async () => undefined),
+      recoveryOwnerId: currentOwner,
       strict: true,
     });
 
     await act(flushMicrotasks);
+    fireEvent.click(screen.getByRole('button', { name: '復原未儲存內容' }));
+    await act(flushMicrotasks);
 
-    expect(screen.getByLabelText('時刻文案')).toHaveValue('輪替後找回的文案');
-    expect(screen.queryByDisplayValue('不可洩漏的其他旅程文案')).not.toBeInTheDocument();
-    expect(screen.queryByDisplayValue('不可洩漏的其他時刻文案')).not.toBeInTheDocument();
-    expect(recovery.listMomentOutboxesByJourney).toHaveBeenCalledWith(moment.journeyId);
+    expect(screen.getByLabelText('時刻文案')).toHaveValue('確認後找回的文案');
+    expect(recovery.listMomentOutboxesByJourney).toHaveBeenCalledOnce();
     expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
     expect(recovery.adoptMomentOutbox).toHaveBeenCalledWith(
       moment.id,
       moment.journeyId,
-      oldOwnerId,
-      pageClaim.ownerId,
-      stored.generation,
+      '11111111-1111-4111-8111-111111111111',
+      currentOwner,
+      'abandoned-generation',
     );
     expect(onMomentChange).toHaveBeenCalledOnce();
-    await pageClaim.release();
+  });
+
+  it('requires deterministic explicit selection when several recovery candidates exist', async () => {
+    const older = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: '11111111-1111-4111-8111-111111111111',
+      generation: 'older-generation',
+      envelope: {
+        patch: { caption: '較舊版本' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const newer = {
+      ...older,
+      ownerId: '22222222-2222-4222-8222-222222222222',
+      generation: 'newer-generation',
+      envelope: {
+        patch: { caption: '較新版本' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:01.005Z',
+    };
+    const recovery = {
+      getMomentOutbox: vi.fn(async () => undefined),
+      listMomentOutboxesByJourney: vi.fn(async () => [older, newer]),
+      adoptMomentOutbox: vi.fn(async (
+        _momentId: string,
+        _journeyId: string,
+        fromOwnerId: string,
+        toOwnerId: string,
+      ) => ({ ...(fromOwnerId === older.ownerId ? older : newer), ownerId: toOwnerId })),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    renderEditor(vi.fn(async () => moment), undefined, {
+      recovery,
+      recoveryClaimOwner: vi.fn(async () => undefined),
+      recoveryOwnerId: 'owner-current',
+    });
+
+    await act(flushMicrotasks);
+    const recover = screen.getByRole('button', { name: '復原未儲存內容' });
+    expect(recover).toBeDisabled();
+    expect(screen.getAllByRole('radio')).toHaveLength(2);
+    expect(screen.queryByText(older.ownerId)).not.toBeInTheDocument();
+    expect(screen.queryByText(newer.ownerId)).not.toBeInTheDocument();
+    expect(recovery.adoptMomentOutbox).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('radio', { name: '選擇復原版本 2' }));
+    expect(recover).toBeEnabled();
+    expect(recovery.adoptMomentOutbox).not.toHaveBeenCalled();
+    fireEvent.click(recover);
+    await act(flushMicrotasks);
+
+    expect(screen.getByLabelText('時刻文案')).toHaveValue('較舊版本');
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledWith(
+      moment.id,
+      moment.journeyId,
+      older.ownerId,
+      'owner-current',
+      older.generation,
+    );
+  });
+
+  it('reloads saved content without writing when a competing recovery adopter wins', async () => {
+    const pending = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: '11111111-1111-4111-8111-111111111111',
+      generation: 'lost-generation',
+      envelope: {
+        patch: { caption: '競爭中的未儲存文案' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const remote = {
+      ...moment,
+      caption: '其他分頁已儲存的最新文案',
+      updatedAt: '2026-07-13T00:00:01.000Z',
+    };
+    const recovery = {
+      getMomentOutbox: vi.fn(async () => undefined),
+      listMomentOutboxesByJourney: vi.fn(async () => [pending]),
+      adoptMomentOutbox: vi.fn(async () => undefined),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    const updateMoment = vi.fn(async () => remote);
+    renderEditor(updateMoment, undefined, {
+      getPrivateJourneyStory: vi.fn(async () => storyWithMoment(remote)),
+      recovery,
+      recoveryClaimOwner: vi.fn(async () => undefined),
+      recoveryOwnerId: 'owner-current',
+    });
+
+    await act(flushMicrotasks);
+    fireEvent.click(screen.getByRole('button', { name: '復原未儲存內容' }));
+    await act(flushMicrotasks);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '未儲存內容已由其他分頁處理，已重新載入最新儲存內容。',
+    );
+    expect(screen.getByLabelText('時刻文案')).toHaveValue(remote.caption);
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
+    expect(recovery.putMomentOutbox).not.toHaveBeenCalled();
+    expect(recovery.compareAndDeleteMomentOutbox).not.toHaveBeenCalled();
+    expect(updateMoment).not.toHaveBeenCalled();
+  });
+
+  it('keeps an adopted recovery protected when refreshing its saved base fails', async () => {
+    const pending = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: '11111111-1111-4111-8111-111111111111',
+      generation: 'protected-generation',
+      envelope: {
+        patch: { caption: '仍需保護的未儲存文案' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const recovery = {
+      getMomentOutbox: vi.fn(async () => undefined),
+      listMomentOutboxesByJourney: vi.fn(async () => [pending]),
+      adoptMomentOutbox: vi.fn(async () => ({ ...pending, ownerId: 'owner-current' })),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    const updateMoment = vi.fn(async () => moment);
+    renderEditor(updateMoment, undefined, {
+      getPrivateJourneyStory: vi.fn(async () => undefined),
+      recovery,
+      recoveryClaimOwner: vi.fn(async () => undefined),
+      recoveryOwnerId: 'owner-current',
+    });
+
+    await act(flushMicrotasks);
+    fireEvent.click(screen.getByRole('button', { name: '復原未儲存內容' }));
+    await act(flushMicrotasks);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('無法處理未儲存內容');
+    expect(screen.getByRole('button', { name: '重新檢查' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: '忽略' })).not.toBeInTheDocument();
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
+    expect(recovery.putMomentOutbox).not.toHaveBeenCalled();
+    expect(updateMoment).not.toHaveBeenCalled();
   });
 });

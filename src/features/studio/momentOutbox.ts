@@ -4,6 +4,28 @@ import type {
 } from '../../data/ports';
 import type { JourneyOutboxOwnerClaimer } from './journeyOutbox';
 
+export interface MomentOutboxRecoveryCandidate {
+  ownerId: string;
+  generation: string;
+  updatedAt: string;
+}
+
+export type MomentOutboxRecoveryResult =
+  | { kind: 'none' }
+  | { kind: 'recovered'; record: MomentAutosaveOutboxRecord }
+  | { kind: 'candidates'; candidates: MomentOutboxRecoveryCandidate[] };
+
+async function claimRecoveryOwner(
+  claimOwner: JourneyOutboxOwnerClaimer | undefined,
+  ownerId: string,
+) {
+  try {
+    return await claimOwner?.(ownerId);
+  } catch {
+    return undefined;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -34,26 +56,65 @@ export async function readMomentOutbox(
   journeyId: string,
   ownerId: string,
   claimOwner?: JourneyOutboxOwnerClaimer,
-): Promise<MomentAutosaveOutboxRecord | undefined> {
+): Promise<MomentOutboxRecoveryResult> {
   const exact = normalizeMomentOutboxRecord(
     await outbox.getMomentOutbox(momentId, ownerId),
     momentId,
     journeyId,
     ownerId,
   );
-  if (exact) return exact;
-  if (!claimOwner) return undefined;
+  if (exact) return { kind: 'recovered', record: exact };
 
   const candidates = (await outbox.listMomentOutboxesByJourney(journeyId))
     .map((record) => normalizeMomentOutboxRecord(record, momentId, journeyId))
     .filter((record): record is MomentAutosaveOutboxRecord => (
       record !== undefined && record.ownerId !== ownerId
+    ))
+    .sort((left, right) => (
+      Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+      left.ownerId.localeCompare(right.ownerId) ||
+      left.generation.localeCompare(right.generation)
     ));
-  if (candidates.length !== 1) return undefined;
+  if (candidates.length === 0) return { kind: 'none' };
+
+  const metadata = candidates.map(({ ownerId: candidateOwnerId, generation, updatedAt }) => ({
+    ownerId: candidateOwnerId,
+    generation,
+    updatedAt,
+  }));
+  if (candidates.length > 1) return { kind: 'candidates', candidates: metadata };
 
   const [candidate] = candidates;
-  const claim = await claimOwner(candidate.ownerId);
-  if (!claim) return undefined;
+  const claim = await claimRecoveryOwner(claimOwner, candidate.ownerId);
+  if (!claim) return { kind: 'candidates', candidates: metadata };
+  try {
+    const adopted = normalizeMomentOutboxRecord(
+      await outbox.adoptMomentOutbox(
+        momentId,
+        journeyId,
+        candidate.ownerId,
+        ownerId,
+        candidate.generation,
+      ),
+      momentId,
+      journeyId,
+      ownerId,
+    );
+    return adopted ? { kind: 'recovered', record: adopted } : { kind: 'none' };
+  } finally {
+    await claim.release();
+  }
+}
+
+export async function adoptMomentOutboxCandidate(
+  outbox: MomentAutosaveOutboxPort,
+  momentId: string,
+  journeyId: string,
+  ownerId: string,
+  candidate: MomentOutboxRecoveryCandidate,
+  claimOwner?: JourneyOutboxOwnerClaimer,
+) {
+  const claim = await claimRecoveryOwner(claimOwner, candidate.ownerId);
   try {
     return normalizeMomentOutboxRecord(
       await outbox.adoptMomentOutbox(
@@ -68,6 +129,6 @@ export async function readMomentOutbox(
       ownerId,
     );
   } finally {
-    await claim.release();
+    await claim?.release();
   }
 }

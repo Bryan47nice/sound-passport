@@ -35,6 +35,10 @@ function ownerStorage(initialValue?: string) {
 class DeterministicLockManager {
   private readonly held = new Set<string>();
 
+  isHeld(ownerId: string) {
+    return this.held.has(`sound-passport-owner:${ownerId}`);
+  }
+
   async request<T>(
     name: string,
     _options: { ifAvailable: true; mode: 'exclusive' },
@@ -163,7 +167,7 @@ describe('journeyOutbox', () => {
     expect(outbox.peek('private-tokyo', ownerA)).toEqual({ ...legacy, ownerId: ownerA });
   });
 
-  it('never adopts a recovery record while its source owner is still live', async () => {
+  it('requires an explicit choice while a recovery source owner is still live', async () => {
     const locks = new DeterministicLockManager();
     const sourceContext = ownerStorage(ownerA);
     const sourceClaim = await claimJourneyOutboxOwner({ locks, storage: sourceContext.storage });
@@ -175,11 +179,38 @@ describe('journeyOutbox', () => {
       'private-tokyo',
       ownerB,
       (candidateOwnerId) => tryClaimJourneyOutboxOwner(candidateOwnerId, locks),
-    )).resolves.toEqual({ kind: 'none' });
+    )).resolves.toEqual({
+      kind: 'candidates',
+      candidates: [{
+        ownerId: ownerA,
+        generation: liveRecord.generation,
+        updatedAt: liveRecord.updatedAt,
+      }],
+    });
 
     expect(outbox.adopt).not.toHaveBeenCalled();
     expect(outbox.peek('private-tokyo', ownerA)).toEqual(liveRecord);
     await sourceClaim.release();
+  });
+
+  it('falls back to an explicit candidate when a recovery lock request rejects', async () => {
+    const pending = record(ownerA, 'rejected-claim-generation');
+    const outbox = outboxStub([pending]);
+
+    await expect(readJourneyOutbox(
+      outbox,
+      'private-tokyo',
+      ownerB,
+      async () => { throw new DOMException('locks unavailable', 'NotAllowedError'); },
+    )).resolves.toEqual({
+      kind: 'candidates',
+      candidates: [{
+        ownerId: ownerA,
+        generation: pending.generation,
+        updatedAt: pending.updatedAt,
+      }],
+    });
+    expect(outbox.adopt).not.toHaveBeenCalled();
   });
 
   it('lists metadata-only candidates for multiple independent records without mutation', async () => {
@@ -230,6 +261,20 @@ describe('journeyOutbox', () => {
     expect(outbox.peek('private-tokyo', ownerA)).toEqual(first);
     expect(outbox.peek('private-tokyo', ownerB)).toBeUndefined();
     expect(outbox.peek('private-tokyo', currentOwner)).toEqual({ ...second, ownerId: currentOwner });
+  });
+
+  it('still atomically adopts an explicit choice when recovery lock probing rejects', async () => {
+    const pending = record(ownerA, 'explicit-generation');
+    const outbox = outboxStub([pending]);
+
+    await expect(adoptJourneyOutboxCandidate(
+      outbox,
+      'private-tokyo',
+      ownerB,
+      { ownerId: ownerA, generation: pending.generation, updatedAt: pending.updatedAt },
+      async () => { throw new DOMException('locks unavailable', 'NotAllowedError'); },
+    )).resolves.toEqual({ ...pending, ownerId: ownerB });
+    expect(outbox.adopt).toHaveBeenCalledOnce();
   });
 
   it('writes only supported owner field patches and excludes unrelated private or fixture data', async () => {
@@ -318,38 +363,44 @@ describe('journeyOutbox', () => {
     await reloadedPage.release();
   });
 
-  it('does not recover a copied fallback owner while its originating page remains live', async () => {
+  it('never auto-adopts a copied no-lock owner even when legacy handoff storage matches', async () => {
     vi.stubGlobal('navigator', {});
-    const sourceContext = ownerStorage(ownerA);
-    const sourcePage = await claimJourneyOutboxOwner({ storage: sourceContext.storage });
-    const duplicatedContext = ownerStorage(sourcePage.ownerId);
+    const duplicatedContext = ownerStorage(ownerA);
+    duplicatedContext.storage.setItem(
+      'sound-passport.journey-autosave-owner-handoff',
+      ownerA,
+    );
     const duplicatePage = await claimJourneyOutboxOwner({ storage: duplicatedContext.storage });
-
-    expect(sourcePage.ownerId).not.toBe(ownerA);
-    expect(duplicatePage.ownerId).not.toBe(sourcePage.ownerId);
-    const liveRecord = record(sourcePage.ownerId, 'live-generation');
+    const liveRecord = record(ownerA, 'live-generation');
     const outbox = outboxStub([liveRecord]);
+
+    expect(duplicatePage.ownerId).not.toBe(ownerA);
     await expect(readJourneyOutbox(
       outbox,
       'private-tokyo',
       duplicatePage.ownerId,
       duplicatePage.claimRecoveryOwner,
-    )).resolves.toEqual({ kind: 'none' });
+    )).resolves.toEqual({
+      kind: 'candidates',
+      candidates: [{
+        ownerId: ownerA,
+        generation: liveRecord.generation,
+        updatedAt: liveRecord.updatedAt,
+      }],
+    });
     expect(outbox.adopt).not.toHaveBeenCalled();
 
     await duplicatePage.release();
-    await sourcePage.release();
   });
 
-  it('recovers a previous fallback owner after the same session releases its handoff', async () => {
+  it('keeps a released no-lock owner pending until the user explicitly adopts it', async () => {
     vi.stubGlobal('navigator', {});
     const context = ownerStorage(ownerA);
     const previousPage = await claimJourneyOutboxOwner({ storage: context.storage });
     const previousOwnerId = previousPage.ownerId;
     const abandoned = record(previousOwnerId, 'abandoned-generation');
     const outbox = outboxStub([abandoned]);
-    window.dispatchEvent(new Event('pagehide'));
-    await Promise.resolve();
+    await previousPage.release();
 
     const reloadedPage = await claimJourneyOutboxOwner({ storage: context.storage });
     expect(reloadedPage.ownerId).not.toBe(previousOwnerId);
@@ -359,14 +410,32 @@ describe('journeyOutbox', () => {
       reloadedPage.ownerId,
       reloadedPage.claimRecoveryOwner,
     )).resolves.toEqual({
-      kind: 'recovered',
-      record: { ...abandoned, ownerId: reloadedPage.ownerId },
+      kind: 'candidates',
+      candidates: [{
+        ownerId: previousOwnerId,
+        generation: abandoned.generation,
+        updatedAt: abandoned.updatedAt,
+      }],
     });
+    expect(outbox.adopt).not.toHaveBeenCalled();
+
+    await expect(adoptJourneyOutboxCandidate(
+      outbox,
+      'private-tokyo',
+      reloadedPage.ownerId,
+      {
+        ownerId: previousOwnerId,
+        generation: abandoned.generation,
+        updatedAt: abandoned.updatedAt,
+      },
+      reloadedPage.claimRecoveryOwner,
+    )).resolves.toEqual({ ...abandoned, ownerId: reloadedPage.ownerId });
+    expect(outbox.adopt).toHaveBeenCalledOnce();
 
     await reloadedPage.release();
   });
 
-  it('keeps recovery in page-wide no-lock mode when the Web Locks request rejects', async () => {
+  it('requires an explicit choice when the Web Locks request rejects', async () => {
     const locks = new RejectingLockManager();
     vi.stubGlobal('navigator', {});
     const context = ownerStorage(ownerA);
@@ -385,11 +454,33 @@ describe('journeyOutbox', () => {
       page.ownerId,
       page.claimRecoveryOwner,
     )).resolves.toEqual({
-      kind: 'recovered',
-      record: { ...abandoned, ownerId: page.ownerId },
+      kind: 'candidates',
+      candidates: [{
+        ownerId: previousOwnerId,
+        generation: abandoned.generation,
+        updatedAt: abandoned.updatedAt,
+      }],
     });
+    expect(outbox.adopt).not.toHaveBeenCalled();
 
     await page.release();
+  });
+
+  it('keeps a Web Lock through BFCache pagehide and releases it on terminal pagehide', async () => {
+    const locks = new DeterministicLockManager();
+    const claim = await claimJourneyOutboxOwner({ locks, storage: ownerStorage(ownerA).storage });
+    const bfcachePageHide = new Event('pagehide');
+    Object.defineProperty(bfcachePageHide, 'persisted', { value: true });
+
+    expect(locks.isHeld(ownerA)).toBe(true);
+    window.dispatchEvent(bfcachePageHide);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(locks.isHeld(ownerA)).toBe(true);
+
+    window.dispatchEvent(new Event('pagehide'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(locks.isHeld(ownerA)).toBe(false);
+    await claim.release();
   });
 
   it('keeps the sessionStorage getter itself inside the owner fallback boundary', () => {

@@ -958,13 +958,20 @@ describe('JourneyEditorPage', () => {
 
     const view = renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
 
-    expect(await screen.findByLabelText('旅程標題')).toHaveValue(story.journey.title);
+    expect(await screen.findByRole('heading', { name: '找到未儲存的旅程內容' })).toBeInTheDocument();
+    expect(screen.getByText('另一個分頁可能仍在編輯這趟旅程。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '復原未儲存內容：版本 1' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '忽略' })).toBeEnabled();
     const rotatedOwnerId = window.sessionStorage.getItem(ownerStorageKey)!;
     expect(rotatedOwnerId).not.toBe(ownerA);
     expect(outbox.adopt).not.toHaveBeenCalled();
     expect(outbox.peek(story.journey.id, ownerA)).toEqual(pending);
     expect(outbox.peek(story.journey.id, rotatedOwnerId)).toBeUndefined();
     expect(ownerLocks.isHeld(rotatedOwnerId)).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: '忽略' }));
+    expect(screen.getByLabelText('旅程標題')).toHaveValue(story.journey.title);
+    expect(outbox.adopt).not.toHaveBeenCalled();
 
     view.unmount();
     await act(flushMicrotasks);
@@ -980,10 +987,10 @@ describe('JourneyEditorPage', () => {
 
     renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
 
-    expect(await screen.findByRole('heading', { name: '找到多個未儲存版本' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '找到未儲存的旅程內容' })).toBeInTheDocument();
     expect(screen.queryByText('Owner A pending title')).not.toBeInTheDocument();
     expect(screen.queryByText('Owner B pending title')).not.toBeInTheDocument();
-    const commands = screen.getAllByRole('button', { name: /載入此版本/ });
+    const commands = screen.getAllByRole('button', { name: /復原未儲存內容：版本/ });
     expect(commands).toHaveLength(2);
 
     fireEvent.click(commands[1]);

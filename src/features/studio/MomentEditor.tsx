@@ -1,5 +1,5 @@
 import { Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
   MomentVersionConflictError,
   type JourneyEditorRepository,
@@ -17,7 +17,11 @@ import {
   momentPatchMatches,
   type MomentPatchEnvelope,
 } from './momentPatch';
-import { readMomentOutbox } from './momentOutbox';
+import {
+  adoptMomentOutboxCandidate,
+  readMomentOutbox,
+  type MomentOutboxRecoveryCandidate,
+} from './momentOutbox';
 import type { JourneyOutboxOwnerClaimer } from './journeyOutbox';
 import { useAutosave } from './useAutosave';
 
@@ -44,6 +48,27 @@ const momentFields = [
   'localDate', 'localTime', 'cityLabel', 'placeLabel', 'caption', 'reason', 'reasonStatus', 'photoAlt',
 ] as const;
 const songFields = ['title', 'artist', 'sourceUrl'] as const;
+
+type MomentRecoveryState =
+  | { kind: 'checking'; key: string }
+  | {
+      kind: 'choice';
+      key: string;
+      candidates: MomentOutboxRecoveryCandidate[];
+      selectedCandidateKey?: string;
+      adopting: boolean;
+    }
+  | { kind: 'ready'; key?: string; announcement?: string }
+  | { kind: 'error'; key: string };
+
+const recoveryTimeFormatter = new Intl.DateTimeFormat('zh-TW', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+});
+
+function recoveryCandidateKey(candidate: MomentOutboxRecoveryCandidate) {
+  return `${candidate.ownerId}\u0000${candidate.generation}`;
+}
 
 function carryLocalChanges(
   previousAccepted: JourneyMoment,
@@ -81,15 +106,25 @@ export function MomentEditor({
   recoveryClaimOwner,
   recoveryOwnerId,
 }: MomentEditorProps) {
+  const recoveryKey = recovery && recoveryOwnerId
+    ? `${moment.journeyId}\u0000${moment.id}\u0000${recoveryOwnerId}`
+    : undefined;
   const [draft, setDraft] = useState(moment);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const [refreshState, setRefreshState] = useState<'idle' | 'refreshing' | 'error'>('idle');
   const [discarding, setDiscarding] = useState(false);
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const [recoveryState, setRecoveryState] = useState<MomentRecoveryState>(() => (
+    recoveryKey ? { kind: 'checking', key: recoveryKey } : { kind: 'ready' }
+  ));
   const draftRef = useRef(moment);
   const acceptedMomentRef = useRef(moment);
   const mountedRef = useRef(false);
   const refreshGenerationRef = useRef(0);
+  const recoveryKeyRef = useRef(recoveryKey);
+  const recoveryActionRef = useRef<string | undefined>(undefined);
+  recoveryKeyRef.current = recoveryKey;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -233,19 +268,24 @@ export function MomentEditor({
     draftRef.current = moment;
     setDraft(moment);
   }, [autosave.dirty, moment]);
-  const restoredRecoveryRef = useRef<string | undefined>(undefined);
+  const handledRecoveryRef = useRef<string | undefined>(undefined);
   const recoveryLookupRef = useRef<{
     key: string;
     promise: Promise<{
-      record: Awaited<ReturnType<typeof readMomentOutbox>>;
+      result: Awaited<ReturnType<typeof readMomentOutbox>>;
       remote: JourneyMoment | undefined;
     }>;
   } | undefined>(undefined);
 
   useEffect(() => {
-    if (!recovery || !recoveryOwnerId || autosave.dirty) return;
-    const recoveryKey = `${moment.id}\u0000${recoveryOwnerId}`;
-    if (restoredRecoveryRef.current === recoveryKey) return;
+    if (!recovery || !recoveryOwnerId || !recoveryKey || autosave.dirty) return;
+    if (handledRecoveryRef.current === recoveryKey) return;
+    setRecoveryState((current) => (
+      current.key === recoveryKey &&
+      (current.kind === 'checking' || current.kind === 'choice')
+        ? current
+        : { kind: 'checking', key: recoveryKey }
+    ));
     let lookup = recoveryLookupRef.current;
     if (!lookup || lookup.key !== recoveryKey) {
       const promise = readMomentOutbox(
@@ -254,9 +294,9 @@ export function MomentEditor({
         moment.journeyId,
         recoveryOwnerId,
         recoveryClaimOwner,
-      ).then(async (record) => ({
-        record,
-        remote: record
+      ).then(async (result) => ({
+        result,
+        remote: result.kind === 'recovered'
           ? repository.getPrivateJourneyStory
             ? await loadRemoteMoment()
             : acceptedMomentRef.current
@@ -267,19 +307,39 @@ export function MomentEditor({
     }
     let active = true;
     void lookup.promise.then(
-      ({ record, remote }) => {
-        if (!active || restoredRecoveryRef.current === recoveryKey || autosave.dirty) return;
-        restoredRecoveryRef.current = recoveryKey;
-        if (!record || !remote) return;
+      ({ result, remote }) => {
+        if (!active || handledRecoveryRef.current === recoveryKey || autosave.dirty) return;
+        if (result.kind === 'candidates') {
+          setRecoveryState({
+            kind: 'choice',
+            key: recoveryKey,
+            candidates: result.candidates,
+            adopting: false,
+          });
+          return;
+        }
+        if (result.kind === 'none') {
+          handledRecoveryRef.current = recoveryKey;
+          setRecoveryState({ kind: 'ready', key: recoveryKey });
+          return;
+        }
+        if (!remote) {
+          setRecoveryState({ kind: 'error', key: recoveryKey });
+          return;
+        }
+        handledRecoveryRef.current = recoveryKey;
         acceptedMomentRef.current = remote;
-        const recovered = applyMomentPatch(remote, record.envelope.patch);
+        const recovered = applyMomentPatch(remote, result.record.envelope.patch);
         draftRef.current = recovered;
         setDraft(recovered);
         onMomentChange(recovered);
-        autosave.enqueue(record.envelope);
+        setRecoveryState({ kind: 'ready', key: recoveryKey });
+        autosave.enqueue(result.record.envelope);
       },
       () => {
-        if (active && recoveryLookupRef.current === lookup) recoveryLookupRef.current = undefined;
+        if (!active) return;
+        if (recoveryLookupRef.current === lookup) recoveryLookupRef.current = undefined;
+        setRecoveryState({ kind: 'error', key: recoveryKey });
       },
     );
     return () => { active = false; };
@@ -291,10 +351,114 @@ export function MomentEditor({
     moment.journeyId,
     onMomentChange,
     recovery,
+    recoveryAttempt,
     recoveryClaimOwner,
+    recoveryKey,
     recoveryOwnerId,
     repository.getPrivateJourneyStory,
   ]);
+
+  const ignoreRecovery = () => {
+    if (
+      !recoveryKey ||
+      recoveryState.key !== recoveryKey ||
+      (recoveryState.kind === 'choice' && recoveryState.adopting)
+    ) return;
+    handledRecoveryRef.current = recoveryKey;
+    setRecoveryState({ kind: 'ready', key: recoveryKey });
+  };
+
+  const selectRecoveryCandidate = (candidate: MomentOutboxRecoveryCandidate) => {
+    if (
+      !recoveryKey ||
+      recoveryState.kind !== 'choice' ||
+      recoveryState.key !== recoveryKey ||
+      recoveryState.adopting
+    ) return;
+    setRecoveryState({
+      ...recoveryState,
+      selectedCandidateKey: recoveryCandidateKey(candidate),
+    });
+  };
+
+  const recoverCandidate = () => {
+    if (
+      !recovery ||
+      !recoveryOwnerId ||
+      !recoveryKey ||
+      recoveryState.kind !== 'choice' ||
+      recoveryState.key !== recoveryKey ||
+      recoveryState.adopting ||
+      recoveryActionRef.current
+    ) return;
+    const candidate = recoveryState.candidates.length === 1
+      ? recoveryState.candidates[0]
+      : recoveryState.candidates.find((item) => (
+        recoveryCandidateKey(item) === recoveryState.selectedCandidateKey
+      ));
+    if (!candidate) return;
+
+    const actionKey = recoveryKey;
+    recoveryActionRef.current = actionKey;
+    setRecoveryState({ ...recoveryState, adopting: true });
+    void (async () => {
+      try {
+        const adopted = await adoptMomentOutboxCandidate(
+          recovery,
+          moment.id,
+          moment.journeyId,
+          recoveryOwnerId,
+          candidate,
+          recoveryClaimOwner,
+        );
+        if (!mountedRef.current || recoveryKeyRef.current !== actionKey) return;
+
+        const remote = repository.getPrivateJourneyStory
+          ? await loadRemoteMoment()
+          : acceptedMomentRef.current;
+        if (!mountedRef.current || recoveryKeyRef.current !== actionKey) return;
+        if (!remote) {
+          setRecoveryState({ kind: 'error', key: actionKey });
+          return;
+        }
+
+        handledRecoveryRef.current = actionKey;
+        acceptedMomentRef.current = remote;
+        if (!adopted) {
+          draftRef.current = remote;
+          setDraft(remote);
+          onMomentChange(remote);
+          setRecoveryState({
+            kind: 'ready',
+            key: actionKey,
+            announcement: '未儲存內容已由其他分頁處理，已重新載入最新儲存內容。',
+          });
+          return;
+        }
+
+        const recovered = applyMomentPatch(remote, adopted.envelope.patch);
+        draftRef.current = recovered;
+        setDraft(recovered);
+        onMomentChange(recovered);
+        setRecoveryState({ kind: 'ready', key: actionKey });
+        autosave.enqueue(adopted.envelope);
+      } catch {
+        if (mountedRef.current && recoveryKeyRef.current === actionKey) {
+          setRecoveryState({ kind: 'error', key: actionKey });
+        }
+      } finally {
+        if (recoveryActionRef.current === actionKey) recoveryActionRef.current = undefined;
+      }
+    })();
+  };
+
+  const retryRecovery = () => {
+    if (!recoveryKey || recoveryActionRef.current) return;
+    handledRecoveryRef.current = undefined;
+    recoveryLookupRef.current = undefined;
+    setRecoveryState({ kind: 'checking', key: recoveryKey });
+    setRecoveryAttempt((attempt) => attempt + 1);
+  };
   const registrationRef = useRef<MomentAutosaveRegistration>({
     dirty: autosave.dirty,
     flush: autosave.flush,
@@ -401,6 +565,90 @@ export function MomentEditor({
       : autosave.state === 'error'
         ? '時刻儲存失敗'
         : autosave.dirty ? '時刻尚未儲存' : '';
+  const activeRecoveryState: MomentRecoveryState = !recoveryKey
+    ? { kind: 'ready' }
+    : recoveryState.key === recoveryKey
+      ? recoveryState
+      : { kind: 'checking', key: recoveryKey };
+
+  let recoveryPanel: ReactNode;
+  if (activeRecoveryState.kind === 'checking') {
+    recoveryPanel = <p className="muted moment-recovery-checking" aria-live="polite">正在檢查未儲存內容…</p>;
+  } else if (activeRecoveryState.kind === 'choice') {
+    const requiresSelection = activeRecoveryState.candidates.length > 1;
+    recoveryPanel = (
+      <section
+        className="moment-recovery-prompt"
+        role="region"
+        aria-labelledby="moment-recovery-title"
+      >
+        <h3 id="moment-recovery-title">找到未儲存的時刻內容</h3>
+        <p>另一個分頁可能仍在編輯這則時刻。</p>
+        <p className="muted">請確認要復原的版本，或忽略並使用目前已儲存的內容。</p>
+        {requiresSelection ? (
+          <fieldset className="moment-recovery-candidates">
+            <legend>選擇要復原的版本</legend>
+            {activeRecoveryState.candidates.map((candidate, index) => (
+              <label key={recoveryCandidateKey(candidate)}>
+                <input
+                  type="radio"
+                  name="moment-recovery-candidate"
+                  aria-label={`選擇復原版本 ${index + 1}`}
+                  checked={activeRecoveryState.selectedCandidateKey === recoveryCandidateKey(candidate)}
+                  disabled={activeRecoveryState.adopting}
+                  onChange={() => selectRecoveryCandidate(candidate)}
+                />
+                <span>復原版本 {index + 1}</span>
+                <time dateTime={candidate.updatedAt}>
+                  最後更新：{recoveryTimeFormatter.format(new Date(candidate.updatedAt))}
+                </time>
+              </label>
+            ))}
+          </fieldset>
+        ) : (
+          <div className="moment-recovery-version">
+            <span>復原版本 1</span>
+            <time dateTime={activeRecoveryState.candidates[0].updatedAt}>
+              最後更新：{recoveryTimeFormatter.format(
+                new Date(activeRecoveryState.candidates[0].updatedAt),
+              )}
+            </time>
+          </div>
+        )}
+        <div className="moment-recovery-actions">
+          <button
+            className="primary-command"
+            type="button"
+            disabled={
+              activeRecoveryState.adopting ||
+              (requiresSelection && !activeRecoveryState.selectedCandidateKey)
+            }
+            onClick={recoverCandidate}
+          >
+            復原未儲存內容
+          </button>
+          <button
+            className="secondary-command"
+            type="button"
+            disabled={activeRecoveryState.adopting}
+            onClick={ignoreRecovery}
+          >
+            忽略
+          </button>
+        </div>
+      </section>
+    );
+  } else if (activeRecoveryState.kind === 'error') {
+    recoveryPanel = (
+      <div className="moment-recovery-prompt" role="alert">
+        <h3>無法處理未儲存內容</h3>
+        <p>未儲存內容尚未套用，請重新檢查後再繼續。</p>
+        <div className="moment-recovery-actions">
+          <button className="secondary-command" type="button" onClick={retryRecovery}>重新檢查</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="moment-editor">
@@ -414,113 +662,123 @@ export function MomentEditor({
           type="button"
           aria-label="刪除時刻"
           title="刪除時刻"
-          disabled={deleting}
+          disabled={deleting || activeRecoveryState.kind !== 'ready'}
           onClick={() => void handleDelete()}
         >
           <Trash2 size={17} aria-hidden="true" />
         </button>
       </div>
-      <form className="moment-editor-form" onSubmit={(event) => event.preventDefault()}>
-        <div className="moment-date-time-fields">
-          <label>日期
-            <input
-              required
-              type="date"
-              data-validation-field="localDate"
-              value={draft.localDate}
-              onChange={(event) => {
-                const localDate = event.target.value;
-                queueDraft({ ...draftRef.current, localDate }, { localDate }, true);
-              }}
-            />
-          </label>
-          <label>時間
-            <input
-              type="time"
-              value={draft.localTime ?? ''}
-              onChange={(event) => {
-                const localTime = event.target.value || undefined;
-                queueDraft({ ...draftRef.current, localTime }, { localTime }, true);
-              }}
-            />
-          </label>
-        </div>
-        <div className="moment-location-fields">
-          <label>城市
-            <input value={draft.cityLabel} onChange={(event) => updateField('cityLabel', event.target.value)} />
-          </label>
-          <label>地點
-            <input value={draft.placeLabel} onChange={(event) => updateField('placeLabel', event.target.value)} />
-          </label>
-        </div>
-        <label>時刻文案
-          <textarea rows={4} value={draft.caption} onChange={(event) => updateField('caption', event.target.value)} />
-        </label>
-        <div className="moment-song-fields">
-          <label>歌名
-            <input
-              required
-              data-validation-field="song.title"
-              value={draft.song.title}
-              onChange={(event) => updateSong('title', event.target.value)}
-            />
-          </label>
-          <label>歌手
-            <input
-              required
-              data-validation-field="song.artist"
-              value={draft.song.artist}
-              onChange={(event) => updateSong('artist', event.target.value)}
-            />
-          </label>
-        </div>
-        <label>YouTube 連結
-          <input
-            type="url"
-            value={draft.song.sourceUrl ?? ''}
-            data-link-state={availability}
-            aria-invalid={availability === 'invalid_link' ? true : undefined}
-            aria-describedby={availability === 'invalid_link' ? 'moment-youtube-error' : undefined}
-            onChange={(event) => updateSong('sourceUrl', event.target.value)}
-          />
-        </label>
-        {availability === 'invalid_link' && (
-          <p
-            className="field-error"
-            id="moment-youtube-error"
-            data-link-state="invalid_link"
-          >
-            連結格式不正確
-          </p>
-        )}
-        <label>選歌原因
-          <textarea rows={4} value={draft.reason} onChange={(event) => updateReason(event.target.value)} />
-        </label>
-      </form>
-      <div className="moment-save-status" aria-live="polite">
-        <span>{saveLabel}</span>
-        {autosave.state === 'error' && (
-          hasConflict ? (
-            <span className="journey-save-actions">
-              <button type="button" disabled={discarding} onClick={autosave.forceRetry}>覆寫遠端內容</button>
-              <button type="button" disabled={discarding} onClick={() => void discardConflict()}>捨棄並重新載入</button>
-            </span>
-          ) : <button type="button" onClick={autosave.retry}>重試儲存</button>
-        )}
-      </div>
-      {storageCapacityAnnouncement && (
-        <p className="field-error" role="alert">{storageCapacityAnnouncement}</p>
+      {recoveryPanel}
+      {activeRecoveryState.kind === 'ready' && (
+        <>
+          {activeRecoveryState.announcement && (
+            <p className="moment-recovery-announcement" role="alert">
+              {activeRecoveryState.announcement}
+            </p>
+          )}
+          <form className="moment-editor-form" onSubmit={(event) => event.preventDefault()}>
+            <div className="moment-date-time-fields">
+              <label>日期
+                <input
+                  required
+                  type="date"
+                  data-validation-field="localDate"
+                  value={draft.localDate}
+                  onChange={(event) => {
+                    const localDate = event.target.value;
+                    queueDraft({ ...draftRef.current, localDate }, { localDate }, true);
+                  }}
+                />
+              </label>
+              <label>時間
+                <input
+                  type="time"
+                  value={draft.localTime ?? ''}
+                  onChange={(event) => {
+                    const localTime = event.target.value || undefined;
+                    queueDraft({ ...draftRef.current, localTime }, { localTime }, true);
+                  }}
+                />
+              </label>
+            </div>
+            <div className="moment-location-fields">
+              <label>城市
+                <input value={draft.cityLabel} onChange={(event) => updateField('cityLabel', event.target.value)} />
+              </label>
+              <label>地點
+                <input value={draft.placeLabel} onChange={(event) => updateField('placeLabel', event.target.value)} />
+              </label>
+            </div>
+            <label>時刻文案
+              <textarea rows={4} value={draft.caption} onChange={(event) => updateField('caption', event.target.value)} />
+            </label>
+            <div className="moment-song-fields">
+              <label>歌名
+                <input
+                  required
+                  data-validation-field="song.title"
+                  value={draft.song.title}
+                  onChange={(event) => updateSong('title', event.target.value)}
+                />
+              </label>
+              <label>歌手
+                <input
+                  required
+                  data-validation-field="song.artist"
+                  value={draft.song.artist}
+                  onChange={(event) => updateSong('artist', event.target.value)}
+                />
+              </label>
+            </div>
+            <label>YouTube 連結
+              <input
+                type="url"
+                value={draft.song.sourceUrl ?? ''}
+                data-link-state={availability}
+                aria-invalid={availability === 'invalid_link' ? true : undefined}
+                aria-describedby={availability === 'invalid_link' ? 'moment-youtube-error' : undefined}
+                onChange={(event) => updateSong('sourceUrl', event.target.value)}
+              />
+            </label>
+            {availability === 'invalid_link' && (
+              <p
+                className="field-error"
+                id="moment-youtube-error"
+                data-link-state="invalid_link"
+              >
+                連結格式不正確
+              </p>
+            )}
+            <label>選歌原因
+              <textarea rows={4} value={draft.reason} onChange={(event) => updateReason(event.target.value)} />
+            </label>
+          </form>
+          <div className="moment-save-status" aria-live="polite">
+            <span>{saveLabel}</span>
+            {autosave.state === 'error' && (
+              hasConflict ? (
+                <span className="journey-save-actions">
+                  <button type="button" disabled={discarding} onClick={autosave.forceRetry}>覆寫遠端內容</button>
+                  <button type="button" disabled={discarding} onClick={() => void discardConflict()}>捨棄並重新載入</button>
+                </span>
+              ) : <button type="button" onClick={autosave.retry}>重試儲存</button>
+            )}
+          </div>
+          {storageCapacityAnnouncement && (
+            <p className="field-error" role="alert">{storageCapacityAnnouncement}</p>
+          )}
+          {autosave.state === 'error' && hasConflict && (
+            <p className="field-error" role="alert">時刻內容已在其他位置更新，本機草稿尚未覆寫。</p>
+          )}
+          {refreshState === 'error' && (
+            <div className="moment-refresh-error" role="alert">
+              <span>時刻已儲存，但重新載入失敗。</span>
+              <button type="button" onClick={() => void refreshAfterSave()}>重新載入</button>
+            </div>
+          )}
+          {deleteError && <p className="field-error" role="alert">{deleteError}</p>}
+        </>
       )}
-      {autosave.state === 'error' && hasConflict && (
-        <p className="field-error" role="alert">時刻內容已在其他位置更新，本機草稿尚未覆寫。</p>
-      )}
-      {refreshState === 'error' && (
-        <div className="moment-refresh-error" role="alert">
-          <span>時刻已儲存，但重新載入失敗。</span>
-          <button type="button" onClick={() => void refreshAfterSave()}>重新載入</button>
-        </div>
-      )}
-      {deleteError && <p className="field-error" role="alert">{deleteError}</p>}
     </div>
   );
 }

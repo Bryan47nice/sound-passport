@@ -6,12 +6,10 @@ import {
 import type { JourneyPatchEnvelope, JourneyUserPatch } from './journeyPatch';
 
 export const JOURNEY_OUTBOX_OWNER_STORAGE_KEY = 'sound-passport.journey-autosave-owner-id';
-const JOURNEY_OUTBOX_OWNER_HANDOFF_STORAGE_KEY = 'sound-passport.journey-autosave-owner-handoff';
 const ownerIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 let volatileOwnerId: string | undefined;
 
-type OwnerStorage = Pick<Storage, 'getItem' | 'setItem'> &
-  Partial<Pick<Storage, 'removeItem'>>;
+type OwnerStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 export interface JourneyOutboxLockManager {
   request<T>(
@@ -29,6 +27,17 @@ export interface JourneyOutboxOwnerClaim {
 export type JourneyOutboxOwnerClaimer = (
   ownerId: string,
 ) => Promise<JourneyOutboxOwnerClaim | undefined>;
+
+async function claimRecoveryOwner(
+  claimOwner: JourneyOutboxOwnerClaimer | undefined,
+  ownerId: string,
+) {
+  try {
+    return await claimOwner?.(ownerId);
+  } catch {
+    return undefined;
+  }
+}
 
 export interface JourneyOutboxPageOwnerClaim extends JourneyOutboxOwnerClaim {
   claimRecoveryOwner: JourneyOutboxOwnerClaimer;
@@ -79,27 +88,6 @@ function storeFreshOwnerId(storage?: OwnerStorage) {
     }
   }
   return ownerId;
-}
-
-function consumeOwnerHandoff(storage: OwnerStorage | undefined, ownerId: string) {
-  if (!storage?.removeItem) return undefined;
-  try {
-    const previousOwnerId = storage.getItem(JOURNEY_OUTBOX_OWNER_HANDOFF_STORAGE_KEY);
-    storage.removeItem(JOURNEY_OUTBOX_OWNER_HANDOFF_STORAGE_KEY);
-    return previousOwnerId === ownerId ? previousOwnerId : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function storeOwnerHandoff(storage: OwnerStorage | undefined, ownerId: string) {
-  if (!storage) return;
-  try {
-    if (storage.getItem(JOURNEY_OUTBOX_OWNER_STORAGE_KEY) !== ownerId) return;
-    storage.setItem(JOURNEY_OUTBOX_OWNER_HANDOFF_STORAGE_KEY, ownerId);
-  } catch {
-    // Recovery remains opt-in when session handoff storage is inaccessible.
-  }
 }
 
 export function getJourneyOutboxOwnerId(storage?: OwnerStorage) {
@@ -168,28 +156,22 @@ export function tryClaimJourneyOutboxOwner(
   ownerId: string,
   locks: JourneyOutboxLockManager | undefined = defaultLockManager(),
 ) {
-  if (!locks) {
-    return Promise.resolve({ ownerId, release: async () => undefined });
-  }
+  if (!locks) return Promise.resolve(undefined);
   return tryClaimOwner(ownerId, locks);
 }
 
-function createPreviousOwnerClaimer(previousOwnerId?: string): JourneyOutboxOwnerClaimer {
-  return async (candidateOwnerId) => (
-    previousOwnerId !== undefined && candidateOwnerId === previousOwnerId
-      ? { ownerId: candidateOwnerId, release: async () => undefined }
-      : undefined
-  );
-}
+const unavailableOwnerClaimer: JourneyOutboxOwnerClaimer = async () => undefined;
 
 function createPageOwnerClaim(
   ownerId: string,
   claimRecoveryOwner: JourneyOutboxOwnerClaimer,
   releaseOwner: () => Promise<void>,
-  storage?: OwnerStorage,
 ): JourneyOutboxPageOwnerClaim {
   let released = false;
-  const releaseOnPageHide = () => { void release(); };
+  const releaseOnPageHide = (event: Event) => {
+    if ((event as PageTransitionEvent).persisted === true) return;
+    void release();
+  };
 
   async function release() {
     if (released) return;
@@ -197,13 +179,11 @@ function createPageOwnerClaim(
     if (typeof globalThis.removeEventListener === 'function') {
       globalThis.removeEventListener('pagehide', releaseOnPageHide);
     }
-    const releasing = releaseOwner();
-    storeOwnerHandoff(storage, ownerId);
-    await releasing;
+    await releaseOwner();
   }
 
   if (typeof globalThis.addEventListener === 'function') {
-    globalThis.addEventListener('pagehide', releaseOnPageHide, { once: true });
+    globalThis.addEventListener('pagehide', releaseOnPageHide);
   }
   return { ownerId, claimRecoveryOwner, release };
 }
@@ -215,15 +195,13 @@ export async function claimJourneyOutboxOwner({
   const availableStorage = storage ?? defaultOwnerStorage();
   const availableLocks = locks ?? defaultLockManager();
   let ownerId = getJourneyOutboxOwnerId(availableStorage);
-  let previousOwnerId = consumeOwnerHandoff(availableStorage, ownerId);
 
   if (!availableLocks) {
     ownerId = storeFreshOwnerId(availableStorage);
     return createPageOwnerClaim(
       ownerId,
-      createPreviousOwnerClaimer(previousOwnerId),
+      unavailableOwnerClaimer,
       async () => undefined,
-      availableStorage,
     );
   }
 
@@ -237,19 +215,16 @@ export async function claimJourneyOutboxOwner({
             tryClaimJourneyOutboxOwner(candidateOwnerId, availableLocks)
           ),
           () => claim.release(),
-          availableStorage,
         );
       }
     } catch {
       ownerId = storeFreshOwnerId(availableStorage);
       return createPageOwnerClaim(
         ownerId,
-        createPreviousOwnerClaimer(previousOwnerId),
+        unavailableOwnerClaimer,
         async () => undefined,
-        availableStorage,
       );
     }
-    if (ownerId === previousOwnerId) previousOwnerId = undefined;
     ownerId = storeFreshOwnerId(availableStorage);
   }
 
@@ -361,36 +336,26 @@ export async function readJourneyOutbox(
     .filter((record): record is JourneyAutosaveOutboxRecord => record !== undefined);
   if (outstanding.length === 0) return { kind: 'none' };
 
-  const claimable: Array<{
-    record: JourneyAutosaveOutboxRecord;
-    claim: JourneyOutboxOwnerClaim;
-  }> = [];
-  try {
-    for (const record of outstanding) {
-      const claim = await claimOwner(record.ownerId);
-      if (claim) claimable.push({ record, claim });
-    }
-  } catch (error) {
-    await Promise.allSettled(claimable.map(({ claim }) => claim.release()));
-    throw error;
-  }
-  if (claimable.length === 0) return { kind: 'none' };
+  const current = outstanding.find((record) => record.ownerId === ownerId);
+  if (current) return { kind: 'recovered', record: current };
+  const foreign = outstanding
+    .filter((record) => record.ownerId !== ownerId)
+    .sort((left, right) => (
+      Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+      left.ownerId.localeCompare(right.ownerId) ||
+      left.generation.localeCompare(right.generation)
+    ));
+  const candidates = foreign.map(({ ownerId: candidateOwnerId, generation, updatedAt }) => ({
+    ownerId: candidateOwnerId,
+    generation,
+    updatedAt,
+  }));
+  if (foreign.length === 0) return { kind: 'none' };
+  if (foreign.length !== 1) return { kind: 'candidates', candidates };
 
-  if (claimable.length > 1) {
-    const candidates = claimable
-      .map(({ record: { ownerId: candidateOwnerId, generation, updatedAt } }) => ({
-        ownerId: candidateOwnerId,
-        generation,
-        updatedAt,
-      }))
-      .sort((left, right) => (
-        right.updatedAt.localeCompare(left.updatedAt) || left.ownerId.localeCompare(right.ownerId)
-      ));
-    await Promise.all(claimable.map(({ claim }) => claim.release()));
-    return { kind: 'candidates', candidates };
-  }
-
-  const [{ record, claim }] = claimable;
+  const [record] = foreign;
+  const claim = await claimRecoveryOwner(claimOwner, record.ownerId);
+  if (!claim) return { kind: 'candidates', candidates };
   try {
     const adopted = normalizeRecord(
       await outbox.adopt(
@@ -415,8 +380,7 @@ export async function adoptJourneyOutboxCandidate(
   candidate: JourneyOutboxRecoveryCandidate,
   claimOwner: JourneyOutboxOwnerClaimer = tryClaimJourneyOutboxOwner,
 ) {
-  const claim = await claimOwner(candidate.ownerId);
-  if (!claim) return undefined;
+  const claim = await claimRecoveryOwner(claimOwner, candidate.ownerId);
   try {
     return normalizeRecord(
       await outbox.adopt(
@@ -429,7 +393,7 @@ export async function adoptJourneyOutboxCandidate(
       ownerId,
     );
   } finally {
-    await claim.release();
+    await claim?.release();
   }
 }
 

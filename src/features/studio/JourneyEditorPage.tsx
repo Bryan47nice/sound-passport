@@ -847,6 +847,15 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
     );
   };
 
+  const ignoreRecoveryCandidates = () => {
+    if (currentLoadState.kind !== 'recovery-choice' || currentLoadState.selectingOwnerId) return;
+    setLoadState({
+      kind: 'ready',
+      journeyId: currentLoadState.journeyId,
+      story: currentLoadState.story,
+    });
+  };
+
   if (isMobile && currentLoadState.kind !== 'ready') {
     return <section className="studio-mobile-only"><h1>請使用電腦整理旅程</h1></section>;
   }
@@ -881,8 +890,11 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   if (currentLoadState.kind === 'recovery-choice') {
     return (
       <section className="page studio-editor-state">
-        <h1>找到多個未儲存版本</h1>
-        <p>請選擇要載入的版本；其他版本會繼續保留。</p>
+        <h1>找到未儲存的旅程內容</h1>
+        <p>另一個分頁可能仍在編輯這趟旅程。</p>
+        <p className="muted journey-recovery-guidance">
+          請選擇要復原的版本；未選擇的版本會繼續保留。
+        </p>
         <ol className="journey-recovery-candidates">
           {currentLoadState.candidates.map((candidate, index) => (
             <li key={`${candidate.ownerId}:${candidate.generation}`}>
@@ -893,15 +905,23 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
               <button
                 className="secondary-command"
                 type="button"
-                aria-label={`載入此版本：版本 ${index + 1}`}
+                aria-label={`復原未儲存內容：版本 ${index + 1}`}
                 disabled={currentLoadState.selectingOwnerId !== undefined}
                 onClick={() => selectRecoveryCandidate(candidate)}
               >
-                載入此版本
+                復原未儲存內容
               </button>
             </li>
           ))}
         </ol>
+        <button
+          className="secondary-command"
+          type="button"
+          disabled={currentLoadState.selectingOwnerId !== undefined}
+          onClick={ignoreRecoveryCandidates}
+        >
+          忽略
+        </button>
       </section>
     );
   }
