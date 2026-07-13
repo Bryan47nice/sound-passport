@@ -1,9 +1,13 @@
 import { strFromU8, strToU8, unzip, zip, type AsyncZippable } from 'fflate';
-import { describe, expect, it } from 'vitest';
-import type { PrivateDataPort } from '../data/ports';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  PrivateDataStateConflictError,
+  type PrivateDataPort,
+  type PrivateDataPrimaryKeys,
+} from '../data/ports';
 import type { Journey, PhotoAsset, PrivateJourneySnapshot } from '../domain/model';
 import { BackupError } from './backupManifest';
-import { BackupService, type ImportPlan } from './backupService';
+import { BackupService, type BackupServiceOptions, type ImportPlan } from './backupService';
 
 const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -98,6 +102,8 @@ class MemoryPrivateDataPort implements PrivateDataPort {
   importCalls = 0;
   clearCalls = 0;
   imported?: PrivateJourneySnapshot;
+  importedExpectedKeys?: PrivateDataPrimaryKeys;
+  importFailure?: Error;
 
   constructor(public snapshot: PrivateJourneySnapshot) {}
 
@@ -105,9 +111,11 @@ class MemoryPrivateDataPort implements PrivateDataPort {
     return this.snapshot;
   }
 
-  async importSnapshot(snapshot: PrivateJourneySnapshot) {
+  async importSnapshot(snapshot: PrivateJourneySnapshot, expectedKeys: PrivateDataPrimaryKeys) {
     this.importCalls += 1;
     this.imported = snapshot;
+    this.importedExpectedKeys = expectedKeys;
+    if (this.importFailure) throw this.importFailure;
   }
 
   async clearPrivateData() {
@@ -116,10 +124,12 @@ class MemoryPrivateDataPort implements PrivateDataPort {
   }
 }
 
-function service(port: PrivateDataPort) {
+function service(port: PrivateDataPort, options: Partial<BackupServiceOptions> = {}) {
   return new BackupService(port, {
     appVersion: '1.0.0-test',
     now: () => new Date('2026-07-13T08:00:00.000Z'),
+    photoInspector: async () => ({ width: 8, height: 6 }),
+    ...options,
   });
 }
 
@@ -195,15 +205,93 @@ describe('BackupService', () => {
     ['wrong format', (files: Record<string, Uint8Array>, manifest: Record<string, any>) => { manifest.format = 'wrong'; }, 'invalid_container'],
     ['unsupported version', (files: Record<string, Uint8Array>, manifest: Record<string, any>) => { manifest.schemaVersion = 999; }, 'unsupported_version'],
     ['missing photo', (files: Record<string, Uint8Array>, manifest: Record<string, any>) => { delete files[manifest.photos[0].path]; }, 'missing_photo'],
+    ['signature-corrupt photo', (files: Record<string, Uint8Array>, manifest: Record<string, any>) => { files[manifest.photos[0].path][0] ^= 0xff; }, 'checksum_mismatch'],
     ['corrupt photo', (files: Record<string, Uint8Array>, manifest: Record<string, any>) => { files[manifest.photos[0].path][4] ^= 0xff; }, 'checksum_mismatch'],
     ['wrong byte size', (_files: Record<string, Uint8Array>, manifest: Record<string, any>) => { manifest.photos[0].byteSize += 1; }, 'checksum_mismatch'],
     ['wrong content type', (_files: Record<string, Uint8Array>, manifest: Record<string, any>) => { manifest.photos[0].contentType = 'image/png'; }, 'invalid_manifest'],
     ['dangling song', (_files: Record<string, Uint8Array>, manifest: Record<string, any>) => { manifest.moments[0].songReferenceId = 'missing-song'; }, 'relationship_error'],
+    ['moment without a photoAssetId', (_files: Record<string, Uint8Array>, manifest: Record<string, any>) => { delete manifest.moments[0].photoAssetId; }, 'invalid_manifest'],
+    ['private moment photoUrl', (_files: Record<string, Uint8Array>, manifest: Record<string, any>) => { manifest.moments[0].photoUrl = 'blob:private-photo'; }, 'invalid_manifest'],
     ['extra file', (files: Record<string, Uint8Array>) => { files['photos/extra.jpg'] = JPEG_BYTES; }, 'invalid_manifest'],
   ] as const)('rejects a %s and leaves existing data unchanged', async (_label, mutate, code) => {
     const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
     const altered = await alterBackup(backup, mutate);
     await expectPlanError(new MemoryPrivateDataPort(populatedSnapshot()), altered, code);
+  });
+
+  it('rejects noncanonical photo paths even when the referenced bytes exist', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const altered = await alterBackup(backup, (files, manifest) => {
+      const canonical = manifest.photos[0].path as string;
+      const noncanonical = canonical.replace(/\.jpg$/, '.jpeg');
+      files[noncanonical] = files[canonical];
+      delete files[canonical];
+      manifest.photos[0].path = noncanonical;
+    });
+
+    await expectPlanError(new MemoryPrivateDataPort(emptySnapshot()), altered, 'invalid_manifest');
+  });
+
+  it.each([
+    ['missing photoAssetId', (snapshot: PrivateJourneySnapshot) => { delete snapshot.moments[0].photoAssetId; }],
+    ['private photoUrl', (snapshot: PrivateJourneySnapshot) => { snapshot.moments[0].photoUrl = 'blob:private-photo'; }],
+    ['empty private photoUrl', (snapshot: PrivateJourneySnapshot) => { snapshot.moments[0].photoUrl = ''; }],
+  ] as const)('rejects exporting a private moment with %s', async (_label, mutate) => {
+    const snapshot = populatedSnapshot();
+    mutate(snapshot);
+
+    await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
+      .rejects.toMatchObject({ code: 'relationship_error' });
+  });
+
+  it('decodes every imported photo before producing a plan', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const inspector = vi.fn(async (_blob: Blob) => ({ width: 8, height: 6 }));
+
+    await service(new MemoryPrivateDataPort(emptySnapshot()), { photoInspector: inspector }).planImport(backup);
+
+    expect(inspector).toHaveBeenCalledTimes(2);
+    expect(inspector.mock.calls.map(([blob]) => ({ size: blob.size, type: blob.type }))).toEqual([
+      { size: JPEG_BYTES.byteLength, type: 'image/jpeg' },
+      { size: PNG_BYTES.byteLength, type: 'image/png' },
+    ]);
+  });
+
+  it('rejects undecodable or truncated photo content before producing a plan', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const inspector = vi.fn().mockRejectedValue(new Error('synthetic decode failure'));
+
+    await expect(service(new MemoryPrivateDataPort(emptySnapshot()), { photoInspector: inspector }).planImport(backup))
+      .rejects.toMatchObject({ code: 'invalid_manifest' });
+  });
+
+  it('rejects actual photo dimensions that differ from the manifest', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+
+    await expect(service(new MemoryPrivateDataPort(emptySnapshot()), {
+      photoInspector: async () => ({ width: 9, height: 6 }),
+    }).planImport(backup)).rejects.toMatchObject({ code: 'invalid_manifest' });
+  });
+
+  it('rejects photo dimensions above the 2560px cap with an explicit limit error', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const altered = await alterBackup(backup, (_files, manifest) => { manifest.photos[0].width = 2561; });
+
+    await expect(service(new MemoryPrivateDataPort(emptySnapshot()), {
+      photoInspector: async (blob) => blob.type === 'image/jpeg'
+        ? { width: 2561, height: 6 }
+        : { width: 8, height: 6 },
+    }).planImport(altered)).rejects.toMatchObject({ code: 'limit_exceeded' });
+  });
+
+  it('rejects a declared photo size above 25 MiB with an explicit limit error', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const altered = await alterBackup(backup, (_files, manifest) => {
+      manifest.photos[0].byteSize = 25 * 1024 * 1024 + 1;
+    });
+
+    await expect(service(new MemoryPrivateDataPort(emptySnapshot())).planImport(altered))
+      .rejects.toMatchObject({ code: 'limit_exceeded' });
   });
 
   it('deterministically remaps every primary and foreign key when any target ID collides', async () => {
@@ -244,7 +332,40 @@ describe('BackupService', () => {
     expect(result).toEqual({ summary: plan.summary });
     expect(target.importCalls).toBe(1);
     expect(target.imported).toEqual(plan.snapshot);
+    expect(target.importedExpectedKeys).toEqual({ journeys: [], moments: [], songs: [], photos: [] });
     await expect(targetService.commitImport(plan)).rejects.toMatchObject({ code: 'invalid_manifest' });
+    expect(target.importCalls).toBe(1);
+  });
+
+  it('passes the exact planned target keys to the single import call', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const existing: PrivateJourneySnapshot = {
+      ...emptySnapshot(),
+      journeys: [{ ...journey('existing-journey'), coverPhotoAssetId: undefined }],
+    };
+    const target = new MemoryPrivateDataPort(existing);
+    const targetService = service(target);
+    const plan = await targetService.planImport(backup);
+
+    await targetService.commitImport(plan);
+
+    expect(target.importCalls).toBe(1);
+    expect(target.importedExpectedKeys).toEqual({
+      journeys: ['existing-journey'],
+      moments: [],
+      songs: [],
+      photos: [],
+    });
+  });
+
+  it('maps a target-state conflict to the explicit stale_plan error code', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const target = new MemoryPrivateDataPort(emptySnapshot());
+    target.importFailure = new PrivateDataStateConflictError();
+    const targetService = service(target);
+    const plan = await targetService.planImport(backup);
+
+    await expect(targetService.commitImport(plan)).rejects.toMatchObject({ code: 'stale_plan' });
     expect(target.importCalls).toBe(1);
   });
 

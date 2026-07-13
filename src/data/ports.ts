@@ -35,8 +35,22 @@ export interface PhotoAssetRepository {
   getPhotoAsset(id: string): Promise<PhotoAsset | undefined>;
 }
 
+export interface PrivateDataPrimaryKeys {
+  readonly journeys: readonly string[];
+  readonly moments: readonly string[];
+  readonly songs: readonly string[];
+  readonly photos: readonly string[];
+}
+
+export class PrivateDataStateConflictError extends Error {
+  constructor() {
+    super('Private data changed after the import was planned.');
+    this.name = 'PrivateDataStateConflictError';
+  }
+}
+
 export interface PrivateDataPort {
   exportSnapshot(): Promise<PrivateJourneySnapshot>;
-  importSnapshot(snapshot: PrivateJourneySnapshot): Promise<void>;
+  importSnapshot(snapshot: PrivateJourneySnapshot, expectedKeys: PrivateDataPrimaryKeys): Promise<void>;
   clearPrivateData(): Promise<void>;
 }

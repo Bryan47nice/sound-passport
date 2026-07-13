@@ -10,6 +10,8 @@ export const BACKUP_ERROR_CODES = [
   'missing_photo',
   'checksum_mismatch',
   'relationship_error',
+  'stale_plan',
+  'limit_exceeded',
 ] as const;
 
 export type BackupErrorCode = typeof BACKUP_ERROR_CODES[number];
@@ -117,16 +119,15 @@ function validateMoment(value: unknown, index: number) {
   const label = `moments[${index}]`;
   assertRecord(value, label);
   assertShape(value, [
-    'id', 'journeyId', 'photoAlt', 'songReferenceId', 'localDate', 'cityLabel',
+    'id', 'journeyId', 'photoAssetId', 'photoAlt', 'songReferenceId', 'localDate', 'cityLabel',
     'placeLabel', 'caption', 'reason', 'reasonStatus', 'sortOrder', 'createdAt', 'updatedAt',
-  ], ['photoAssetId', 'photoUrl', 'localTime'], label);
+  ], ['localTime'], label);
   assertNonEmptyString(value.id, `${label}.id`);
   assertNonEmptyString(value.journeyId, `${label}.journeyId`);
+  assertNonEmptyString(value.photoAssetId, `${label}.photoAssetId`);
   assertNonEmptyString(value.songReferenceId, `${label}.songReferenceId`);
   ['photoAlt', 'localDate', 'cityLabel', 'placeLabel', 'caption', 'reason'].forEach((key) =>
     assertString(value[key], `${label}.${key}`));
-  assertOptionalString(value.photoAssetId, `${label}.photoAssetId`);
-  assertOptionalString(value.photoUrl, `${label}.photoUrl`);
   assertOptionalString(value.localTime, `${label}.localTime`);
   assertEnum(value.reasonStatus, ['complete', 'needs_review'], `${label}.reasonStatus`);
   assertInteger(value.sortOrder, `${label}.sortOrder`, 0);

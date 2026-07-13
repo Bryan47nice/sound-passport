@@ -1,7 +1,13 @@
 import { strFromU8, strToU8, unzip, zip, type AsyncZippable } from 'fflate';
 import packageMetadata from '../../package.json';
-import type { PrivateDataPort } from '../data/ports';
+import {
+  PrivateDataStateConflictError,
+  type PrivateDataPort,
+  type PrivateDataPrimaryKeys,
+} from '../data/ports';
 import type { PhotoAsset, PrivateJourneySnapshot } from '../domain/model';
+import { inspectPhoto, type PhotoInspector } from '../media/photoInspector';
+import { BACKUP_LIMITS } from './backupLimits';
 import {
   BACKUP_FORMAT,
   BACKUP_SCHEMA_VERSION,
@@ -9,8 +15,10 @@ import {
   parseBackupManifest,
   type BackupManifest,
 } from './backupManifest';
+import { assertBackupContainerSize, assertExtractedZip, preflightZip } from './zipPreflight';
 
 export const BACKUP_MEDIA_TYPE = 'application/vnd.sound-passport.backup';
+export { BACKUP_LIMITS } from './backupLimits';
 
 export interface ImportSummary {
   journeys: number;
@@ -31,12 +39,14 @@ export interface ImportResult {
 export interface BackupServiceOptions {
   appVersion?: string;
   now?: () => Date;
+  photoInspector?: PhotoInspector;
 }
 
 interface ValidatedPlan {
   snapshot: PrivateJourneySnapshot;
   summary: ImportSummary;
   epoch: number;
+  expectedKeys: PrivateDataPrimaryKeys;
 }
 
 const extensionsByContentType: Record<string, string> = {
@@ -91,11 +101,6 @@ function expectedPhotoPath(photo: Pick<PhotoAsset, 'id' | 'contentType'>) {
   return `photos/${encodeURIComponent(photo.id)}.${extension}`;
 }
 
-function pathMatchesContentType(path: string, contentType: string) {
-  if (contentType === 'image/jpeg') return /\.jpe?g$/i.test(path);
-  return path.toLowerCase().endsWith(`.${extensionsByContentType[contentType]}`);
-}
-
 function assertUniqueIds(label: string, values: Array<{ id: string }>) {
   const ids = values.map(({ id }) => id);
   if (new Set(ids).size !== ids.length) {
@@ -122,7 +127,10 @@ function validateRelationships(snapshot: PrivateJourneySnapshot) {
     if (!songIds.has(moment.songReferenceId)) {
       throw new BackupError('relationship_error', 'A moment references a missing song.');
     }
-    if (moment.photoAssetId && !photoIds.has(moment.photoAssetId)) {
+    if (moment.photoUrl !== undefined) {
+      throw new BackupError('relationship_error', 'A private moment must not contain photoUrl.');
+    }
+    if (!moment.photoAssetId || !photoIds.has(moment.photoAssetId)) {
       throw new BackupError('relationship_error', 'A moment references a missing photo.');
     }
   }
@@ -211,15 +219,26 @@ function summaryFor(snapshot: PrivateJourneySnapshot): ImportSummary {
   };
 }
 
+function primaryKeys(snapshot: PrivateJourneySnapshot): PrivateDataPrimaryKeys {
+  return {
+    journeys: snapshot.journeys.map(({ id }) => id).sort(),
+    moments: snapshot.moments.map(({ id }) => id).sort(),
+    songs: snapshot.songs.map(({ id }) => id).sort(),
+    photos: snapshot.photos.map(({ id }) => id).sort(),
+  };
+}
+
 export class BackupService {
   private readonly appVersion: string;
   private readonly now: () => Date;
+  private readonly photoInspector: PhotoInspector;
   private readonly plans = new WeakMap<ImportPlan, ValidatedPlan>();
   private planEpoch = 0;
 
   constructor(private readonly privateData: PrivateDataPort, options: BackupServiceOptions = {}) {
     this.appVersion = options.appVersion ?? packageMetadata.version;
     this.now = options.now ?? (() => new Date());
+    this.photoInspector = options.photoInspector ?? inspectPhoto;
   }
 
   async exportBackup(): Promise<Blob> {
@@ -263,12 +282,21 @@ export class BackupService {
   }
 
   async planImport(file: Blob): Promise<ImportPlan> {
+    assertBackupContainerSize(file.size);
+    let archiveBytes: Uint8Array;
+    try {
+      archiveBytes = new Uint8Array(await file.arrayBuffer());
+    } catch (cause) {
+      throw new BackupError('invalid_container', 'The backup file could not be read.', { cause });
+    }
+    const entries = preflightZip(archiveBytes);
     let files: Record<string, Uint8Array>;
     try {
-      files = await unzipAsync(new Uint8Array(await file.arrayBuffer()));
+      files = await unzipAsync(archiveBytes);
     } catch (cause) {
       throw new BackupError('invalid_container', 'The file is not a readable ZIP container.', { cause });
     }
+    assertExtractedZip(entries, files);
 
     const manifestBytes = files['manifest.json'];
     if (!manifestBytes) throw new BackupError('invalid_container', 'The ZIP does not contain manifest.json.');
@@ -305,8 +333,17 @@ export class BackupService {
     for (const metadata of metadataById.values()) {
       const bytes = files[metadata.path];
       if (!bytes) throw new BackupError('missing_photo', 'A photo declared by the manifest is missing.');
-      if (!pathMatchesContentType(metadata.path, metadata.contentType)) {
-        throw new BackupError('invalid_manifest', 'A photo path extension does not match its content type.');
+      if (metadata.path !== expectedPhotoPath(metadata)) {
+        throw new BackupError('invalid_manifest', 'A photo path is not canonical for its ID and content type.');
+      }
+      if (metadata.byteSize > BACKUP_LIMITS.maxPhotoBytes) {
+        throw new BackupError('limit_exceeded', 'A declared photo byte size exceeds the backup limit.');
+      }
+      if (metadata.width > BACKUP_LIMITS.maxPhotoEdge || metadata.height > BACKUP_LIMITS.maxPhotoEdge) {
+        throw new BackupError('limit_exceeded', 'A declared photo dimension exceeds the backup limit.');
+      }
+      if (await sha256(bytes) !== metadata.sha256) {
+        throw new BackupError('checksum_mismatch', 'A photo checksum does not match the manifest.');
       }
       if (bytes.byteLength !== metadata.byteSize) {
         throw new BackupError('checksum_mismatch', 'A photo byte size does not match the manifest.');
@@ -314,11 +351,27 @@ export class BackupService {
       if (sniffContentType(bytes) !== metadata.contentType) {
         throw new BackupError('invalid_manifest', 'A photo content type does not match its bytes.');
       }
-      if (await sha256(bytes) !== metadata.sha256) {
-        throw new BackupError('checksum_mismatch', 'A photo checksum does not match the manifest.');
+      const blob = new Blob([bytesForBlob(bytes)], { type: metadata.contentType });
+      let dimensions: Awaited<ReturnType<PhotoInspector>>;
+      try {
+        dimensions = await this.photoInspector(blob);
+      } catch (cause) {
+        throw new BackupError('invalid_manifest', 'A photo cannot be decoded.', { cause });
+      }
+      if (
+        !Number.isInteger(dimensions.width) || dimensions.width < 1 ||
+        !Number.isInteger(dimensions.height) || dimensions.height < 1
+      ) {
+        throw new BackupError('invalid_manifest', 'A decoded photo has invalid dimensions.');
+      }
+      if (dimensions.width > BACKUP_LIMITS.maxPhotoEdge || dimensions.height > BACKUP_LIMITS.maxPhotoEdge) {
+        throw new BackupError('limit_exceeded', 'A decoded photo dimension exceeds the backup limit.');
+      }
+      if (dimensions.width !== metadata.width || dimensions.height !== metadata.height) {
+        throw new BackupError('invalid_manifest', 'Decoded photo dimensions do not match the manifest.');
       }
       const { path: _path, sha256: _sha256, ...photo } = metadata;
-      snapshot.photos.push({ ...photo, blob: new Blob([bytesForBlob(bytes)], { type: photo.contentType }) });
+      snapshot.photos.push({ ...photo, blob });
     }
 
     validateRelationships(snapshot);
@@ -337,6 +390,7 @@ export class BackupService {
       snapshot: cloneSnapshot(validatedSnapshot),
       summary: { ...summary },
       epoch: this.planEpoch,
+      expectedKeys: primaryKeys(existing),
     });
     return plan;
   }
@@ -348,7 +402,14 @@ export class BackupService {
     }
     this.plans.delete(plan);
     this.planEpoch += 1;
-    await this.privateData.importSnapshot(cloneSnapshot(validated.snapshot));
+    try {
+      await this.privateData.importSnapshot(cloneSnapshot(validated.snapshot), validated.expectedKeys);
+    } catch (cause) {
+      if (cause instanceof PrivateDataStateConflictError) {
+        throw new BackupError('stale_plan', 'Private data changed after this import was planned.', { cause });
+      }
+      throw cause;
+    }
     return { summary: { ...validated.summary } };
   }
 

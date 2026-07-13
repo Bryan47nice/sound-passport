@@ -87,6 +87,15 @@ describe('backup manifest validation', () => {
     ['journey field type', (value: BackupManifest) => ({ ...value, journeys: [{ ...value.journeys[0], title: 42 }] })],
     ['coordinate tuple', (value: BackupManifest) => ({ ...value, journeys: [{ ...value.journeys[0], countryCoordinates: [12] }] })],
     ['moment enum', (value: BackupManifest) => ({ ...value, moments: [{ ...value.moments[0], reasonStatus: 'unknown' }] })],
+    ['missing moment photoAssetId', (value: BackupManifest) => {
+      const moment = { ...value.moments[0] } as Record<string, unknown>;
+      delete moment.photoAssetId;
+      return { ...value, moments: [moment] };
+    }],
+    ['private moment photoUrl', (value: BackupManifest) => ({
+      ...value,
+      moments: [{ ...value.moments[0], photoUrl: 'blob:private-photo' }],
+    })],
     ['photo byte size', (value: BackupManifest) => ({ ...value, photos: [{ ...value.photos[0], byteSize: -1 }] })],
     ['unsafe photo path', (value: BackupManifest) => ({ ...value, photos: [{ ...value.photos[0], path: '../photo.jpg' }] })],
     ['non-lowercase checksum', (value: BackupManifest) => ({ ...value, photos: [{ ...value.photos[0], sha256: 'A'.repeat(64) }] })],

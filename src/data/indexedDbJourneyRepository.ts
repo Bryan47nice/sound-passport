@@ -14,7 +14,9 @@ import type {
   SongReference,
 } from '../domain/model';
 import { parseYouTubeVideoId } from '../domain/youtube';
-import type {
+import {
+  PrivateDataStateConflictError,
+  type PrivateDataPrimaryKeys,
   JourneyEditorRepository,
   JourneyRepository,
   PhotoAssetRepository,
@@ -101,6 +103,21 @@ function assertExactReorderSet(journeyMoments: Moment[], orderedIds: string[]) {
     submittedIds.size === orderedIds.length &&
     orderedIds.every((id) => expectedIds.has(id));
   if (!isExactSet) throw new Error('Reorder IDs must exactly match the journey moments.');
+}
+
+function samePrimaryKeys(actual: string[], expected: readonly string[]) {
+  if (new Set(expected).size !== expected.length || actual.length !== expected.length) return false;
+  const sortedExpected = [...expected].sort();
+  return [...actual].sort().every((key, index) => key === sortedExpected[index]);
+}
+
+async function assertTargetKeysUnchanged(tx: WriteTransaction, expected: PrivateDataPrimaryKeys) {
+  const current = await Promise.all(stores.map((storeName) => tx.objectStore(storeName).getAllKeys()));
+  for (const [index, storeName] of stores.entries()) {
+    if (!samePrimaryKeys(current[index], expected[storeName])) {
+      throw new PrivateDataStateConflictError();
+    }
+  }
 }
 
 export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyRepositoryOptions): IndexedDbJourneyRepository {
@@ -384,14 +401,14 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       return readSnapshot();
     },
 
-    async importSnapshot(snapshot: PrivateJourneySnapshot) {
+    async importSnapshot(snapshot: PrivateJourneySnapshot, expectedKeys: PrivateDataPrimaryKeys) {
       await runWrite(async (tx) => {
         const journeyIds = assertUniqueIds('journey', snapshot.journeys);
         assertUniqueIds('moment', snapshot.moments);
         const songIds = assertUniqueIds('song', snapshot.songs);
         const photoIds = assertUniqueIds('photo', snapshot.photos);
 
-        for (const storeName of stores) await tx.objectStore(storeName).clear();
+        await assertTargetKeysUnchanged(tx, expectedKeys);
         for (const photo of snapshot.photos) await tx.objectStore('photos').add(photo);
         for (const song of snapshot.songs) await tx.objectStore('songs').add(song);
         for (const journey of snapshot.journeys) {
@@ -402,6 +419,9 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
           await tx.objectStore('journeys').add(journey);
         }
         for (const moment of snapshot.moments) {
+          if (moment.photoUrl !== undefined) {
+            throw relationshipError(`private moment ${moment.id} must not contain photoUrl`);
+          }
           if (!journeyIds.has(moment.journeyId)) {
             throw relationshipError(`moment ${moment.id} references missing journey ${moment.journeyId}`);
           }

@@ -1,5 +1,7 @@
+// @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
+import { Blob as NodeBlob } from 'node:buffer';
 import { openDB, type IDBPDatabase } from 'idb';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NewJourney, NormalizedPhotoInput, PrivateJourneySnapshot } from '../domain/model';
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
 import { DB_VERSION, openSoundPassportDb, type SoundPassportDb } from './indexedDb';
@@ -34,7 +36,7 @@ function journeyInput(overrides: Partial<NewJourney> = {}): NewJourney {
 }
 
 function photoInput(fileName: string, contents = fileName): NormalizedPhotoInput {
-  const blob = new Blob([contents], { type: 'image/jpeg' });
+  const blob = new NodeBlob([contents], { type: 'image/jpeg' }) as unknown as Blob;
   return {
     blob,
     contentType: blob.type,
@@ -43,6 +45,45 @@ function photoInput(fileName: string, contents = fileName): NormalizedPhotoInput
     height: 800,
     byteSize: blob.size,
   };
+}
+
+function primaryKeys(snapshot: PrivateJourneySnapshot) {
+  return {
+    journeys: snapshot.journeys.map(({ id }) => id).sort(),
+    moments: snapshot.moments.map(({ id }) => id).sort(),
+    songs: snapshot.songs.map(({ id }) => id).sort(),
+    photos: snapshot.photos.map(({ id }) => id).sort(),
+  };
+}
+
+function prefixedSnapshot(snapshot: PrivateJourneySnapshot, prefix: string): PrivateJourneySnapshot {
+  const journeyIds = new Map(snapshot.journeys.map(({ id }) => [id, `${prefix}${id}`]));
+  const momentIds = new Map(snapshot.moments.map(({ id }) => [id, `${prefix}${id}`]));
+  const songIds = new Map(snapshot.songs.map(({ id }) => [id, `${prefix}${id}`]));
+  const photoIds = new Map(snapshot.photos.map(({ id }) => [id, `${prefix}${id}`]));
+
+  return {
+    journeys: snapshot.journeys.map((journey) => ({
+      ...journey,
+      id: journeyIds.get(journey.id)!,
+      coverPhotoAssetId: journey.coverPhotoAssetId
+        ? photoIds.get(journey.coverPhotoAssetId)!
+        : undefined,
+    })),
+    moments: snapshot.moments.map((moment) => ({
+      ...moment,
+      id: momentIds.get(moment.id)!,
+      journeyId: journeyIds.get(moment.journeyId)!,
+      songReferenceId: songIds.get(moment.songReferenceId)!,
+      photoAssetId: moment.photoAssetId ? photoIds.get(moment.photoAssetId)! : undefined,
+    })),
+    songs: snapshot.songs.map((song) => ({ ...song, id: songIds.get(song.id)! })),
+    photos: snapshot.photos.map((photo) => ({ ...photo, id: photoIds.get(photo.id)! })),
+  };
+}
+
+function readBlobBytes(blob: Blob): Promise<Uint8Array> {
+  return (blob as unknown as NodeBlob).arrayBuffer().then((bytes: ArrayBuffer) => new Uint8Array(bytes));
 }
 
 async function openRepository(testName: string) {
@@ -219,7 +260,9 @@ describe('indexedDbJourneyRepository', () => {
       id: 'second-shared-moment',
       sortOrder: 1,
     };
-    await repository.importSnapshot({ ...snapshot, moments: [firstMoment, secondMoment] });
+    const seedTx = db.transaction('moments', 'readwrite');
+    await seedTx.store.add(secondMoment);
+    await seedTx.done;
 
     await repository.deleteMoment(firstMoment.id);
 
@@ -267,21 +310,110 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('adds an imported snapshot in one transaction while preserving existing records byte-for-byte', async () => {
+    const { db, repository } = await openRepository('additive-import');
+    const existingJourney = await repository.createJourney(journeyInput({ title: 'Existing' }));
+    await repository.addMoments(existingJourney.id, [photoInput('existing.jpg', 'existing-photo-bytes')]);
+    const plannedState = await repository.exportSnapshot();
+    const imported = prefixedSnapshot(plannedState, 'imported-');
+
+    const editedJourney = await repository.updateJourney(existingJourney.id, { title: 'Edited after planning' });
+    const existingBeforeImport = await repository.exportSnapshot();
+    const existingPhotoBytes = await readBlobBytes(existingBeforeImport.photos[0].blob);
+    const transactionSpy = vi.spyOn(db, 'transaction');
+
+    await repository.importSnapshot(imported, primaryKeys(plannedState));
+
+    const writeTransactions = transactionSpy.mock.calls.filter(([, mode]) => mode === 'readwrite');
+    expect(writeTransactions).toHaveLength(1);
+    const after = await repository.exportSnapshot();
+    expect(after.journeys.find(({ id }) => id === existingJourney.id)).toEqual(editedJourney);
+    expect(after.moments.find(({ id }) => id === existingBeforeImport.moments[0].id))
+      .toEqual(existingBeforeImport.moments[0]);
+    expect(after.songs.find(({ id }) => id === existingBeforeImport.songs[0].id))
+      .toEqual(existingBeforeImport.songs[0]);
+    expect(after.photos.find(({ id }) => id === existingBeforeImport.photos[0].id))
+      .toEqual(existingBeforeImport.photos[0]);
+    expect(await readBlobBytes(after.photos
+      .find(({ id }) => id === existingBeforeImport.photos[0].id)!.blob))
+      .toEqual(existingPhotoBytes);
+    expect(after.journeys).toHaveLength(2);
+    expect(after.moments).toHaveLength(2);
+    expect(after.songs).toHaveLength(2);
+    expect(after.photos).toHaveLength(2);
+    db.close();
+  });
+
+  it.each(['addition', 'deletion'] as const)(
+    'rejects a stale import after a target key %s without writing imported rows',
+    async (mutation) => {
+      const { db, repository } = await openRepository(`stale-import-${mutation}`);
+      const journey = await repository.createJourney(journeyInput({ title: 'Existing' }));
+      await repository.addMoments(journey.id, [photoInput('existing.jpg')]);
+      const plannedState = await repository.exportSnapshot();
+      const imported = prefixedSnapshot(plannedState, 'imported-');
+
+      if (mutation === 'addition') {
+        await repository.createJourney(journeyInput({ title: 'Concurrent addition' }));
+      } else {
+        await repository.deleteJourney(journey.id);
+      }
+      const beforeAttempt = await repository.exportSnapshot();
+
+      await expect(repository.importSnapshot(imported, primaryKeys(plannedState))).rejects.toMatchObject({
+        name: 'PrivateDataStateConflictError',
+      });
+      expect(await repository.exportSnapshot()).toEqual(beforeAttempt);
+      db.close();
+    },
+  );
+
+  it('rejects an imported-ID collision atomically instead of overwriting the existing row', async () => {
+    const { db, repository } = await openRepository('import-id-collision');
+    const existingJourney = await repository.createJourney(journeyInput({ title: 'Existing' }));
+    await repository.addMoments(existingJourney.id, [photoInput('existing.jpg')]);
+    const before = await repository.exportSnapshot();
+    const imported = prefixedSnapshot(before, 'imported-');
+    imported.journeys[0] = { ...imported.journeys[0], id: existingJourney.id };
+    imported.moments[0] = { ...imported.moments[0], journeyId: existingJourney.id };
+
+    await expect(repository.importSnapshot(imported, primaryKeys(before))).rejects.toBeDefined();
+    expect(await repository.exportSnapshot()).toEqual(before);
+    db.close();
+  });
+
+  it.each(['blob:private-photo', ''])(
+    'rejects an imported private moment with photoUrl %j and leaves every store unchanged',
+    async (photoUrl) => {
+    const { db, repository } = await openRepository(`import-private-photo-url-${photoUrl.length}`);
+    const existingJourney = await repository.createJourney(journeyInput({ title: 'Existing' }));
+    await repository.addMoments(existingJourney.id, [photoInput('existing.jpg')]);
+    const before = await repository.exportSnapshot();
+    const imported = prefixedSnapshot(before, 'imported-');
+    imported.moments[0] = { ...imported.moments[0], photoUrl };
+
+    await expect(repository.importSnapshot(imported, primaryKeys(before))).rejects.toThrow(/relationship/i);
+    expect(await repository.exportSnapshot()).toEqual(before);
+    db.close();
+    },
+  );
+
   it('exports every private record and rolls back an import with a broken relationship', async () => {
     const { db, repository } = await openRepository('snapshot');
     const journey = await repository.createJourney(journeyInput());
     await repository.addMoments(journey.id, [photoInput('snapshot.jpg')]);
     const exported = await repository.exportSnapshot();
+    const imported = prefixedSnapshot(exported, 'invalid-');
     const invalid: PrivateJourneySnapshot = {
-      ...exported,
-      moments: exported.moments.map((moment) => ({ ...moment, journeyId: 'missing-journey' })),
+      ...imported,
+      moments: imported.moments.map((moment) => ({ ...moment, journeyId: 'missing-journey' })),
     };
 
     expect(exported.journeys).toHaveLength(1);
     expect(exported.moments).toHaveLength(1);
     expect(exported.songs).toHaveLength(1);
     expect(exported.photos).toHaveLength(1);
-    await expect(repository.importSnapshot(invalid)).rejects.toThrow(/relationship/i);
+    await expect(repository.importSnapshot(invalid, primaryKeys(exported))).rejects.toThrow(/relationship/i);
     expect(await repository.exportSnapshot()).toEqual(exported);
     db.close();
   });
