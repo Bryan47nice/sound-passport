@@ -204,12 +204,14 @@ function renderRoute(
   editor: JourneyEditorRepository | null = editorStub(),
   path = '/studio/journeys/private-tokyo',
   outbox: JourneyAutosaveOutboxPort = outboxStub(),
+  privateStorageError?: string,
 ) {
   return render(
     <RepositoryProvider services={{
       query: fixtureJourneyRepository,
       editor: editor ?? undefined,
       outbox: editor ? outbox : undefined,
+      privateStorageError,
     }}>
       <MemoryRouter initialEntries={[path]}><App /></MemoryRouter>
     </RepositoryProvider>,
@@ -291,6 +293,11 @@ describe('JourneyEditorPage', () => {
     renderRoute(null);
     expect(screen.getByRole('heading', { name: '本機儲存空間暫時無法使用' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重新嘗試' })).toBeInTheDocument();
+  });
+
+  it('shows the exact blocked-upgrade guidance on a direct editor route', () => {
+    renderRoute(null, '/studio/journeys/private-tokyo', outboxStub(), '請關閉其他分頁後重新嘗試');
+    expect(screen.getByText('請關閉其他分頁後重新嘗試')).toBeInTheDocument();
   });
 
   it('offers retry after a load error', async () => {

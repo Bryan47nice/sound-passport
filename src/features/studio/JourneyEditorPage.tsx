@@ -12,6 +12,7 @@ import { useParams } from 'react-router';
 import {
   useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
+  usePrivateStorageError,
 } from '../../data/RepositoryContext';
 import {
   JourneyVersionConflictError,
@@ -40,7 +41,7 @@ import {
   clearJourneyOutbox,
   readJourneyOutbox,
   type JourneyOutboxRecoveryCandidate,
-  type JourneyOutboxOwnerClaim,
+  type JourneyOutboxPageOwnerClaim,
   writeJourneyOutbox,
 } from './journeyOutbox';
 import { useAutosave } from './useAutosave';
@@ -72,7 +73,7 @@ type OwnerClaimState =
       kind: 'ready';
       editor: JourneyEditorRepository;
       outbox: JourneyAutosaveOutboxPort;
-      claim: JourneyOutboxOwnerClaim;
+      claim: JourneyOutboxPageOwnerClaim;
     }
   | {
       kind: 'error';
@@ -108,7 +109,7 @@ function useJourneyOutboxOwnerClaim(
   const requestRef = useRef<{
     editor: JourneyEditorRepository;
     outbox: JourneyAutosaveOutboxPort;
-    promise: Promise<JourneyOutboxOwnerClaim>;
+    promise: Promise<JourneyOutboxPageOwnerClaim>;
   } | undefined>(undefined);
 
   useEffect(() => {
@@ -521,6 +522,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   const { journeyId = '' } = useParams();
   const editor = useOptionalJourneyEditorRepository();
   const outbox = useOptionalJourneyAutosaveOutbox();
+  const privateStorageError = usePrivateStorageError();
   const isMobile = useMobileStudio();
   const ownerClaimState = useJourneyOutboxOwnerClaim(editor, outbox);
   const outboxOwnerId = ownerClaimState?.kind === 'ready' ? ownerClaimState.claim.ownerId : undefined;
@@ -536,12 +538,17 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   }, []);
 
   useEffect(() => {
-    if (!editor || !outbox || !outboxOwnerId) return;
+    if (!editor || !outbox || !outboxOwnerId || ownerClaimState?.kind !== 'ready') return;
     let active = true;
     setLoadState({ kind: 'loading', journeyId });
     void Promise.all([
       editor.getPrivateJourneyStory(journeyId),
-      readJourneyOutbox(outbox, journeyId, outboxOwnerId),
+      readJourneyOutbox(
+        outbox,
+        journeyId,
+        outboxOwnerId,
+        ownerClaimState.claim.claimRecoveryOwner,
+      ),
     ])
       .then(([nextStory, recovery]) => {
         if (!active) return;
@@ -568,7 +575,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
         setLoadState({ kind: 'error', journeyId });
       });
     return () => { active = false; };
-  }, [editor, journeyId, loadAttempt, outbox, outboxOwnerId]);
+  }, [editor, journeyId, loadAttempt, outbox, outboxOwnerId, ownerClaimState]);
 
   const currentLoadState: LoadState = loadState.journeyId === journeyId
     ? loadState
@@ -579,12 +586,19 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
       currentLoadState.kind !== 'recovery-choice' ||
       !outbox ||
       !outboxOwnerId ||
+      ownerClaimState?.kind !== 'ready' ||
       currentLoadState.selectingOwnerId
     ) return;
 
     const choice = currentLoadState;
     setLoadState({ ...choice, selectingOwnerId: candidate.ownerId });
-    void adoptJourneyOutboxCandidate(outbox, choice.journeyId, outboxOwnerId, candidate).then(
+    void adoptJourneyOutboxCandidate(
+      outbox,
+      choice.journeyId,
+      outboxOwnerId,
+      candidate,
+      ownerClaimState.claim.claimRecoveryOwner,
+    ).then(
       (record) => {
         if (!pageMountedRef.current || journeyIdRef.current !== choice.journeyId) return;
         if (!record) {
@@ -614,6 +628,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
     return (
       <section className="page studio-guidance">
         <h1 className="page-title">本機儲存空間暫時無法使用</h1>
+        <p className="muted">{privateStorageError ?? '請確認瀏覽器允許本機儲存後重新開啟。'}</p>
         <button className="secondary-command studio-state-action" type="button" onClick={onBootstrapRetry}>重新嘗試</button>
       </section>
     );

@@ -48,6 +48,12 @@ class DeterministicLockManager {
   }
 }
 
+class RejectingLockManager {
+  request<T>() {
+    return Promise.reject<T>(new DOMException('locks unavailable', 'NotAllowedError'));
+  }
+}
+
 let defaultOwnerLocks: DeterministicLockManager;
 
 const firstEnvelope: JourneyPatchEnvelope = {
@@ -331,6 +337,28 @@ describe('journeyOutbox', () => {
 
     await duplicatePage.release();
     await firstPage.release();
+  });
+
+  it('keeps recovery in page-wide no-lock mode when the Web Locks request rejects', async () => {
+    const locks = new RejectingLockManager();
+    vi.stubGlobal('navigator', { locks });
+    const context = ownerStorage(ownerA);
+    const page = await claimJourneyOutboxOwner({ locks, storage: context.storage });
+    const abandoned = record(ownerA, 'rejected-lock-generation');
+    const outbox = outboxStub([abandoned]);
+
+    expect(page.ownerId).not.toBe(ownerA);
+    await expect(readJourneyOutbox(
+      outbox,
+      'private-tokyo',
+      page.ownerId,
+      page.claimRecoveryOwner,
+    )).resolves.toEqual({
+      kind: 'recovered',
+      record: { ...abandoned, ownerId: page.ownerId },
+    });
+
+    await page.release();
   });
 
   it('keeps the sessionStorage getter itself inside the owner fallback boundary', () => {

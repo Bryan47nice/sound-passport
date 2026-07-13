@@ -28,6 +28,10 @@ export type JourneyOutboxOwnerClaimer = (
   ownerId: string,
 ) => Promise<JourneyOutboxOwnerClaim | undefined>;
 
+export interface JourneyOutboxPageOwnerClaim extends JourneyOutboxOwnerClaim {
+  claimRecoveryOwner: JourneyOutboxOwnerClaimer;
+}
+
 interface JourneyOutboxOwnerClaimOptions {
   storage?: OwnerStorage;
   locks?: JourneyOutboxLockManager;
@@ -144,29 +148,49 @@ export function tryClaimJourneyOutboxOwner(
   if (!locks) {
     return Promise.resolve({ ownerId, release: async () => undefined });
   }
-  return tryClaimOwner(ownerId, locks).catch(() => undefined);
+  return tryClaimOwner(ownerId, locks);
 }
+
+const claimWithoutLocks: JourneyOutboxOwnerClaimer = async (ownerId) => ({
+  ownerId,
+  release: async () => undefined,
+});
 
 export async function claimJourneyOutboxOwner({
   storage,
   locks,
-}: JourneyOutboxOwnerClaimOptions = {}): Promise<JourneyOutboxOwnerClaim> {
+}: JourneyOutboxOwnerClaimOptions = {}): Promise<JourneyOutboxPageOwnerClaim> {
   const availableStorage = storage ?? defaultOwnerStorage();
   const availableLocks = locks ?? defaultLockManager();
   let ownerId = getJourneyOutboxOwnerId(availableStorage);
 
   if (!availableLocks) {
     ownerId = storeFreshOwnerId(availableStorage);
-    return { ownerId, release: async () => undefined };
+    return {
+      ownerId,
+      claimRecoveryOwner: claimWithoutLocks,
+      release: async () => undefined,
+    };
   }
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
       const claim = await tryClaimOwner(ownerId, availableLocks);
-      if (claim) return claim;
+      if (claim) {
+        return {
+          ...claim,
+          claimRecoveryOwner: (candidateOwnerId) => (
+            tryClaimJourneyOutboxOwner(candidateOwnerId, availableLocks)
+          ),
+        };
+      }
     } catch {
       ownerId = storeFreshOwnerId(availableStorage);
-      return { ownerId, release: async () => undefined };
+      return {
+        ownerId,
+        claimRecoveryOwner: claimWithoutLocks,
+        release: async () => undefined,
+      };
     }
     ownerId = storeFreshOwnerId(availableStorage);
   }

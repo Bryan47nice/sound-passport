@@ -414,6 +414,34 @@ describe('useAutosave', () => {
     expect(forceSave).toHaveBeenCalledWith('Force this value', { revision: 1 });
   });
 
+  it('preserves force for an unchanged revision when flush observes a failed preflight', async () => {
+    const preflightFailure = new Error('outbox write failed');
+    const recovery: AutosaveRecoveryPersistence<string> = {
+      put: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(preflightFailure)
+        .mockResolvedValueOnce(undefined),
+      compareAndDelete: vi.fn(async () => true),
+    };
+    const save = vi.fn<Save>().mockRejectedValueOnce(new Error('field conflict'));
+    const forceSave = vi.fn<Save>(async () => undefined);
+    let autosave!: AutosaveApi;
+    render(<AutosaveHarness
+      save={save}
+      forceSave={forceSave}
+      recovery={recovery}
+      capture={(api) => { autosave = api; }}
+    />);
+
+    act(() => { autosave.saveNow('Force this unchanged revision'); });
+    await act(flushMicrotasks);
+    act(() => autosave.forceRetry());
+    await act(flushMicrotasks);
+
+    await act(async () => { await autosave.flush(); });
+    expect(forceSave).toHaveBeenCalledWith('Force this unchanged revision', { revision: 1 });
+  });
+
   const forcePreflightSupersessionCases = [
     ['later saveNow', 'immediate'],
     ['later saveNow of the current envelope', 'current'],
