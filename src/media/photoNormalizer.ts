@@ -43,7 +43,7 @@ function encodeCanvas(canvas: HTMLCanvasElement, contentType: 'image/png' | 'ima
   return new Promise((resolve, reject) => {
     try {
       const callback: BlobCallback = (blob) => {
-        if (blob) resolve(blob);
+        if (blob?.type === contentType) resolve(blob);
         else reject(new PhotoNormalizationError('encode_failed'));
       };
       if (contentType === 'image/webp') canvas.toBlob(callback, contentType, 0.9);

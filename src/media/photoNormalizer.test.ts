@@ -32,6 +32,10 @@ describe('validatePhotoFile', () => {
       .toThrowError(expect.objectContaining({ code: 'too_large' }));
   });
 
+  it('accepts files at the 25 MiB boundary', () => {
+    expect(() => validatePhotoFile(fileOfSize(25 * 1024 * 1024))).not.toThrow();
+  });
+
   it('rejects non-image files', () => {
     expect(() => validatePhotoFile(new File(['x'], 'notes.txt', { type: 'text/plain' })))
       .toThrowError(expect.objectContaining({ code: 'unsupported_type' }));
@@ -58,6 +62,34 @@ describe('normalizePhoto', () => {
     expect(HTMLCanvasElement.prototype.toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/webp', 0.9);
   });
 
+  it('does not upscale smaller photos', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 1600, height: 1000, close: vi.fn() }));
+    mockCanvas();
+
+    const normalized = await normalizePhoto(fileOfSize(1));
+
+    expect(normalized).toMatchObject({ width: 1600, height: 1000 });
+  });
+
+  it('preserves portrait orientation while resizing the long edge', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 2000, height: 4000, close: vi.fn() }));
+    mockCanvas();
+
+    const normalized = await normalizePhoto(fileOfSize(1));
+
+    expect(normalized).toMatchObject({ width: 1280, height: 2560 });
+  });
+
+  it('converts opaque PNG photos to WebP', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 100, height: 50, close: vi.fn() }));
+    mockCanvas();
+
+    const normalized = await normalizePhoto(fileOfSize(1, 'image/png'));
+
+    expect(normalized.contentType).toBe('image/webp');
+    expect(HTMLCanvasElement.prototype.toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/webp', 0.9);
+  });
+
   it('retains PNG for transparent photos', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 100, height: 50, close: vi.fn() }));
     mockCanvas({ hasTransparency: true, encodedBlob: new Blob(['image'], { type: 'image/png' }) });
@@ -76,6 +108,15 @@ describe('normalizePhoto', () => {
     const close = vi.fn();
     vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 100, height: 50, close }));
     mockCanvas({ encodedBlob: null });
+    await expect(normalizePhoto(fileOfSize(1))).rejects.toMatchObject({ code: 'encode_failed' });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('rejects mismatched encoded MIME types and closes the bitmap', async () => {
+    const close = vi.fn();
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 100, height: 50, close }));
+    mockCanvas({ encodedBlob: new Blob(['image'], { type: 'image/png' }) });
+
     await expect(normalizePhoto(fileOfSize(1))).rejects.toMatchObject({ code: 'encode_failed' });
     expect(close).toHaveBeenCalledOnce();
   });
