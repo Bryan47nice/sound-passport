@@ -1,10 +1,7 @@
-export function formatLocalDateTime(localDate: string | undefined, localTime?: string): string {
-  if (!localDate) return '';
+export function formatLocalDateTime(localDate: string, localTime?: string): string {
 
   const date = localDate.slice(0, 10).replaceAll('-', '.');
-  const time = /^\d{2}:\d{2}$/.test(localTime ?? '')
-    ? localTime
-    : localDate.match(/T(\d{2}:\d{2})/)?.[1];
+  const time = /^\d{2}:\d{2}$/.test(localTime ?? '') ? localTime : undefined;
 
   return time ? `${date} · ${time}` : date;
 }

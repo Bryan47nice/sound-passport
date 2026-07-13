@@ -59,7 +59,7 @@ export function JourneyPlayerPage() {
         </figure>
         <div className="player-copy">
           <span className="player-counter">{currentIndex + 1} / {story.moments.length}</span>
-          <time dateTime={moment.takenAt}>{formatLocalDateTime(moment.takenAt, moment.timeZone)}</time>
+          <time dateTime={moment.localDate}>{formatLocalDateTime(moment.localDate, moment.localTime)}</time>
           <h1>{moment.song.title}</h1>
           <p className="song-artist">{moment.song.artist}</p>
           <div className="player-song"><YouTubeEmbed song={moment.song} /></div>

@@ -1,7 +1,7 @@
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes } from 'react-router';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import type { JourneyRepository } from '../../data/ports';
@@ -20,6 +20,8 @@ function renderPlayer(repository: JourneyRepository, initialEntry: string) {
 }
 
 describe('JourneyPlayerPage', () => {
+  afterEach(cleanup);
+
   it('shows fixture photos, local time, song details, and moves only through explicit controls', async () => {
     const user = userEvent.setup();
     const story = await fixtureJourneyRepository.getJourneyStory('tokyo-2024');
@@ -29,6 +31,7 @@ describe('JourneyPlayerPage', () => {
 
     expect(await screen.findByText('1 / 3')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: firstMoment.photoAlt })).toBeInTheDocument();
+    expect(document.querySelector('time')).toHaveAttribute('dateTime', firstMoment.localDate);
     expect(screen.getByText('2024.10.03 · 21:42')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: firstMoment.song.title })).toBeInTheDocument();
     expect(screen.getByText(firstMoment.song.artist)).toBeInTheDocument();

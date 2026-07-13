@@ -9,5 +9,6 @@ describe('countryCatalog', () => {
     expect(findCountry('JP')).toMatchObject({ code: 'JP', name: '日本' });
     expect(findCountry('JP')?.coordinates[0]).toBeGreaterThan(120);
     expect(findCountry('JP')?.coordinates[1]).toBeGreaterThan(20);
+    expect(Object.isFrozen(findCountry('JP')?.coordinates)).toBe(true);
   });
 });

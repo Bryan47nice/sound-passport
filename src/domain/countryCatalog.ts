@@ -13,7 +13,7 @@ const catalog = countries
   .map<CountryOption>((country) => Object.freeze({
     code: country.cca2,
     name: displayNames.of(country.cca2) ?? country.name.common,
-    coordinates: [country.latlng[1], country.latlng[0]] as [number, number],
+    coordinates: Object.freeze([country.latlng[1], country.latlng[0]]) as unknown as [number, number],
   }))
   .sort((a, b) => a.name.localeCompare(b.name, 'zh-TW'));
 

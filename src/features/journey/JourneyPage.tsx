@@ -44,7 +44,7 @@ export function JourneyPage() {
             <img className="moment-thumb" src={moment.photoUrl} alt={moment.photoAlt} />
             <span className="moment-details">
               <strong>{moment.cityLabel} · {moment.placeLabel}</strong>
-              <small>{formatLocalDateTime(moment.takenAt, moment.timeZone)} · {moment.song.title} · {moment.song.artist}</small>
+              <small>{formatLocalDateTime(moment.localDate, moment.localTime)} · {moment.song.title} · {moment.song.artist}</small>
             </span>
             <p>{moment.reason || '旅後待補'}</p>
           </li>

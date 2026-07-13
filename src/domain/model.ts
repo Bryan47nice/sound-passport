@@ -45,10 +45,6 @@ export interface Moment {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
-  /** @deprecated Kept only while the existing journey/player views migrate to local fields. */
-  takenAt?: string;
-  /** @deprecated Kept only while the existing journey/player views migrate to local fields. */
-  timeZone?: string;
 }
 
 export interface PhotoAsset {

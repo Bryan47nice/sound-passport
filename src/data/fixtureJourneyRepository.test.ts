@@ -16,7 +16,8 @@ describe('fixtureJourneyRepository', () => {
     expect(story?.moments.map((item) => item.sortOrder)).toEqual([0, 1, 2]);
     expect(story?.moments[0]).toMatchObject({
       photoAlt: '雨夜裡的澀谷十字路口',
-      timeZone: 'Asia/Tokyo',
+      localDate: '2024-10-03',
+      localTime: '21:42',
     });
   });
 });
