@@ -403,7 +403,7 @@ export function MomentEditor({
     setRecoveryState({ ...recoveryState, adopting: true });
     void (async () => {
       try {
-        const adopted = await adoptMomentOutboxCandidate(
+        const adoption = await adoptMomentOutboxCandidate(
           recovery,
           moment.id,
           moment.journeyId,
@@ -412,6 +412,17 @@ export function MomentEditor({
           recoveryClaimOwner,
         );
         if (!mountedRef.current || recoveryKeyRef.current !== actionKey) return;
+
+        if (adoption.kind === 'candidates') {
+          recoveryLookupRef.current = undefined;
+          setRecoveryState({
+            kind: 'choice',
+            key: actionKey,
+            candidates: adoption.candidates,
+            adopting: false,
+          });
+          return;
+        }
 
         const remote = repository.getPrivateJourneyStory
           ? await loadRemoteMoment()
@@ -424,7 +435,7 @@ export function MomentEditor({
 
         handledRecoveryRef.current = actionKey;
         acceptedMomentRef.current = remote;
-        if (!adopted) {
+        if (adoption.kind === 'none') {
           draftRef.current = remote;
           setDraft(remote);
           onMomentChange(remote);
@@ -436,12 +447,12 @@ export function MomentEditor({
           return;
         }
 
-        const recovered = applyMomentPatch(remote, adopted.envelope.patch);
+        const recovered = applyMomentPatch(remote, adoption.record.envelope.patch);
         draftRef.current = recovered;
         setDraft(recovered);
         onMomentChange(recovered);
         setRecoveryState({ kind: 'ready', key: actionKey });
-        autosave.enqueue(adopted.envelope);
+        autosave.enqueue(adoption.record.envelope);
       } catch {
         if (mountedRef.current && recoveryKeyRef.current === actionKey) {
           setRecoveryState({ kind: 'error', key: actionKey });

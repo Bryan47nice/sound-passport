@@ -50,12 +50,11 @@ function normalizeMomentOutboxRecord(
   return value as unknown as MomentAutosaveOutboxRecord;
 }
 
-export async function readMomentOutbox(
+async function discoverMomentOutbox(
   outbox: MomentAutosaveOutboxPort,
   momentId: string,
   journeyId: string,
   ownerId: string,
-  claimOwner?: JourneyOutboxOwnerClaimer,
 ): Promise<MomentOutboxRecoveryResult> {
   const exact = normalizeMomentOutboxRecord(
     await outbox.getMomentOutbox(momentId, ownerId),
@@ -77,16 +76,29 @@ export async function readMomentOutbox(
     ));
   if (candidates.length === 0) return { kind: 'none' };
 
-  const metadata = candidates.map(({ ownerId: candidateOwnerId, generation, updatedAt }) => ({
-    ownerId: candidateOwnerId,
-    generation,
-    updatedAt,
-  }));
-  if (candidates.length > 1) return { kind: 'candidates', candidates: metadata };
+  return {
+    kind: 'candidates',
+    candidates: candidates.map(({ ownerId: candidateOwnerId, generation, updatedAt }) => ({
+      ownerId: candidateOwnerId,
+      generation,
+      updatedAt,
+    })),
+  };
+}
 
-  const [candidate] = candidates;
+export async function readMomentOutbox(
+  outbox: MomentAutosaveOutboxPort,
+  momentId: string,
+  journeyId: string,
+  ownerId: string,
+  claimOwner?: JourneyOutboxOwnerClaimer,
+): Promise<MomentOutboxRecoveryResult> {
+  const discovered = await discoverMomentOutbox(outbox, momentId, journeyId, ownerId);
+  if (discovered.kind !== 'candidates' || discovered.candidates.length !== 1) return discovered;
+
+  const [candidate] = discovered.candidates;
   const claim = await claimRecoveryOwner(claimOwner, candidate.ownerId);
-  if (!claim) return { kind: 'candidates', candidates: metadata };
+  if (!claim) return discovered;
   try {
     const adopted = normalizeMomentOutboxRecord(
       await outbox.adoptMomentOutbox(
@@ -100,7 +112,29 @@ export async function readMomentOutbox(
       journeyId,
       ownerId,
     );
-    return adopted ? { kind: 'recovered', record: adopted } : { kind: 'none' };
+    if (adopted) return { kind: 'recovered', record: adopted };
+
+    const refreshed = await discoverMomentOutbox(outbox, momentId, journeyId, ownerId);
+    if (
+      refreshed.kind !== 'candidates' ||
+      refreshed.candidates.length !== 1 ||
+      refreshed.candidates[0].ownerId !== candidate.ownerId
+    ) return refreshed;
+
+    const [newer] = refreshed.candidates;
+    const retried = normalizeMomentOutboxRecord(
+      await outbox.adoptMomentOutbox(
+        momentId,
+        journeyId,
+        newer.ownerId,
+        ownerId,
+        newer.generation,
+      ),
+      momentId,
+      journeyId,
+      ownerId,
+    );
+    return retried ? { kind: 'recovered', record: retried } : refreshed;
   } finally {
     await claim.release();
   }
@@ -113,10 +147,10 @@ export async function adoptMomentOutboxCandidate(
   ownerId: string,
   candidate: MomentOutboxRecoveryCandidate,
   claimOwner?: JourneyOutboxOwnerClaimer,
-) {
+): Promise<MomentOutboxRecoveryResult> {
   const claim = await claimRecoveryOwner(claimOwner, candidate.ownerId);
   try {
-    return normalizeMomentOutboxRecord(
+    const adopted = normalizeMomentOutboxRecord(
       await outbox.adoptMomentOutbox(
         momentId,
         journeyId,
@@ -128,6 +162,9 @@ export async function adoptMomentOutboxCandidate(
       journeyId,
       ownerId,
     );
+    return adopted
+      ? { kind: 'recovered', record: adopted }
+      : await discoverMomentOutbox(outbox, momentId, journeyId, ownerId);
   } finally {
     await claim?.release();
   }

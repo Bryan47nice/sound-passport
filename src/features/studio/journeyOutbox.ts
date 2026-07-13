@@ -322,11 +322,10 @@ function normalizeRecord(
   return { journeyId, ownerId, generation, envelope, updatedAt };
 }
 
-export async function readJourneyOutbox(
+async function discoverJourneyOutbox(
   outbox: JourneyAutosaveOutboxPort,
   journeyId: string,
   ownerId: string,
-  claimOwner: JourneyOutboxOwnerClaimer = tryClaimJourneyOutboxOwner,
 ): Promise<JourneyOutboxRecoveryResult> {
   const exact = normalizeRecord(await outbox.get(journeyId, ownerId), journeyId, ownerId);
   if (exact) return { kind: 'recovered', record: exact };
@@ -345,29 +344,57 @@ export async function readJourneyOutbox(
       left.ownerId.localeCompare(right.ownerId) ||
       left.generation.localeCompare(right.generation)
     ));
-  const candidates = foreign.map(({ ownerId: candidateOwnerId, generation, updatedAt }) => ({
-    ownerId: candidateOwnerId,
-    generation,
-    updatedAt,
-  }));
   if (foreign.length === 0) return { kind: 'none' };
-  if (foreign.length !== 1) return { kind: 'candidates', candidates };
 
-  const [record] = foreign;
-  const claim = await claimRecoveryOwner(claimOwner, record.ownerId);
-  if (!claim) return { kind: 'candidates', candidates };
+  return {
+    kind: 'candidates',
+    candidates: foreign.map(({ ownerId: candidateOwnerId, generation, updatedAt }) => ({
+      ownerId: candidateOwnerId,
+      generation,
+      updatedAt,
+    })),
+  };
+}
+
+export async function readJourneyOutbox(
+  outbox: JourneyAutosaveOutboxPort,
+  journeyId: string,
+  ownerId: string,
+  claimOwner: JourneyOutboxOwnerClaimer = tryClaimJourneyOutboxOwner,
+): Promise<JourneyOutboxRecoveryResult> {
+  const discovered = await discoverJourneyOutbox(outbox, journeyId, ownerId);
+  if (discovered.kind !== 'candidates' || discovered.candidates.length !== 1) return discovered;
+
+  const [candidate] = discovered.candidates;
+  const claim = await claimRecoveryOwner(claimOwner, candidate.ownerId);
+  if (!claim) return discovered;
   try {
     const adopted = normalizeRecord(
       await outbox.adopt(
         journeyId,
-        record.ownerId,
+        candidate.ownerId,
         ownerId,
-        record.generation,
+        candidate.generation,
       ),
       journeyId,
       ownerId,
     );
-    return adopted ? { kind: 'recovered', record: adopted } : { kind: 'none' };
+    if (adopted) return { kind: 'recovered', record: adopted };
+
+    const refreshed = await discoverJourneyOutbox(outbox, journeyId, ownerId);
+    if (
+      refreshed.kind !== 'candidates' ||
+      refreshed.candidates.length !== 1 ||
+      refreshed.candidates[0].ownerId !== candidate.ownerId
+    ) return refreshed;
+
+    const [newer] = refreshed.candidates;
+    const retried = normalizeRecord(
+      await outbox.adopt(journeyId, newer.ownerId, ownerId, newer.generation),
+      journeyId,
+      ownerId,
+    );
+    return retried ? { kind: 'recovered', record: retried } : refreshed;
   } finally {
     await claim.release();
   }

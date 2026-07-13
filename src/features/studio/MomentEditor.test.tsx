@@ -698,6 +698,61 @@ describe('MomentEditor', () => {
     expect(onMomentChange).toHaveBeenCalledOnce();
   });
 
+  it('refreshes an advanced explicit candidate without writing or marking it handled', async () => {
+    const first = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: '11111111-1111-4111-8111-111111111111',
+      generation: 'generation-1',
+      envelope: {
+        patch: { caption: 'First recovery version' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const newer = {
+      ...first,
+      generation: 'generation-2',
+      envelope: {
+        patch: { caption: 'Second recovery version' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:01.005Z',
+    };
+    let stored = first;
+    const recovery = {
+      getMomentOutbox: vi.fn(async () => undefined),
+      listMomentOutboxesByJourney: vi.fn(async () => [stored]),
+      adoptMomentOutbox: vi.fn(async () => {
+        stored = newer;
+        return undefined;
+      }),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    const updateMoment = vi.fn(async () => moment);
+    const { onMomentChange } = renderEditor(updateMoment, undefined, {
+      recovery,
+      recoveryClaimOwner: vi.fn(async () => undefined),
+      recoveryOwnerId: 'owner-current',
+    });
+
+    await act(flushMicrotasks);
+    fireEvent.click(screen.getByRole('button', { name: '復原未儲存內容' }));
+    await act(flushMicrotasks);
+
+    const prompt = screen.getByRole('region', { name: '找到未儲存的時刻內容' });
+    expect(prompt.querySelector('time')).toHaveAttribute('datetime', newer.updatedAt);
+    expect(screen.queryByText('未儲存內容已由其他分頁處理，已重新載入最新儲存內容。')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('時刻文案')).not.toBeInTheDocument();
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
+    expect(recovery.listMomentOutboxesByJourney).toHaveBeenCalledTimes(2);
+    expect(recovery.putMomentOutbox).not.toHaveBeenCalled();
+    expect(recovery.compareAndDeleteMomentOutbox).not.toHaveBeenCalled();
+    expect(updateMoment).not.toHaveBeenCalled();
+    expect(onMomentChange).not.toHaveBeenCalled();
+  });
+
   it('requires deterministic explicit selection when several recovery candidates exist', async () => {
     const older = {
       momentId: moment.id,
@@ -780,10 +835,14 @@ describe('MomentEditor', () => {
       caption: '其他分頁已儲存的最新文案',
       updatedAt: '2026-07-13T00:00:01.000Z',
     };
+    let stored: typeof pending | undefined = pending;
     const recovery = {
       getMomentOutbox: vi.fn(async () => undefined),
-      listMomentOutboxesByJourney: vi.fn(async () => [pending]),
-      adoptMomentOutbox: vi.fn(async () => undefined),
+      listMomentOutboxesByJourney: vi.fn(async () => stored ? [stored] : []),
+      adoptMomentOutbox: vi.fn(async () => {
+        stored = undefined;
+        return undefined;
+      }),
       putMomentOutbox: vi.fn(async () => undefined),
       compareAndDeleteMomentOutbox: vi.fn(async () => true),
     };
@@ -804,6 +863,7 @@ describe('MomentEditor', () => {
     );
     expect(screen.getByLabelText('時刻文案')).toHaveValue(remote.caption);
     expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
+    expect(recovery.listMomentOutboxesByJourney).toHaveBeenCalledTimes(2);
     expect(recovery.putMomentOutbox).not.toHaveBeenCalled();
     expect(recovery.compareAndDeleteMomentOutbox).not.toHaveBeenCalled();
     expect(updateMoment).not.toHaveBeenCalled();

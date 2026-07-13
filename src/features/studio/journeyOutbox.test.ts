@@ -167,6 +167,84 @@ describe('journeyOutbox', () => {
     expect(outbox.peek('private-tokyo', ownerA)).toEqual({ ...legacy, ownerId: ownerA });
   });
 
+  it('re-discovers and adopts a newer generation after an automatic CAS miss', async () => {
+    const first = record(legacyOwner, 'generation-1');
+    const newer = {
+      ...first,
+      generation: 'generation-2',
+      updatedAt: '2026-07-13T00:00:01.000Z',
+    };
+    const wrongJourney = { ...newer, journeyId: 'private-elsewhere', ownerId: ownerB };
+    const outbox = outboxStub([first]);
+    vi.mocked(outbox.listByJourney)
+      .mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([wrongJourney, newer]);
+    vi.mocked(outbox.adopt)
+      .mockImplementationOnce(async () => {
+        await outbox.put(newer);
+        return undefined;
+      })
+      .mockImplementationOnce(async () => ({ ...newer, ownerId: ownerA }));
+    const release = vi.fn(async () => undefined);
+
+    await expect(readJourneyOutbox(
+      outbox,
+      'private-tokyo',
+      ownerA,
+      async (ownerId) => ({ ownerId, release }),
+    )).resolves.toEqual({
+      kind: 'recovered',
+      record: { ...newer, ownerId: ownerA },
+    });
+
+    expect(outbox.adopt).toHaveBeenNthCalledWith(
+      1,
+      'private-tokyo',
+      legacyOwner,
+      ownerA,
+      first.generation,
+    );
+    expect(outbox.adopt).toHaveBeenNthCalledWith(
+      2,
+      'private-tokyo',
+      legacyOwner,
+      ownerA,
+      newer.generation,
+    );
+    expect(outbox.listByJourney).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('bounds automatic CAS rediscovery when the source keeps advancing', async () => {
+    let current = record(legacyOwner, 'generation-1');
+    const outbox = outboxStub();
+    vi.mocked(outbox.listByJourney).mockImplementation(async () => [current]);
+    vi.mocked(outbox.adopt).mockImplementation(async () => {
+      const nextGeneration = current.generation === 'generation-1'
+        ? 'generation-2'
+        : 'generation-3';
+      current = { ...current, generation: nextGeneration };
+      return undefined;
+    });
+
+    await expect(readJourneyOutbox(
+      outbox,
+      'private-tokyo',
+      ownerA,
+      async (ownerId) => ({ ownerId, release: async () => undefined }),
+    )).resolves.toEqual({
+      kind: 'candidates',
+      candidates: [{
+        ownerId: legacyOwner,
+        generation: 'generation-2',
+        updatedAt: current.updatedAt,
+      }],
+    });
+
+    expect(outbox.adopt).toHaveBeenCalledTimes(2);
+    expect(outbox.listByJourney).toHaveBeenCalledTimes(2);
+  });
+
   it('requires an explicit choice while a recovery source owner is still live', async () => {
     const locks = new DeterministicLockManager();
     const sourceContext = ownerStorage(ownerA);
