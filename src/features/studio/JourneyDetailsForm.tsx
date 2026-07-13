@@ -40,10 +40,15 @@ export function JourneyDetailsForm({
   return (
     <form className="journey-details-form" onSubmit={(event) => event.preventDefault()}>
       <label>旅程標題
-        <input value={draft.title} onChange={(event) => onTextChange({ title: event.target.value })} />
+        <input
+          data-validation-field="title"
+          value={draft.title}
+          onChange={(event) => onTextChange({ title: event.target.value })}
+        />
       </label>
       <label>國家
         <select
+          data-validation-field="countryCode"
           value={draft.countryCode}
           onChange={(event) => {
             const country = listCountries().find((option) => option.code === event.target.value);
@@ -62,6 +67,7 @@ export function JourneyDetailsForm({
         <label>開始日期
           <input
             type="date"
+            data-validation-field="startDate"
             value={draft.startDate}
             aria-describedby={dateError ? 'journey-date-error' : undefined}
             aria-invalid={dateError ? true : undefined}
@@ -71,6 +77,7 @@ export function JourneyDetailsForm({
         <label>結束日期
           <input
             type="date"
+            data-validation-field="endDate"
             value={draft.endDate}
             aria-describedby={dateError ? 'journey-date-error' : undefined}
             aria-invalid={dateError ? true : undefined}

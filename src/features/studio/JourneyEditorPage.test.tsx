@@ -261,6 +261,126 @@ describe('JourneyEditorPage', () => {
     expect(screen.getByLabelText('歌名')).toHaveValue('Night Walk');
   });
 
+  it('flushes journey and moment drafts before atomically moving a valid draft to review preview', async () => {
+    const journeyWrite = deferred();
+    const momentWrite = deferred();
+    const operations: string[] = [];
+    let currentStory: JourneyStory = {
+      journey: { ...story.journey, status: 'draft' },
+      moments: story.moments.map((moment) => ({ ...moment, song: { ...moment.song } })),
+    };
+    const updateJourney = vi.fn(async (_id: string, patch: JourneyPatch) => {
+      operations.push('journey:start');
+      await journeyWrite.promise;
+      currentStory = {
+        ...currentStory,
+        journey: {
+          ...currentStory.journey,
+          ...patch,
+          updatedAt: versionAfter(currentStory.journey.updatedAt),
+        },
+      };
+      operations.push('journey:commit');
+      return currentStory.journey;
+    });
+    const updateMoment = vi.fn(async (_id: string, patch: MomentPatch) => {
+      operations.push('moment:start');
+      await momentWrite.promise;
+      const current = currentStory.moments[0];
+      const nextMoment = {
+        ...current,
+        ...patch,
+        song: patch.song ? { ...current.song, ...patch.song } : current.song,
+        updatedAt: versionAfter(current.updatedAt),
+      };
+      currentStory = {
+        journey: {
+          ...currentStory.journey,
+          updatedAt: versionAfter(currentStory.journey.updatedAt),
+        },
+        moments: [nextMoment],
+      };
+      operations.push('moment:commit');
+      return nextMoment;
+    });
+    const setJourneyStatus = vi.fn(async (_id: string, status: Journey['status']) => {
+      operations.push('status:review');
+      currentStory = {
+        ...currentStory,
+        journey: {
+          ...currentStory.journey,
+          status,
+          updatedAt: versionAfter(currentStory.journey.updatedAt),
+        },
+      };
+      return currentStory.journey;
+    });
+    const editor = editorStub({
+      getPrivateJourneyStory: vi.fn(async () => currentStory),
+      updateJourney,
+      updateMoment,
+      setJourneyStatus,
+    });
+    renderRoute(editor);
+
+    const title = await screen.findByRole('textbox', { name: '旅程標題' });
+    fireEvent.change(title, { target: { value: '東京夜行，重新整理' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '歌名' }), { target: { value: 'Night Walk Revised' } });
+    fireEvent.click(screen.getByRole('button', { name: '前往預覽' }));
+
+    await waitFor(() => expect(operations).toEqual(['journey:start']));
+    expect(setJourneyStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      journeyWrite.resolve();
+      await journeyWrite.promise;
+      await flushMicrotasks();
+    });
+    expect(operations).toEqual(['journey:start', 'journey:commit', 'moment:start']);
+    expect(setJourneyStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      momentWrite.resolve();
+      await momentWrite.promise;
+      await flushMicrotasks();
+    });
+
+    await waitFor(() => expect(setJourneyStatus).toHaveBeenCalledWith(
+      story.journey.id,
+      'review',
+      { expectedUpdatedAt: expect.any(String) },
+    ));
+    expect(operations).toEqual([
+      'journey:start',
+      'journey:commit',
+      'moment:start',
+      'moment:commit',
+      'status:review',
+    ]);
+    expect(await screen.findByRole('button', { name: '完成旅程' })).toBeInTheDocument();
+  });
+
+  it('keeps an invalid draft in draft, reports actionable validation, and focuses the first failing field', async () => {
+    const invalidStory: JourneyStory = {
+      ...story,
+      journey: { ...story.journey, title: '', status: 'draft' },
+    };
+    const setJourneyStatus = vi.fn();
+    const editor = editorStub({
+      getPrivateJourneyStory: vi.fn(async () => invalidStory),
+      setJourneyStatus,
+    });
+    renderRoute(editor);
+
+    const title = await screen.findByRole('textbox', { name: '旅程標題' });
+    fireEvent.click(screen.getByRole('button', { name: '前往預覽' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('請填寫旅程標題。');
+    expect(title).toHaveFocus();
+    expect(setJourneyStatus).not.toHaveBeenCalled();
+    expect(screen.getByText('草稿')).toBeInTheDocument();
+  });
+
   it('synchronously suppresses the loaded journey when the route id changes', async () => {
     const nextLoad = deferred<JourneyStory | undefined>();
     const nextStory: JourneyStory = {

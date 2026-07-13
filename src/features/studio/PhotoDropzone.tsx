@@ -138,6 +138,7 @@ export function PhotoDropzone({
             multiple
             disabled={processing || refreshFailure !== undefined}
             aria-label="加入照片"
+            data-validation-field="moments"
             onChange={handleChange}
           />
         </label>

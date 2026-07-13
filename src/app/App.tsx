@@ -5,6 +5,7 @@ import { JourneyPage } from '../features/journey/JourneyPage';
 import { JourneyPlayerPage } from '../features/player/JourneyPlayerPage';
 import { JourneyCreatePage } from '../features/studio/JourneyCreatePage';
 import { JourneyEditorPage } from '../features/studio/JourneyEditorPage';
+import { JourneyPreviewPage } from '../features/studio/JourneyPreviewPage';
 import { StudioPage } from '../features/studio/StudioPage';
 import { AppShell } from './AppShell';
 import { GuardedLink, NavigationGuardProvider, useGuardedRouteLocation } from './navigationGuard';
@@ -17,6 +18,7 @@ function AppRoutes() {
         <Route index element={<AtlasPage />} />
         <Route path="studio" element={<StudioPage />} />
         <Route path="studio/journeys/new" element={<JourneyCreatePage />} />
+        <Route path="studio/journeys/:journeyId/preview" element={<JourneyPreviewPage />} />
         <Route path="studio/journeys/:journeyId" element={<JourneyEditorPage />} />
         <Route path="countries/:countryCode" element={<CountryPage />} />
         <Route path="journeys/:journeyId/play" element={<JourneyPlayerPage />} />

@@ -11,6 +11,7 @@ import type {
   PhotoAsset,
   PrivateJourneySnapshot,
 } from '../domain/model';
+import type { JourneyValidationIssue } from '../domain/journeyValidation';
 
 export interface JourneyRepository {
   listCountrySummaries(): Promise<CountrySummary[]>;
@@ -30,6 +31,23 @@ export class JourneyVersionConflictError extends Error {
   ) {
     super(`Journey ${journeyId} changed after version ${expectedUpdatedAt}.`);
     this.name = 'JourneyVersionConflictError';
+  }
+}
+
+export class JourneyValidationError extends Error {
+  constructor(readonly issues: JourneyValidationIssue[]) {
+    super('Journey does not meet the required completion fields.');
+    this.name = 'JourneyValidationError';
+  }
+}
+
+export class JourneyStatusTransitionError extends Error {
+  constructor(
+    readonly from: JourneyStatus,
+    readonly to: JourneyStatus,
+  ) {
+    super(`Journey status cannot transition from ${from} to ${to}.`);
+    this.name = 'JourneyStatusTransitionError';
   }
 }
 
@@ -58,7 +76,7 @@ export interface JourneyEditorRepository {
   updateMoment(id: string, patch: MomentPatch, options?: UpdateMomentOptions): Promise<Moment>;
   deleteMoment(id: string): Promise<void>;
   reorderMoments(journeyId: string, orderedIds: string[]): Promise<void>;
-  setJourneyStatus(id: string, status: JourneyStatus): Promise<Journey>;
+  setJourneyStatus(id: string, status: JourneyStatus, options?: UpdateJourneyOptions): Promise<Journey>;
 }
 
 export type JourneyAutosaveField =

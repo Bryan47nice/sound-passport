@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import type { ComponentProps, PropsWithChildren } from 'react';
 import { describe, expect, it } from 'vitest';
 import { fixtureJourneyRepository } from './fixtureJourneyRepository';
@@ -13,11 +13,13 @@ import {
   useJourneyAutosaveOutbox,
   useJourneyEditorRepository,
   useJourneyRepository,
+  useInvalidateRepositoryQueries,
   useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
   usePhotoAssetRepository,
   usePrivateStorageError,
   usePrivateDataPort,
+  useRepositoryRevision,
 } from './RepositoryContext';
 
 type ProviderProps = ComponentProps<typeof RepositoryProvider>;
@@ -105,5 +107,16 @@ describe('repository service hooks', () => {
   it('throws the exact private-data error when private data is absent', () => {
     expect(() => renderHook(usePrivateDataPort, { wrapper: QueryOnlyProvider }))
       .toThrowError(/^PrivateDataPort is not available$/);
+  });
+
+  it('advances a provider-local query revision only when a caller invalidates live repository reads', () => {
+    const { result } = renderHook(() => ({
+      invalidate: useInvalidateRepositoryQueries(),
+      revision: useRepositoryRevision(),
+    }), { wrapper: AllServicesProvider });
+
+    expect(result.current.revision).toBe(0);
+    act(() => result.current.invalidate());
+    expect(result.current.revision).toBe(1);
   });
 });

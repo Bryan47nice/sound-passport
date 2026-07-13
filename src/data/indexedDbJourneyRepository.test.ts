@@ -126,13 +126,20 @@ async function openRepository(testName: string) {
 
 async function createCompleteValidJourney(
   repository: ReturnType<typeof createIndexedDbJourneyRepository>,
+  overrides: Partial<NewJourney> = {},
 ) {
-  const created = await repository.createJourney(journeyInput());
+  const created = await repository.createJourney(journeyInput(overrides));
   const [moment] = await repository.addMoments(created.id, [photoInput('valid.jpg')]);
   await repository.updateMoment(moment.id, {
     song: { title: 'Valid title', artist: 'Valid artist', sourceUrl: '' },
   });
-  const journey = await repository.setJourneyStatus(created.id, 'complete');
+  const readyStory = await repository.getPrivateJourneyStory(created.id);
+  const review = await repository.setJourneyStatus(created.id, 'review', {
+    expectedUpdatedAt: readyStory!.journey.updatedAt,
+  });
+  const journey = await repository.setJourneyStatus(created.id, 'complete', {
+    expectedUpdatedAt: review.updatedAt,
+  });
   return { journey, moment };
 }
 
@@ -485,6 +492,63 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('validates and version-checks each forward lifecycle transition in the status transaction', async () => {
+    const { db, repository } = await openRepository('validated-status-transition');
+    const journey = await repository.createJourney(journeyInput());
+
+    await expect(repository.setJourneyStatus(journey.id, 'review', {
+      expectedUpdatedAt: journey.updatedAt,
+    })).rejects.toMatchObject({
+      name: 'JourneyValidationError',
+      issues: [{ field: 'moments', code: 'at_least_one' }],
+    });
+    expect((await repository.getPrivateJourneyStory(journey.id))?.journey.status).toBe('draft');
+
+    const [moment] = await repository.addMoments(journey.id, [photoInput('review.jpg')]);
+    await repository.updateMoment(moment.id, {
+      song: { title: 'Review title', artist: 'Review artist', sourceUrl: '' },
+    });
+    const ready = await repository.getPrivateJourneyStory(journey.id);
+
+    await expect(repository.setJourneyStatus(journey.id, 'complete', {
+      expectedUpdatedAt: ready!.journey.updatedAt,
+    })).rejects.toMatchObject({ name: 'JourneyStatusTransitionError' });
+
+    const review = await repository.setJourneyStatus(journey.id, 'review', {
+      expectedUpdatedAt: ready!.journey.updatedAt,
+    });
+    await expect(repository.setJourneyStatus(journey.id, 'complete', {
+      expectedUpdatedAt: ready!.journey.updatedAt,
+    })).rejects.toMatchObject({
+      name: 'JourneyVersionConflictError',
+      actualUpdatedAt: review.updatedAt,
+    });
+
+    const complete = await repository.setJourneyStatus(journey.id, 'complete', {
+      expectedUpdatedAt: review.updatedAt,
+    });
+    expect(complete.status).toBe('complete');
+    db.close();
+  });
+
+  it('demotes a complete journey in the same journey-field save and removes it from live queries', async () => {
+    const { db, repository } = await openRepository('journey-field-demotion');
+    const { journey } = await createCompleteValidJourney(repository);
+
+    const demoted = await repository.updateJourney(
+      journey.id,
+      { title: '' },
+      { expectedUpdatedAt: journey.updatedAt },
+    );
+
+    expect(demoted.status).toBe('review');
+    expect((await repository.getPrivateJourneyStory(journey.id))?.journey.title).toBe('');
+    expect(await repository.getJourneyStory(journey.id)).toBeUndefined();
+    expect(await repository.listJourneysByCountry(journey.countryCode)).toEqual([]);
+    expect(await repository.listCountrySummaries()).toEqual([]);
+    db.close();
+  });
+
   it('batch-creates moments, advances the story version, and demotes an invalid complete journey atomically', async () => {
     const { db, repository } = await openRepository('add-moments-story-version');
     const { journey: plannedJourney } = await createCompleteValidJourney(repository);
@@ -593,7 +657,22 @@ describe('indexedDbJourneyRepository', () => {
     const { db, repository } = await openRepository('reorder-story-version');
     const created = await repository.createJourney(journeyInput());
     const moments = await repository.addMoments(created.id, [photoInput('one.jpg'), photoInput('two.jpg')]);
-    const plannedJourney = await repository.setJourneyStatus(created.id, 'complete');
+    for (const [index, moment] of moments.entries()) {
+      await repository.updateMoment(moment.id, {
+        song: { title: `Valid ${index + 1}`, artist: 'Valid artist', sourceUrl: '' },
+      });
+    }
+    const ready = await repository.getPrivateJourneyStory(created.id);
+    const review = await repository.setJourneyStatus(created.id, 'review', {
+      expectedUpdatedAt: ready!.journey.updatedAt,
+    });
+    const plannedJourney = await repository.setJourneyStatus(created.id, 'complete', {
+      expectedUpdatedAt: review.updatedAt,
+    });
+    const corruptTx = db.transaction('songs', 'readwrite');
+    const corruptSong = await corruptTx.store.get(ready!.moments[0].song.id);
+    await corruptTx.store.put({ ...corruptSong!, title: '' });
+    await corruptTx.done;
 
     await repository.reorderMoments(created.id, [moments[1].id, moments[0].id]);
 
@@ -770,9 +849,15 @@ describe('indexedDbJourneyRepository', () => {
     const { db, repository } = await openRepository('visibility');
     const draft = await repository.createJourney(journeyInput({ title: 'Draft' }));
     const review = await repository.createJourney(journeyInput({ title: 'Review' }));
-    const complete = await repository.createJourney(journeyInput({ title: 'Complete' }));
-    await repository.setJourneyStatus(review.id, 'review');
-    await repository.setJourneyStatus(complete.id, 'complete');
+    const [reviewMoment] = await repository.addMoments(review.id, [photoInput('review-visible.jpg')]);
+    await repository.updateMoment(reviewMoment.id, {
+      song: { title: 'Review song', artist: 'Review artist', sourceUrl: '' },
+    });
+    const readyReview = await repository.getPrivateJourneyStory(review.id);
+    await repository.setJourneyStatus(review.id, 'review', {
+      expectedUpdatedAt: readyReview!.journey.updatedAt,
+    });
+    const { journey: complete } = await createCompleteValidJourney(repository, { title: 'Complete' });
 
     expect(new Set((await repository.listPrivateJourneys()).map((journey) => journey.id))).toEqual(
       new Set([draft.id, review.id, complete.id]),

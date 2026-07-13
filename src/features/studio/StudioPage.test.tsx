@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RepositoryProvider } from '../../data/RepositoryContext';
+import { RepositoryProvider, useInvalidateRepositoryQueries } from '../../data/RepositoryContext';
 import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStory } from '../../domain/model';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
@@ -64,6 +64,11 @@ function renderPage(editor = editorStub()) {
       <MemoryRouter><StudioPage /></MemoryRouter>
     </RepositoryProvider>,
   );
+}
+
+function InvalidateControl() {
+  const invalidate = useInvalidateRepositoryQueries();
+  return <button type="button" onClick={invalidate}>通知私人資料變更</button>;
 }
 
 describe('StudioPage', () => {
@@ -200,6 +205,27 @@ describe('StudioPage', () => {
     await act(async () => { staleList.resolve(journeys); });
     expect(screen.getByText('目前的旅程')).toBeInTheDocument();
     expect(screen.queryByText('札幌下雪的早晨')).not.toBeInTheDocument();
+  });
+
+  it('refetches the mounted dashboard after a private repository revision', async () => {
+    const user = userEvent.setup();
+    const revisedJourney = { ...journeys[0], title: '修訂後的札幌旅程' };
+    const listPrivateJourneys = vi.fn()
+      .mockResolvedValueOnce([journeys[0]])
+      .mockResolvedValueOnce([revisedJourney]);
+    const editor = editorStub({ listPrivateJourneys });
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
+        <MemoryRouter><StudioPage /><InvalidateControl /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+    await screen.findByText('札幌下雪的早晨');
+
+    await user.click(screen.getByRole('button', { name: '通知私人資料變更' }));
+
+    expect(await screen.findByText('修訂後的札幌旅程')).toBeInTheDocument();
+    expect(screen.queryByText('札幌下雪的早晨')).not.toBeInTheDocument();
+    expect(listPrivateJourneys).toHaveBeenCalledTimes(2);
   });
 
   it('uses the new journey route and labels unavailable controls truthfully', async () => {

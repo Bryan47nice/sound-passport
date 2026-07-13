@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useGuardedNavigate } from '../../app/navigationGuard';
-import { useJourneyRepository } from '../../data/RepositoryContext';
+import { useJourneyRepository, useRepositoryRevision } from '../../data/RepositoryContext';
 import type { CountrySummary } from '../../domain/model';
 import { WorldMap } from './WorldMap';
 
 export function AtlasPage() {
   const repository = useJourneyRepository();
+  const repositoryRevision = useRepositoryRevision();
   const navigate = useGuardedNavigate();
   const [countries, setCountries] = useState<CountrySummary[]>();
 
   useEffect(() => {
     let isCurrent = true;
+    setCountries(undefined);
 
     void repository.listCountrySummaries().then((summaries) => {
       if (isCurrent) setCountries(summaries);
@@ -19,7 +21,7 @@ export function AtlasPage() {
     return () => {
       isCurrent = false;
     };
-  }, [repository]);
+  }, [repository, repositoryRevision]);
 
   const selectCountry = useCallback((countryCode: string) => {
     navigate(`/countries/${countryCode}`);

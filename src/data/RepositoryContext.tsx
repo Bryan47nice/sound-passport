@@ -1,4 +1,11 @@
-import { createContext, useContext, type PropsWithChildren } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type PropsWithChildren,
+} from 'react';
 import type {
   JourneyAutosaveOutboxPort,
   JourneyEditorRepository,
@@ -16,12 +23,36 @@ export interface RepositoryServices {
   privateStorageError?: string;
 }
 
-const Context = createContext<RepositoryServices | null>(null);
+interface RepositoryContextValue extends RepositoryServices {
+  invalidateQueries: () => void;
+  revision: number;
+}
+
+const Context = createContext<RepositoryContextValue | null>(null);
 
 type RepositoryProviderProps = PropsWithChildren<{ services: RepositoryServices }>;
 
 export function RepositoryProvider({ services, children }: RepositoryProviderProps) {
-  return <Context.Provider value={services}>{children}</Context.Provider>;
+  const [revision, setRevision] = useState(0);
+  const invalidateQueries = useCallback(() => setRevision((current) => current + 1), []);
+  const value = useMemo<RepositoryContextValue>(() => ({
+    ...services,
+    invalidateQueries,
+    revision,
+  }), [invalidateQueries, revision, services]);
+  return <Context.Provider value={value}>{children}</Context.Provider>;
+}
+
+export function useRepositoryRevision(): number {
+  const context = useContext(Context);
+  if (!context) throw new Error('Repository services are not available');
+  return context.revision;
+}
+
+export function useInvalidateRepositoryQueries(): () => void {
+  const context = useContext(Context);
+  if (!context) throw new Error('Repository services are not available');
+  return context.invalidateQueries;
 }
 
 export function useJourneyRepository(): JourneyRepository {

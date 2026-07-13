@@ -5,19 +5,25 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useParams } from 'react-router';
+import { useNavigate, useParams } from 'react-router';
 import {
+  useInvalidateRepositoryQueries,
   useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
   usePrivateStorageError,
 } from '../../data/RepositoryContext';
 import {
+  JourneyStatusTransitionError,
+  JourneyValidationError,
   JourneyVersionConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type JourneyEditorRepository,
 } from '../../data/ports';
-import { validateJourneyForReview } from '../../domain/journeyValidation';
+import {
+  validateJourneyForReview,
+  type JourneyValidationIssue,
+} from '../../domain/journeyValidation';
 import type { Journey, JourneyMoment, JourneyPatch, JourneyStory, Moment } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { JourneyDetailsForm } from './JourneyDetailsForm';
@@ -47,6 +53,7 @@ import {
 import { useAutosave } from './useAutosave';
 import { useDirtyNavigationGuard } from './useDirtyNavigationGuard';
 import { useMobileStudio } from './useMobileStudio';
+import { formatJourneyValidationIssue } from './journeyValidationPresentation';
 
 type LoadState =
   | { kind: 'loading'; journeyId: string }
@@ -204,6 +211,8 @@ function JourneyEditorWorkspace({
   recoveredOutbox?: JourneyAutosaveOutboxRecord;
   story: JourneyStory;
 }) {
+  const navigate = useNavigate();
+  const invalidateQueries = useInvalidateRepositoryQueries();
   const recoveredEnvelope = recoveredOutbox?.envelope;
   const initialDraft = recoveredEnvelope
     ? { ...story.journey, ...recoveredEnvelope.patch }
@@ -214,6 +223,9 @@ function JourneyEditorWorkspace({
   const [demotionNotice, setDemotionNotice] = useState('');
   const [selectedMomentId, setSelectedMomentId] = useState(story.moments[0]?.id);
   const [momentDirty, setMomentDirty] = useState(false);
+  const [validationIssues, setValidationIssues] = useState<JourneyValidationIssue[]>([]);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewError, setPreviewError] = useState('');
   const draftRef = useRef(initialDraft);
   const selectedMomentIdRef = useRef(selectedMomentId);
   const fieldRevisionsRef = useRef<Partial<Record<JourneyUserPatchKey, number>>>({});
@@ -221,6 +233,8 @@ function JourneyEditorWorkspace({
   const mountedRef = useRef(false);
   const storyRefreshGenerationRef = useRef(0);
   const momentAutosaveRef = useRef<MomentAutosaveRegistration | undefined>(undefined);
+  const pendingValidationFocusRef = useRef<{ field: string; momentId?: string } | undefined>(undefined);
+  const previewBusyRef = useRef(false);
   selectedMomentIdRef.current = selectedMomentId;
 
   useEffect(() => {
@@ -271,6 +285,7 @@ function JourneyEditorWorkspace({
         repositoryPatch,
         { expectedUpdatedAt: currentStory.journey.updatedAt },
       );
+      invalidateQueries();
       rebaseDraft(updated, revision);
       if (demoted && mountedRef.current) {
         setDemotionNotice('必要資料已移除，旅程已回到待整理');
@@ -285,7 +300,7 @@ function JourneyEditorWorkspace({
       }
       throw new JourneyPatchConflictError();
     }
-  }, [editor, rebaseDraft, story.journey.id]);
+  }, [editor, invalidateQueries, rebaseDraft, story.journey.id]);
 
   const save = useCallback(async (
     envelope: JourneyPatchEnvelope,
@@ -347,10 +362,8 @@ function JourneyEditorWorkspace({
     momentAutosaveRef.current?.flush() ?? Promise.resolve()
   ), []);
   const flushWorkspace = useCallback(async () => {
-    await Promise.all([
-      autosave.flush(),
-      momentAutosaveRef.current?.flush() ?? Promise.resolve(),
-    ]);
+    await autosave.flush();
+    await (momentAutosaveRef.current?.flush() ?? Promise.resolve());
   }, [autosave.flush]);
   useDirtyNavigationGuard({ dirty: autosave.dirty || momentDirty, flush: flushWorkspace });
 
@@ -440,6 +453,41 @@ function JourneyEditorWorkspace({
     return refreshed;
   }, [editor, story.journey.id]);
 
+  const presentValidation = useCallback((issues: JourneyValidationIssue[], currentStory: JourneyStory) => {
+    setValidationIssues(issues);
+    const firstIssue = issues[0];
+    if (!firstIssue) return;
+    const momentMatch = /^moments\.(\d+)\.(.+)$/.exec(firstIssue.field);
+    if (!momentMatch) {
+      pendingValidationFocusRef.current = { field: firstIssue.field };
+      return;
+    }
+
+    const moment = currentStory.moments[Number(momentMatch[1])];
+    if (!moment) {
+      pendingValidationFocusRef.current = { field: 'moments' };
+      return;
+    }
+    pendingValidationFocusRef.current = { field: momentMatch[2], momentId: moment.id };
+    setSelectedMomentId(moment.id);
+  }, []);
+
+  useEffect(() => {
+    const pending = pendingValidationFocusRef.current;
+    if (!pending || (pending.momentId && pending.momentId !== selectedMomentId)) return;
+
+    let target: HTMLElement | undefined;
+    if (pending.field === 'photo' && pending.momentId) {
+      target = [...document.querySelectorAll<HTMLElement>('[role="option"][data-id]')]
+        .find((option) => option.dataset.id === pending.momentId);
+    } else {
+      target = document.querySelector<HTMLElement>(`[data-validation-field="${pending.field}"]`) ?? undefined;
+    }
+    if (!target) return;
+    pendingValidationFocusRef.current = undefined;
+    target.focus();
+  }, [selectedMomentId, validationIssues]);
+
   const selectMoment = useCallback((momentId: string) => {
     if (momentId === selectedMomentId) return;
     const registration = momentAutosaveRef.current;
@@ -460,6 +508,7 @@ function JourneyEditorWorkspace({
   }, []);
 
   const publishCreatedMoments = useCallback((created: Moment[]) => {
+    invalidateQueries();
     setEditorStory((current) => {
       const existingIds = new Set(current.moments.map(({ id }) => id));
       const appended = created
@@ -469,7 +518,7 @@ function JourneyEditorWorkspace({
         ? current
         : { ...current, moments: [...current.moments, ...appended] };
     });
-  }, []);
+  }, [invalidateQueries]);
 
   const updateMomentOrder = useCallback((orderedIds: string[]) => {
     storyRefreshGenerationRef.current += 1;
@@ -488,10 +537,52 @@ function JourneyEditorWorkspace({
   const deleteMoment = useCallback(async (momentId: string) => {
     const deletedIndex = editorStory.moments.findIndex((moment) => moment.id === momentId);
     await editor.deleteMoment(momentId);
+    invalidateQueries();
     const refreshed = await refreshStory();
     const nextIndex = Math.min(Math.max(0, deletedIndex), refreshed.moments.length - 1);
     setSelectedMomentId(refreshed.moments[nextIndex]?.id);
-  }, [editor, editorStory.moments, refreshStory]);
+  }, [editor, editorStory.moments, invalidateQueries, refreshStory]);
+
+  const openPreview = useCallback(async () => {
+    if (previewBusyRef.current) return;
+    previewBusyRef.current = true;
+    setPreviewBusy(true);
+    setPreviewError('');
+    let currentStory: JourneyStory | undefined;
+    try {
+      await flushWorkspace();
+      currentStory = await editor.getPrivateJourneyStory(story.journey.id);
+      if (!currentStory) throw new Error('Journey is no longer available.');
+
+      const validation = validateJourneyForReview(currentStory);
+      if (!validation.valid) {
+        presentValidation(validation.issues, currentStory);
+        return;
+      }
+      setValidationIssues([]);
+
+      if (currentStory.journey.status === 'draft') {
+        await editor.setJourneyStatus(story.journey.id, 'review', {
+          expectedUpdatedAt: currentStory.journey.updatedAt,
+        });
+        invalidateQueries();
+      }
+      navigate(`/studio/journeys/${story.journey.id}/preview`);
+    } catch (error) {
+      if (error instanceof JourneyValidationError) {
+        const refreshed = await editor.getPrivateJourneyStory(story.journey.id).catch(() => undefined);
+        presentValidation(error.issues, refreshed ?? currentStory ?? editorStory);
+        setPreviewError('旅程內容已更新，請修正標示的必填欄位。');
+      } else if (error instanceof JourneyVersionConflictError || error instanceof JourneyStatusTransitionError) {
+        setPreviewError('旅程內容已在其他位置更新，請重新載入後再試。');
+      } else {
+        setPreviewError('尚有變更無法儲存，請先重試儲存再前往預覽。');
+      }
+    } finally {
+      previewBusyRef.current = false;
+      setPreviewBusy(false);
+    }
+  }, [editor, editorStory, flushWorkspace, invalidateQueries, navigate, presentValidation, story.journey.id]);
 
   useEffect(() => {
     if (!selectedMomentId || !editorStory.moments.some((moment) => moment.id === selectedMomentId)) {
@@ -520,15 +611,34 @@ function JourneyEditorWorkspace({
           <p className="eyebrow">{draft.countryName} · {draft.startDate} 至 {draft.endDate}</p>
           <h1 title={draft.title || '未命名旅程'}>{draft.title || '未命名旅程'}</h1>
         </div>
-        <div className="journey-editor-meta">
-          <span className={`journey-status journey-status-${draft.status}`}>
-            {draft.status === 'complete' ? '已完成' : draft.status === 'review' ? '待整理' : '草稿'}
-          </span>
-          <SaveStatus autosave={autosave} />
-          <span className="visually-hidden" aria-live="assertive">{liveMessage}</span>
+        <div className="journey-editor-header-actions">
+          <div className="journey-editor-meta">
+            <span className={`journey-status journey-status-${draft.status}`}>
+              {draft.status === 'complete' ? '已完成' : draft.status === 'review' ? '待整理' : '草稿'}
+            </span>
+            <SaveStatus autosave={autosave} />
+            <span className="visually-hidden" aria-live="assertive">{liveMessage}</span>
+          </div>
+          <button
+            className="primary-command"
+            type="button"
+            disabled={previewBusy}
+            onClick={() => void openPreview()}
+          >
+            {previewBusy ? '準備預覽中' : '前往預覽'}
+          </button>
         </div>
       </header>
       {demotionNotice && <p className="journey-demotion-notice" role="status">{demotionNotice}</p>}
+      {previewError && <p className="journey-preview-error" role="alert">{previewError}</p>}
+      {validationIssues.length > 0 && (
+        <section className="journey-validation-summary" role="alert" aria-labelledby="editor-validation-heading">
+          <h2 id="editor-validation-heading">完成前需要修正</h2>
+          <ul>{validationIssues.map((issue) => (
+            <li key={`${issue.field}:${issue.code}`}>{formatJourneyValidationIssue(issue)}</li>
+          ))}</ul>
+        </section>
+      )}
       <section id="journey-details-region" className="journey-overview-region" aria-label="旅程資料">
         <div className="journey-region-heading"><h2>旅程資料</h2></div>
         <JourneyDetailsForm
@@ -548,7 +658,10 @@ function JourneyEditorWorkspace({
           onSelect={selectMoment}
           onBeforeReorder={flushMomentBeforeReorder}
           onOrderChange={updateMomentOrder}
-          onReordered={(orderedIds) => refreshStory({ expectedMomentOrder: orderedIds }).then(() => undefined)}
+          onReordered={(orderedIds) => {
+            invalidateQueries();
+            return refreshStory({ expectedMomentOrder: orderedIds }).then(() => undefined);
+          }}
           headerActions={(
             <PhotoDropzone
               journeyId={story.journey.id}
@@ -580,9 +693,12 @@ function JourneyEditorWorkspace({
               repository={editor}
               onMomentChange={updateMomentDraft}
               onDelete={deleteMoment}
-              onSaved={() => refreshStory({
-                protectedMomentIds: [selectedMoment.id],
-              }).then(() => undefined)}
+              onSaved={() => {
+                invalidateQueries();
+                return refreshStory({
+                  protectedMomentIds: [selectedMoment.id],
+                }).then(() => undefined);
+              }}
               onAutosaveChange={handleMomentAutosaveChange}
             />
           ) : <p className="muted">加入或選取時刻後即可編輯</p>}

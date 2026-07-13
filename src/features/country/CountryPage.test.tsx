@@ -1,14 +1,35 @@
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes } from 'react-router';
-import { describe, expect, it } from 'vitest';
-import { RepositoryProvider } from '../../data/RepositoryContext';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createCombinedJourneyRepository } from '../../data/combinedJourneyRepository';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
+import { openSoundPassportDb } from '../../data/indexedDb';
+import { createIndexedDbJourneyRepository } from '../../data/indexedDbJourneyRepository';
+import {
+  RepositoryProvider,
+  useInvalidateRepositoryQueries,
+  useJourneyEditorRepository,
+} from '../../data/RepositoryContext';
 import type { JourneyRepository } from '../../data/ports';
 import type { Journey } from '../../domain/model';
+import { cleanupDb, uniqueDbName } from '../../test/indexedDb';
+import { seedPrivateReviewJourney } from '../../test/privateJourney';
 import { CountryPage } from './CountryPage';
 
+function PublishControl({ journeyId, expectedUpdatedAt }: { journeyId: string; expectedUpdatedAt: string }) {
+  const editor = useJourneyEditorRepository();
+  const invalidateQueries = useInvalidateRepositoryQueries();
+  return (
+    <button type="button" onClick={() => void editor.setJourneyStatus(journeyId, 'complete', {
+      expectedUpdatedAt,
+    }).then(() => invalidateQueries())}>完成待整理旅程</button>
+  );
+}
+
 describe('CountryPage', () => {
+  afterEach(cleanup);
+
   it('shows repeat visits without starting media', async () => {
     render(
       <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
@@ -58,5 +79,47 @@ describe('CountryPage', () => {
 
     resolvePendingCountry([]);
     expect(await page.findByRole('heading', { name: '找不到這個國家的旅程' })).toBeInTheDocument();
+  });
+
+  it('refetches a mounted country route when a private review becomes complete', async () => {
+    const user = userEvent.setup();
+    const dbName = uniqueDbName('country-private-publishing');
+    const db = await openSoundPassportDb(dbName);
+    try {
+      const privateRepository = createIndexedDbJourneyRepository({ db });
+      const reviewStory = await seedPrivateReviewJourney(privateRepository);
+      const query = createCombinedJourneyRepository(fixtureJourneyRepository, privateRepository);
+
+      render(
+        <RepositoryProvider services={{ query, editor: privateRepository }}>
+          <MemoryRouter initialEntries={['/countries/TW']}>
+            <Routes>
+              <Route path="/countries/:countryCode" element={(
+                <>
+                  <CountryPage />
+                  <PublishControl
+                    journeyId={reviewStory.journey.id}
+                    expectedUpdatedAt={reviewStory.journey.updatedAt}
+                  />
+                </>
+              )} />
+            </Routes>
+          </MemoryRouter>
+        </RepositoryProvider>,
+      );
+
+      expect(await screen.findByRole('heading', { name: '找不到這個國家的旅程' })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: '完成待整理旅程' }));
+
+      expect(await screen.findByRole('heading', { name: '臺灣' })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /花蓮海岸公路/ })).toHaveAttribute(
+        'href',
+        `/journeys/${reviewStory.journey.id}`,
+      );
+    } finally {
+      cleanup();
+      db.close();
+      await cleanupDb(dbName);
+    }
   });
 });

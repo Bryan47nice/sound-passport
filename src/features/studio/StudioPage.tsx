@@ -1,7 +1,11 @@
 import { Download, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { GuardedLink } from '../../app/navigationGuard';
-import { useOptionalJourneyEditorRepository, usePrivateStorageError } from '../../data/RepositoryContext';
+import {
+  useOptionalJourneyEditorRepository,
+  usePrivateStorageError,
+  useRepositoryRevision,
+} from '../../data/RepositoryContext';
 import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStatus, JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
@@ -53,6 +57,7 @@ const updatedAtFormatter = new Intl.DateTimeFormat('zh-TW', {
 export function StudioPage({ onBootstrapRetry = () => window.location.reload() }: StudioPageProps) {
   const editor = useOptionalJourneyEditorRepository();
   const privateStorageError = usePrivateStorageError();
+  const repositoryRevision = useRepositoryRevision();
   const isMobile = useMobileStudio();
   const [status, setStatus] = useState<JourneyStatus>('draft');
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -82,7 +87,7 @@ export function StudioPage({ onBootstrapRetry = () => window.location.reload() }
     });
 
     return () => { isCurrent = false; };
-  }, [editor, loadAttempt]);
+  }, [editor, loadAttempt, repositoryRevision]);
 
   const currentDashboard: DashboardState = !editor
     ? { kind: 'unavailable' }

@@ -225,6 +225,7 @@ export function MomentEditor({
             <input
               required
               type="date"
+              data-validation-field="localDate"
               value={draft.localDate}
               onChange={(event) => {
                 const localDate = event.target.value;
@@ -256,10 +257,20 @@ export function MomentEditor({
         </label>
         <div className="moment-song-fields">
           <label>歌名
-            <input required value={draft.song.title} onChange={(event) => updateSong('title', event.target.value)} />
+            <input
+              required
+              data-validation-field="song.title"
+              value={draft.song.title}
+              onChange={(event) => updateSong('title', event.target.value)}
+            />
           </label>
           <label>歌手
-            <input required value={draft.song.artist} onChange={(event) => updateSong('artist', event.target.value)} />
+            <input
+              required
+              data-validation-field="song.artist"
+              value={draft.song.artist}
+              onChange={(event) => updateSong('artist', event.target.value)}
+            />
           </label>
         </div>
         <label>YouTube 連結

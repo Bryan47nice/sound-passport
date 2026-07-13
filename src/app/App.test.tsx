@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RepositoryProvider } from '../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../data/fixtureJourneyRepository';
+import type { JourneyEditorRepository } from '../data/ports';
 import { App } from './App';
 
 vi.mock('../features/atlas/WorldMap', () => ({
@@ -45,6 +46,42 @@ describe('App', () => {
 
     expect(screen.getByRole('heading', { name: '本機儲存空間暫時無法使用' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '旅程編輯功能即將開放' })).not.toBeInTheDocument();
+  });
+
+  it('routes a private journey preview through the editor repository', async () => {
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('seoul-2025');
+    const privateStory = {
+      ...fixtureStory!,
+      journey: {
+        ...fixtureStory!.journey,
+        id: 'private-preview',
+        title: '私人預覽旅程',
+        source: 'private' as const,
+        status: 'draft' as const,
+      },
+    };
+    const editor: JourneyEditorRepository = {
+      listPrivateJourneys: vi.fn(),
+      createJourney: vi.fn(),
+      updateJourney: vi.fn(),
+      deleteJourney: vi.fn(),
+      getPrivateJourneyStory: vi.fn(async () => privateStory),
+      addMoments: vi.fn(),
+      updateMoment: vi.fn(),
+      deleteMoment: vi.fn(),
+      reorderMoments: vi.fn(),
+      setJourneyStatus: vi.fn(),
+    };
+
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
+        <MemoryRouter initialEntries={['/studio/journeys/private-preview/preview']}><App /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: '私人預覽旅程' })).toBeInTheDocument();
+    expect(editor.getPrivateJourneyStory).toHaveBeenCalledWith('private-preview');
+    expect(screen.queryByRole('heading', { name: '找不到這個頁面' })).not.toBeInTheDocument();
   });
 
   it('shows a not-found page for an unknown route', () => {

@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { GuardedLink } from '../../app/navigationGuard';
-import { useJourneyRepository } from '../../data/RepositoryContext';
+import { useJourneyRepository, useRepositoryRevision } from '../../data/RepositoryContext';
 import type { Journey } from '../../domain/model';
 
 export function CountryPage() {
   const { countryCode = '' } = useParams();
   const repository = useJourneyRepository();
+  const repositoryRevision = useRepositoryRevision();
   const [loadedCountry, setLoadedCountry] = useState<{ countryCode: string; journeys: Journey[] }>();
 
   useEffect(() => {
     let isCurrent = true;
+    setLoadedCountry(undefined);
 
     void repository.listJourneysByCountry(countryCode).then((value) => {
       if (isCurrent) setLoadedCountry({ countryCode, journeys: value });
@@ -19,7 +21,7 @@ export function CountryPage() {
     return () => {
       isCurrent = false;
     };
-  }, [countryCode, repository]);
+  }, [countryCode, repository, repositoryRevision]);
 
   const journeys = loadedCountry?.countryCode === countryCode ? loadedCountry.journeys : undefined;
 

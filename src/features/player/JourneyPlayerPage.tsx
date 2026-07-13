@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { GuardedLink } from '../../app/navigationGuard';
-import { useJourneyRepository } from '../../data/RepositoryContext';
+import { useJourneyRepository, useRepositoryRevision } from '../../data/RepositoryContext';
 import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
@@ -10,6 +10,7 @@ import { YouTubeEmbed } from './YouTubeEmbed';
 export function JourneyPlayerPage() {
   const { journeyId = '' } = useParams();
   const repository = useJourneyRepository();
+  const repositoryRevision = useRepositoryRevision();
   const [story, setStory] = useState<JourneyStory>();
   const [loaded, setLoaded] = useState(false);
   const [resolvedJourneyId, setResolvedJourneyId] = useState<string>();
@@ -33,7 +34,7 @@ export function JourneyPlayerPage() {
     return () => {
       isCurrent = false;
     };
-  }, [journeyId, repository]);
+  }, [journeyId, repository, repositoryRevision]);
 
   if (!loaded || resolvedJourneyId !== journeyId) return <section className="page" aria-label="載入播放器" />;
   if (!story) {

@@ -16,6 +16,8 @@ import type {
 import { validateJourneyForReview } from '../domain/journeyValidation';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
+  JourneyStatusTransitionError,
+  JourneyValidationError,
   JourneyVersionConflictError,
   MomentVersionConflictError,
   PrivateDataStateConflictError,
@@ -143,18 +145,22 @@ async function assertTargetKeysUnchanged(tx: WriteTransaction, expected: Private
   }
 }
 
+async function readJoinedMoments(tx: WriteTransaction, journeyId: string) {
+  const moments = await tx.objectStore('moments').index('journeyId').getAll(journeyId);
+  moments.sort((left, right) => left.sortOrder - right.sortOrder);
+  return Promise.all(moments.map(async (moment) => {
+    const song = await tx.objectStore('songs').get(moment.songReferenceId);
+    if (!song) throw relationshipError(`moment ${moment.id} references missing song ${moment.songReferenceId}`);
+    return { ...moment, song };
+  }));
+}
+
 async function advanceJourneyStoryVersion(tx: WriteTransaction, journeyId: string) {
   const journeyStore = tx.objectStore('journeys');
   const journey = await journeyStore.get(journeyId);
   if (!journey) throw missingRecord('Journey', journeyId);
 
-  const moments = await tx.objectStore('moments').index('journeyId').getAll(journeyId);
-  moments.sort((left, right) => left.sortOrder - right.sortOrder);
-  const joinedMoments = await Promise.all(moments.map(async (moment) => {
-    const song = await tx.objectStore('songs').get(moment.songReferenceId);
-    if (!song) throw relationshipError(`moment ${moment.id} references missing song ${moment.songReferenceId}`);
-    return { ...moment, song };
-  }));
+  const joinedMoments = await readJoinedMoments(tx, journeyId);
   const status: JourneyStatus = journey.status === 'complete' &&
     !validateJourneyForReview({ journey, moments: joinedMoments }).valid
     ? 'review'
@@ -291,7 +297,19 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       if (patch.coverPhotoAssetId && !(await tx.objectStore('photos').get(patch.coverPhotoAssetId))) {
         throw relationshipError(`journey ${id} references missing photo ${patch.coverPhotoAssetId}`);
       }
-      const updated: Journey = { ...journey, ...patch, updatedAt: nextUpdatedAt(journey.updatedAt) };
+      if (patch.status !== undefined && patch.status !== journey.status) {
+        const isDemotion = journey.status === 'complete' && patch.status === 'review';
+        if (!isDemotion) throw new JourneyStatusTransitionError(journey.status, patch.status);
+      }
+
+      let candidate: Journey = { ...journey, ...patch };
+      if (journey.status === 'complete' && candidate.status === 'complete') {
+        const moments = await readJoinedMoments(tx, id);
+        if (!validateJourneyForReview({ journey: candidate, moments }).valid) {
+          candidate = { ...candidate, status: 'review' };
+        }
+      }
+      const updated: Journey = { ...candidate, updatedAt: nextUpdatedAt(journey.updatedAt) };
       await store.put(updated);
       return updated;
     });
@@ -500,8 +518,33 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       });
     },
 
-    async setJourneyStatus(id: string, status: JourneyStatus) {
-      return updateJourney(id, { status });
+    async setJourneyStatus(id: string, status: JourneyStatus, options?: { expectedUpdatedAt?: string }) {
+      return runWrite(async (tx) => {
+        const journeyStore = tx.objectStore('journeys');
+        const journey = await journeyStore.get(id);
+        if (!journey) throw missingRecord('Journey', id);
+        if (options?.expectedUpdatedAt !== undefined && journey.updatedAt !== options.expectedUpdatedAt) {
+          throw new JourneyVersionConflictError(id, options.expectedUpdatedAt, journey.updatedAt);
+        }
+        if (status === journey.status) return journey;
+
+        const isForwardTransition =
+          (journey.status === 'draft' && status === 'review') ||
+          (journey.status === 'review' && status === 'complete');
+        if (!isForwardTransition) throw new JourneyStatusTransitionError(journey.status, status);
+
+        const moments = await readJoinedMoments(tx, id);
+        const validation = validateJourneyForReview({ journey, moments });
+        if (!validation.valid) throw new JourneyValidationError(validation.issues);
+
+        const updated: Journey = {
+          ...journey,
+          status,
+          updatedAt: nextUpdatedAt(journey.updatedAt),
+        };
+        await journeyStore.put(updated);
+        return updated;
+      });
     },
 
     async get(journeyId: string, ownerId: string) {

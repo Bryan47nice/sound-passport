@@ -2,9 +2,14 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createCombinedJourneyRepository } from '../../data/combinedJourneyRepository';
+import { openSoundPassportDb } from '../../data/indexedDb';
+import { createIndexedDbJourneyRepository } from '../../data/indexedDbJourneyRepository';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import type { JourneyRepository } from '../../data/ports';
+import { cleanupDb, uniqueDbName } from '../../test/indexedDb';
+import { seedPrivateReviewJourney } from '../../test/privateJourney';
 import { JourneyPlayerPage } from './JourneyPlayerPage';
 
 function renderPlayer(repository: JourneyRepository, initialEntry: string) {
@@ -119,5 +124,34 @@ describe('JourneyPlayerPage', () => {
 
     expect(await screen.findByRole('heading', { name: '這趟旅程沒有音樂時刻' })).toBeInTheDocument();
     expect(screen.queryByTitle('YouTube player')).not.toBeInTheDocument();
+  });
+
+  it('plays a newly completed private journey in its persisted repository order', async () => {
+    const user = userEvent.setup();
+    const dbName = uniqueDbName('player-private-order');
+    const db = await openSoundPassportDb(dbName);
+    try {
+      const privateRepository = createIndexedDbJourneyRepository({ db });
+      const reviewStory = await seedPrivateReviewJourney(privateRepository);
+      await privateRepository.setJourneyStatus(reviewStory.journey.id, 'complete', {
+        expectedUpdatedAt: reviewStory.journey.updatedAt,
+      });
+      const query = createCombinedJourneyRepository(fixtureJourneyRepository, privateRepository);
+
+      renderPlayer(query, `/journeys/${reviewStory.journey.id}/play`);
+
+      expect(await screen.findByText('1 / 2')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: '終點之歌' })).toBeInTheDocument();
+      expect(screen.getByRole('img', { name: 'coast-two.jpg' })).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: '下一個時刻' }));
+      expect(screen.getByText('2 / 2')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: '起點之歌' })).toBeInTheDocument();
+      expect(screen.getByRole('img', { name: 'coast-one.jpg' })).toBeInTheDocument();
+    } finally {
+      cleanup();
+      db.close();
+      await cleanupDb(dbName);
+    }
   });
 });
