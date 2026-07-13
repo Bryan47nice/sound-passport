@@ -1,8 +1,5 @@
 import { RefreshCw } from 'lucide-react';
 import {
-  type CSSProperties,
-  type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useRef,
@@ -21,9 +18,12 @@ import {
   type JourneyEditorRepository,
 } from '../../data/ports';
 import { validateJourneyForReview } from '../../domain/journeyValidation';
-import type { Journey, JourneyPatch, JourneyStory } from '../../domain/model';
+import type { Journey, JourneyMoment, JourneyPatch, JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { JourneyDetailsForm } from './JourneyDetailsForm';
+import { MomentEditor, type MomentAutosaveRegistration } from './MomentEditor';
+import { MomentList } from './MomentList';
+import { PhotoDropzone } from './PhotoDropzone';
 import {
   createJourneyPatchEnvelope,
   JourneyPatchConflictError,
@@ -67,7 +67,6 @@ type LoadState =
   | { kind: 'error'; journeyId: string };
 
 type JourneyEditorPageProps = { onBootstrapRetry?: () => void };
-type AdjustablePanel = 'list' | 'details';
 type OwnerClaimState =
   | {
       kind: 'ready';
@@ -81,19 +80,10 @@ type OwnerClaimState =
       outbox: JourneyAutosaveOutboxPort;
     };
 
-const panelLimits = {
-  list: { min: 180, max: 340 },
-  details: { min: 300, max: 480 },
-} as const;
-const panelStep = 16;
 const recoveryTimeFormatter = new Intl.DateTimeFormat('zh-TW', {
   dateStyle: 'medium',
   timeStyle: 'short',
 });
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
 
 function formatSavedTime(date: Date) {
   const pad = (value: number) => String(value).padStart(2, '0');
@@ -200,20 +190,17 @@ function JourneyEditorWorkspace({
   const initialDraft = recoveredEnvelope
     ? { ...story.journey, ...recoveredEnvelope.patch }
     : story.journey;
+  const [editorStory, setEditorStory] = useState(story);
   const [draft, setDraft] = useState(initialDraft);
   const [dateError, setDateError] = useState('');
   const [demotionNotice, setDemotionNotice] = useState('');
-  const [panelWidths, setPanelWidths] = useState({ list: 220, details: 340 });
+  const [selectedMomentId, setSelectedMomentId] = useState(story.moments[0]?.id);
+  const [momentDirty, setMomentDirty] = useState(false);
   const draftRef = useRef(initialDraft);
   const fieldRevisionsRef = useRef<Partial<Record<JourneyUserPatchKey, number>>>({});
   const recoveredQueuedRef = useRef(false);
   const mountedRef = useRef(false);
-  const dragRef = useRef<{
-    panel: AdjustablePanel;
-    pointerId: number;
-    startX: number;
-    startWidth: number;
-  } | undefined>(undefined);
+  const momentAutosaveRef = useRef<MomentAutosaveRegistration | undefined>(undefined);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -239,6 +226,7 @@ function JourneyEditorWorkspace({
     });
     draftRef.current = nextDraft;
     setDraft(nextDraft);
+    setEditorStory((current) => ({ ...current, journey: persisted }));
   }, []);
 
   const persistEnvelope = useCallback(async (
@@ -330,7 +318,17 @@ function JourneyEditorWorkspace({
       compareAndDelete: clearRecovery,
     },
   });
-  useDirtyNavigationGuard({ dirty: autosave.dirty, flush: autosave.flush });
+  const handleMomentAutosaveChange = useCallback((registration: MomentAutosaveRegistration | undefined) => {
+    momentAutosaveRef.current = registration;
+    setMomentDirty(registration?.dirty ?? false);
+  }, []);
+  const flushWorkspace = useCallback(async () => {
+    await Promise.all([
+      autosave.flush(),
+      momentAutosaveRef.current?.flush() ?? Promise.resolve(),
+    ]);
+  }, [autosave.flush]);
+  useDirtyNavigationGuard({ dirty: autosave.dirty || momentDirty, flush: flushWorkspace });
 
   const markFieldRevisions = useCallback((patch: JourneyUserPatch, revision: number) => {
     journeyUserPatchKeys.forEach((key) => {
@@ -364,61 +362,76 @@ function JourneyEditorWorkspace({
     applyUserPatch({ [field]: value }, true);
   };
 
-  const setPanelWidth = (panel: AdjustablePanel, value: number) => {
-    const limits = panelLimits[panel];
-    setPanelWidths((current) => ({
-      ...current,
-      [panel]: clamp(value, limits.min, limits.max),
-    }));
-  };
+  const refreshStory = useCallback(async () => {
+    const refreshed = await editor.getPrivateJourneyStory(story.journey.id);
+    if (!refreshed) throw new Error('Journey is no longer available.');
+    if (!mountedRef.current) return refreshed;
 
-  const handleSeparatorKeyDown = (panel: AdjustablePanel, event: KeyboardEvent<HTMLDivElement>) => {
-    const limits = panelLimits[panel];
-    let nextWidth: number | undefined;
-    if (event.key === 'Home') nextWidth = limits.min;
-    if (event.key === 'End') nextWidth = limits.max;
-    if (event.key === 'ArrowLeft') {
-      nextWidth = panelWidths[panel] + (panel === 'details' ? panelStep : -panelStep);
-    }
-    if (event.key === 'ArrowRight') {
-      nextWidth = panelWidths[panel] + (panel === 'details' ? -panelStep : panelStep);
-    }
-    if (nextWidth === undefined) return;
-    event.preventDefault();
-    setPanelWidth(panel, nextWidth);
-  };
-
-  const handleSeparatorPointerDown = (
-    panel: AdjustablePanel,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) => {
-    dragRef.current = {
-      panel,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startWidth: panelWidths[panel],
+    const previousStatus = draftRef.current.status;
+    const nextDraft = {
+      ...draftRef.current,
+      status: refreshed.journey.status,
+      updatedAt: refreshed.journey.updatedAt,
     };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  };
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    setEditorStory(refreshed);
+    if (previousStatus === 'complete' && refreshed.journey.status === 'review') {
+      setDemotionNotice('必要資料已移除，旅程已回到待整理');
+    }
+    return refreshed;
+  }, [editor, story.journey.id]);
 
-  const handleSeparatorPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const delta = event.clientX - drag.startX;
-    setPanelWidth(drag.panel, drag.startWidth + (drag.panel === 'details' ? -delta : delta));
-  };
+  const selectMoment = useCallback((momentId: string) => {
+    if (momentId === selectedMomentId) return;
+    const registration = momentAutosaveRef.current;
+    if (!registration?.dirty) {
+      setSelectedMomentId(momentId);
+      return;
+    }
+    void registration.flush().then(() => {
+      if (mountedRef.current) setSelectedMomentId(momentId);
+    }, () => undefined);
+  }, [selectedMomentId]);
 
-  const handleSeparatorPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragRef.current?.pointerId !== event.pointerId) return;
-    dragRef.current = undefined;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-  };
+  const updateMomentDraft = useCallback((nextMoment: JourneyMoment) => {
+    setEditorStory((current) => ({
+      ...current,
+      moments: current.moments.map((item) => item.id === nextMoment.id ? nextMoment : item),
+    }));
+  }, []);
 
-  const previewMoment = story.moments[0];
-  const workspaceStyle = {
-    '--journey-list-width': `${panelWidths.list}px`,
-    '--journey-details-width': `${panelWidths.details}px`,
-  } as CSSProperties;
+  const updateMomentOrder = useCallback((orderedIds: string[]) => {
+    setEditorStory((current) => {
+      const momentsById = new Map(current.moments.map((moment) => [moment.id, moment]));
+      return {
+        ...current,
+        moments: orderedIds.flatMap((id, sortOrder) => {
+          const moment = momentsById.get(id);
+          return moment ? [{ ...moment, sortOrder }] : [];
+        }),
+      };
+    });
+  }, []);
+
+  const deleteMoment = useCallback(async (momentId: string) => {
+    const deletedIndex = editorStory.moments.findIndex((moment) => moment.id === momentId);
+    await editor.deleteMoment(momentId);
+    const refreshed = await refreshStory();
+    const nextIndex = Math.min(Math.max(0, deletedIndex), refreshed.moments.length - 1);
+    setSelectedMomentId(refreshed.moments[nextIndex]?.id);
+  }, [editor, editorStory.moments, refreshStory]);
+
+  useEffect(() => {
+    if (!selectedMomentId || !editorStory.moments.some((moment) => moment.id === selectedMomentId)) {
+      setSelectedMomentId(editorStory.moments[0]?.id);
+    }
+  }, [editorStory.moments, selectedMomentId]);
+
+  const selectedMoment = editorStory.moments.find((moment) => moment.id === selectedMomentId);
+  const selectedPosition = selectedMoment
+    ? editorStory.moments.findIndex((moment) => moment.id === selectedMoment.id) + 1
+    : 0;
   const liveMessage = autosave.state === 'error'
     ? autosave.error instanceof JourneyPatchConflictError
       ? '其他位置已有更新。可先重試儲存；確認覆蓋衝突欄位時，才使用重試並套用。'
@@ -445,73 +458,57 @@ function JourneyEditorWorkspace({
         </div>
       </header>
       {demotionNotice && <p className="journey-demotion-notice" role="status">{demotionNotice}</p>}
-      <div className="journey-editor-workspace" style={workspaceStyle}>
-        <section id="journey-moment-list" className="journey-moment-list" aria-label="時刻清單">
-          <div className="journey-region-heading"><h2>時刻</h2><span>{story.moments.length}</span></div>
-          {story.moments.length === 0 ? (
-            <p className="muted">尚無時刻</p>
-          ) : (
-            <ol>
-              {story.moments.map((moment, index) => (
-                <li key={moment.id} className={index === 0 ? 'is-current' : undefined}>
-                  <span>{String(index + 1).padStart(2, '0')}</span>
-                  <div><strong>{moment.song.title}</strong><small>{moment.cityLabel || moment.localDate}</small></div>
-                </li>
-              ))}
-            </ol>
+      <section id="journey-details-region" className="journey-overview-region" aria-label="旅程資料">
+        <div className="journey-region-heading"><h2>旅程資料</h2></div>
+        <JourneyDetailsForm
+          draft={draft}
+          dateError={dateError}
+          onTextChange={(patch) => applyUserPatch(patch, false)}
+          onImmediateChange={(patch) => applyUserPatch(patch, true)}
+          onDateChange={handleDateChange}
+        />
+      </section>
+      <div className="journey-editor-workspace">
+        <MomentList
+          journeyId={story.journey.id}
+          moments={editorStory.moments}
+          selectedMomentId={selectedMomentId}
+          repository={editor}
+          onSelect={selectMoment}
+          onOrderChange={updateMomentOrder}
+          onReordered={() => refreshStory().then(() => undefined)}
+          headerActions={(
+            <PhotoDropzone
+              journeyId={story.journey.id}
+              repository={editor}
+              onMomentsAdded={() => refreshStory().then(() => undefined)}
+              onSelectMoment={selectMoment}
+            />
           )}
-        </section>
-        <div
-          className="journey-panel-separator"
-          role="separator"
-          tabIndex={0}
-          aria-label="調整時刻清單寬度"
-          aria-controls="journey-moment-list"
-          aria-orientation="vertical"
-          aria-valuemin={panelLimits.list.min}
-          aria-valuemax={panelLimits.list.max}
-          aria-valuenow={panelWidths.list}
-          onKeyDown={(event) => handleSeparatorKeyDown('list', event)}
-          onPointerDown={(event) => handleSeparatorPointerDown('list', event)}
-          onPointerMove={handleSeparatorPointerMove}
-          onPointerUp={handleSeparatorPointerEnd}
-          onPointerCancel={handleSeparatorPointerEnd}
         />
         <section className="journey-moment-preview" aria-label="時刻預覽">
-          {previewMoment ? (
+          {selectedMoment ? (
             <JourneyPhoto
-              alt={previewMoment.photoAlt}
+              alt={selectedMoment.photoAlt}
               className="journey-editor-preview-image"
-              fixtureUrl={previewMoment.photoUrl}
-              photoAssetId={previewMoment.photoAssetId}
+              fixtureUrl={selectedMoment.photoUrl}
+              photoAssetId={selectedMoment.photoAssetId}
             />
           ) : <p>選取時刻後在此預覽</p>}
         </section>
-        <div
-          className="journey-panel-separator"
-          role="separator"
-          tabIndex={0}
-          aria-label="調整旅程資料寬度"
-          aria-controls="journey-details-region"
-          aria-orientation="vertical"
-          aria-valuemin={panelLimits.details.min}
-          aria-valuemax={panelLimits.details.max}
-          aria-valuenow={panelWidths.details}
-          onKeyDown={(event) => handleSeparatorKeyDown('details', event)}
-          onPointerDown={(event) => handleSeparatorPointerDown('details', event)}
-          onPointerMove={handleSeparatorPointerMove}
-          onPointerUp={handleSeparatorPointerEnd}
-          onPointerCancel={handleSeparatorPointerEnd}
-        />
-        <section id="journey-details-region" className="journey-details-region" aria-label="旅程資料">
-          <div className="journey-region-heading"><h2>旅程資料</h2></div>
-          <JourneyDetailsForm
-            draft={draft}
-            dateError={dateError}
-            onTextChange={(patch) => applyUserPatch(patch, false)}
-            onImmediateChange={(patch) => applyUserPatch(patch, true)}
-            onDateChange={handleDateChange}
-          />
+        <section className="moment-details-region" aria-label="時刻資料">
+          {selectedMoment ? (
+            <MomentEditor
+              key={selectedMoment.id}
+              moment={selectedMoment}
+              position={selectedPosition}
+              repository={editor}
+              onMomentChange={updateMomentDraft}
+              onDelete={deleteMoment}
+              onSaved={() => refreshStory().then(() => undefined)}
+              onAutosaveChange={handleMomentAutosaveChange}
+            />
+          ) : <p className="muted">加入或選取時刻後即可編輯</p>}
         </section>
       </div>
     </section>

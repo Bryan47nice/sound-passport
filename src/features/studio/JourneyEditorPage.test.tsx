@@ -1,6 +1,6 @@
 // @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
 import { readFileSync } from 'node:fs';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../app/App';
@@ -254,6 +254,9 @@ describe('JourneyEditorPage', () => {
     expect(screen.getByRole('region', { name: '時刻清單' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '時刻預覽' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '旅程資料' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '時刻資料' })).toBeInTheDocument();
+    expect(screen.getByLabelText('加入照片')).toHaveAttribute('multiple');
+    expect(screen.getByLabelText('歌名')).toHaveValue('Night Walk');
   });
 
   it('synchronously suppresses the loaded journey when the route id changes', async () => {
@@ -876,10 +879,11 @@ describe('JourneyEditorPage', () => {
     ));
 
     vi.mocked(editor.updateJourney).mockClear();
-    fireEvent.change(screen.getByLabelText('城市'), { target: { value: '  ' } });
+    const journeyRegion = within(screen.getByRole('region', { name: '旅程資料' }));
+    fireEvent.change(journeyRegion.getByLabelText('城市'), { target: { value: '  ' } });
     fireEvent.click(screen.getByRole('button', { name: '新增城市' }));
     expect(editor.updateJourney).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText('城市'), { target: { value: '台北' } });
+    fireEvent.change(journeyRegion.getByLabelText('城市'), { target: { value: '台北' } });
     fireEvent.click(screen.getByRole('button', { name: '新增城市' }));
     await waitFor(() => expect(editor.updateJourney).toHaveBeenCalledWith(
       'private-tokyo',
@@ -888,22 +892,64 @@ describe('JourneyEditorPage', () => {
     ));
   });
 
-  it('provides keyboard-adjustable desktop separators with stable numeric values', async () => {
-    renderRoute();
+  it('requires confirmation before deletion and selects the nearest remaining moment', async () => {
+    const secondMoment = {
+      ...story.moments[0],
+      id: 'moment-2',
+      songReferenceId: 'song-2',
+      sortOrder: 1,
+      song: { ...story.moments[0].song, id: 'song-2', title: 'Second Song' },
+    };
+    const thirdMoment = {
+      ...story.moments[0],
+      id: 'moment-3',
+      songReferenceId: 'song-3',
+      sortOrder: 2,
+      song: { ...story.moments[0].song, id: 'song-3', title: 'Third Song' },
+    };
+    let currentStory = { ...story, moments: [story.moments[0], secondMoment, thirdMoment] };
+    const getPrivateJourneyStory = vi.fn(async () => currentStory);
+    const deleteMoment = vi.fn(async (id: string) => {
+      currentStory = { ...currentStory, moments: currentStory.moments.filter((item) => item.id !== id) };
+    });
+    const editor = editorStub({ getPrivateJourneyStory, deleteMoment });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderRoute(editor);
     await screen.findByRole('heading', { name: '東京夜行' });
 
-    const listSeparator = screen.getByRole('separator', { name: '調整時刻清單寬度' });
-    const detailsSeparator = screen.getByRole('separator', { name: '調整旅程資料寬度' });
-    expect(listSeparator).toHaveAttribute('aria-orientation', 'vertical');
-    expect(listSeparator).toHaveAttribute('aria-valuenow', '220');
-    expect(detailsSeparator).toHaveAttribute('aria-valuenow', '340');
+    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
+    fireEvent.click(momentList.getAllByRole('option')[1]);
+    await waitFor(() => expect(screen.getByLabelText('歌名')).toHaveValue('Second Song'));
+    fireEvent.click(screen.getByRole('button', { name: '刪除時刻' }));
+    expect(confirm).toHaveBeenCalled();
+    expect(deleteMoment).not.toHaveBeenCalled();
 
-    fireEvent.keyDown(listSeparator, { key: 'ArrowRight' });
-    expect(listSeparator).toHaveAttribute('aria-valuenow', '236');
-    fireEvent.keyDown(listSeparator, { key: 'Home' });
-    expect(listSeparator).toHaveAttribute('aria-valuenow', '180');
-    fireEvent.keyDown(detailsSeparator, { key: 'ArrowLeft' });
-    expect(detailsSeparator).toHaveAttribute('aria-valuenow', '356');
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: '刪除時刻' }));
+    await waitFor(() => expect(deleteMoment).toHaveBeenCalledWith('moment-2'));
+    expect(screen.getByLabelText('歌名')).toHaveValue('Third Song');
+    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual(['moment-1', 'moment-3']);
+  });
+
+  it('defines the exact wide grid and stacks preview above the form on narrow desktop', () => {
+    const style = document.createElement('style');
+    style.textContent = readFileSync('src/styles/global.css', 'utf8');
+    document.head.append(style);
+
+    try {
+      const rules = style.sheet!.cssRules;
+      const desktop = findMediaRule(rules, '(min-width: 1040px)');
+      expect(findStyleRule(desktop!.cssRules, '.journey-editor-workspace')?.style.getPropertyValue(
+        'grid-template-columns',
+      )).toBe('minmax(220px, 0.7fr) minmax(320px, 1.2fr) minmax(300px, 0.9fr)');
+
+      const tablet = findMediaRule(rules, '(min-width: 641px) and (max-width: 1039px)');
+      expect(findStyleRule(tablet!.cssRules, '.journey-editor-workspace')?.style.getPropertyValue(
+        'grid-template-areas',
+      )).toBe('"list preview" "list details"');
+    } finally {
+      style.remove();
+    }
   });
 
   it('keeps conflict actions and the editor header contained across desktop and tablet CSS', () => {
