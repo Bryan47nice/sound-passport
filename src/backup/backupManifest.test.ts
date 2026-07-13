@@ -102,4 +102,14 @@ describe('backup manifest validation', () => {
   ])('rejects an invalid %s', (_label, mutate) => {
     expectCode(() => parseBackupManifest(mutate(manifest())), 'invalid_manifest');
   });
+
+  it.each(['\ud800', '\udc00'])(
+    'rejects malformed Unicode photo ID %j as an invalid manifest',
+    (id) => {
+      const value = manifest();
+      value.photos[0].id = id;
+
+      expectCode(() => parseBackupManifest(value), 'invalid_manifest');
+    },
+  );
 });

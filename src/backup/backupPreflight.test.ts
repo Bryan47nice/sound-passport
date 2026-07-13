@@ -16,10 +16,12 @@ vi.mock('fflate', async (importOriginal) => {
 });
 
 import { BACKUP_LIMITS, BackupService } from './backupService';
+import { assertExtractedZip, preflightZip } from './zipPreflight';
 
 interface SyntheticZipEntry {
   name: string;
   method?: number;
+  crc32?: number;
   compressedSize?: number;
   uncompressedSize?: number;
   data?: Uint8Array;
@@ -68,7 +70,7 @@ function syntheticZip(entries: SyntheticZipEntry[]) {
     pushUint16(bytes, record.method);
     pushUint16(bytes, 0);
     pushUint16(bytes, 0);
-    pushUint32(bytes, 0);
+    pushUint32(bytes, record.crc32 ?? 0);
     pushUint32(bytes, compressedSize);
     pushUint32(bytes, uncompressedSize);
     pushUint16(bytes, record.nameBytes.byteLength);
@@ -87,7 +89,7 @@ function syntheticZip(entries: SyntheticZipEntry[]) {
     pushUint16(bytes, record.method);
     pushUint16(bytes, 0);
     pushUint16(bytes, 0);
-    pushUint32(bytes, 0);
+    pushUint32(bytes, record.crc32 ?? 0);
     pushUint32(bytes, compressedSize);
     pushUint32(bytes, uncompressedSize);
     pushUint16(bytes, record.nameBytes.byteLength);
@@ -222,5 +224,20 @@ describe('backup ZIP central-directory preflight', () => {
 
     await expectPreflightError(oversized, 'limit_exceeded');
     expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('retains each central CRC-32 and rejects extracted bytes that do not match it', async () => {
+    const archive = new Uint8Array(await syntheticZip([{
+      name: 'manifest.json',
+      data: new TextEncoder().encode('abc'),
+      crc32: 0x352441c2,
+    }]).arrayBuffer());
+
+    const entries = preflightZip(archive);
+
+    expect(entries[0]).toMatchObject({ name: 'manifest.json', crc32: 0x352441c2 });
+    expect(() => assertExtractedZip(entries, {
+      'manifest.json': new TextEncoder().encode('abd'),
+    })).toThrowError(expect.objectContaining({ code: 'invalid_container' }));
   });
 });

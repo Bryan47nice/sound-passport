@@ -17,16 +17,24 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 export interface ZipEntryMetadata {
   readonly name: string;
   readonly compressionMethod: number;
+  readonly crc32: number;
   readonly compressedSize: number;
   readonly uncompressedSize: number;
 }
 
 interface ParsedZipEntry extends ZipEntryMetadata {
   readonly flags: number;
-  readonly crc32: number;
   readonly localHeaderOffset: number;
   readonly nameBytes: Uint8Array;
 }
+
+const crc32Table = Uint32Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc >>> 0;
+});
 
 function invalidContainer(detail: string): never {
   throw new BackupError('invalid_container', `Invalid backup ZIP: ${detail}.`);
@@ -47,6 +55,12 @@ function assertRange(offset: number, length: number, boundary: number) {
 
 function bytesEqual(left: Uint8Array, right: Uint8Array) {
   return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+}
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = crc32Table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function findEndOfCentralDirectory(bytes: Uint8Array, view: DataView) {
@@ -260,9 +274,10 @@ export function preflightZip(bytes: Uint8Array): ZipEntryMetadata[] {
 
   if (cursor !== centralEnd) invalidContainer('the central-directory size is inconsistent');
   validateLocalHeaders(bytes, view, centralOffset, entries);
-  return entries.map(({ name, compressionMethod, compressedSize, uncompressedSize }) => ({
+  return entries.map(({ name, compressionMethod, crc32, compressedSize, uncompressedSize }) => ({
     name,
     compressionMethod,
+    crc32,
     compressedSize,
     uncompressedSize,
   }));
@@ -279,5 +294,6 @@ export function assertExtractedZip(
     if (!bytes || bytes.byteLength !== entry.uncompressedSize) {
       invalidContainer('an extracted entry size is inconsistent');
     }
+    if (crc32(bytes) !== entry.crc32) invalidContainer('an extracted entry CRC-32 is inconsistent');
   }
 }

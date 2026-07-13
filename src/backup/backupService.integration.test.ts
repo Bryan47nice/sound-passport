@@ -127,15 +127,56 @@ async function backupBlob() {
 }
 
 async function blobBytes(blob: Blob) {
-  return new Uint8Array(await (blob as unknown as NodeBlob).arrayBuffer());
+  if (typeof (blob as unknown as NodeBlob).arrayBuffer === 'function') {
+    return new Uint8Array(await (blob as unknown as NodeBlob).arrayBuffer());
+  }
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.readAsArrayBuffer(blob);
+  });
 }
 
 afterEach(async () => {
   openDatabases.splice(0).forEach((db) => db.close());
   await Promise.all(databaseNames.splice(0).map(cleanupDb));
+  vi.unstubAllGlobals();
 });
 
 describe('BackupService with IndexedDB', () => {
+  it('roundtrips supported records and photo blobs across export, clear, plan, and commit', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const { db, repository } = await openTarget('backup-boundary-roundtrip');
+    const createdJourney = await repository.createJourney(journeyInput('Roundtrip'));
+    await repository.addMoments(createdJourney.id, [photoInput('roundtrip.jpg')]);
+    const before = await repository.exportSnapshot();
+    const beforePhotoBytes = await blobBytes(before.photos[0].blob);
+    const inspector = vi.fn(async () => ({ width: 1200, height: 800 }));
+    const service = new BackupService(repository, {
+      appVersion: '1.0.0-test',
+      now: () => new Date('2026-07-13T08:00:00.000Z'),
+      photoInspector: inspector,
+    });
+
+    const backup = await service.exportBackup();
+    await service.clearPrivateData();
+    expect(await repository.exportSnapshot()).toEqual({ journeys: [], moments: [], songs: [], photos: [] });
+
+    const plan = await service.planImport(backup);
+    await service.commitImport(plan);
+
+    const after = await repository.exportSnapshot();
+    expect(after.journeys).toEqual(before.journeys);
+    expect(after.moments).toEqual(before.moments);
+    expect(after.songs).toEqual(before.songs);
+    expect(after.photos.map(({ blob: _blob, ...metadata }) => metadata))
+      .toEqual(before.photos.map(({ blob: _blob, ...metadata }) => metadata));
+    expect(await blobBytes(after.photos[0].blob)).toEqual(beforePhotoBytes);
+    expect(inspector).toHaveBeenCalledTimes(2);
+    db.close();
+  });
+
   it('preserves existing records and same-key edits while committing an additive import', async () => {
     const { db, repository } = await openTarget('backup-additive');
     const existingJourney = await repository.createJourney(journeyInput('Existing'));

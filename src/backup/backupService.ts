@@ -12,9 +12,11 @@ import {
   BACKUP_FORMAT,
   BACKUP_SCHEMA_VERSION,
   BackupError,
+  assertBackupId,
   parseBackupManifest,
   type BackupManifest,
 } from './backupManifest';
+import { assertBackupPhotoEnvelopeLimits, validateBackupPhoto } from './backupPhotoValidation';
 import { assertBackupContainerSize, assertExtractedZip, preflightZip } from './zipPreflight';
 
 export const BACKUP_MEDIA_TYPE = 'application/vnd.sound-passport.backup';
@@ -78,26 +80,10 @@ async function sha256(bytes: Uint8Array) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function startsWith(bytes: Uint8Array, signature: number[], offset = 0) {
-  return signature.every((byte, index) => bytes[offset + index] === byte);
-}
-
-function ascii(bytes: Uint8Array, offset: number, length: number) {
-  return String.fromCharCode(...bytes.slice(offset, offset + length));
-}
-
-function sniffContentType(bytes: Uint8Array): string | undefined {
-  if (startsWith(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg';
-  if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
-  if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WEBP') return 'image/webp';
-  if (ascii(bytes, 0, 6) === 'GIF87a' || ascii(bytes, 0, 6) === 'GIF89a') return 'image/gif';
-  if (ascii(bytes, 4, 4) === 'ftyp' && ['avif', 'avis'].includes(ascii(bytes, 8, 4))) return 'image/avif';
-  return undefined;
-}
-
 function expectedPhotoPath(photo: Pick<PhotoAsset, 'id' | 'contentType'>) {
   const extension = extensionsByContentType[photo.contentType];
   if (!extension) throw new BackupError('invalid_manifest', 'A photo has an unsupported content type.');
+  assertBackupId(photo.id, 'photo.id');
   return `photos/${encodeURIComponent(photo.id)}.${extension}`;
 }
 
@@ -248,13 +234,9 @@ export class BackupService {
     const photos: BackupManifest['photos'] = [];
 
     for (const photo of snapshot.photos) {
+      assertBackupPhotoEnvelopeLimits(photo, photo.blob.size);
       const bytes = new Uint8Array(await photo.blob.arrayBuffer());
-      if (bytes.byteLength !== photo.byteSize || photo.blob.size !== photo.byteSize) {
-        throw new BackupError('invalid_manifest', 'A photo byte size does not match its metadata.');
-      }
-      if (photo.blob.type !== photo.contentType || sniffContentType(bytes) !== photo.contentType) {
-        throw new BackupError('invalid_manifest', 'A photo content type does not match its bytes.');
-      }
+      await validateBackupPhoto({ blob: photo.blob, bytes, metadata: photo, photoInspector: this.photoInspector });
       const path = expectedPhotoPath(photo);
       files[path] = [bytes, { level: 0 }];
       const { blob: _blob, ...metadata } = photo;
@@ -271,12 +253,14 @@ export class BackupService {
       songs: snapshot.songs,
       photos,
     });
-    files['manifest.json'] = strToU8(JSON.stringify(manifest));
+    files['manifest.json'] = [strToU8(JSON.stringify(manifest)), { level: 0 }];
 
     try {
       const archive = await zipAsync(files);
+      preflightZip(archive);
       return new Blob([bytesForBlob(archive)], { type: BACKUP_MEDIA_TYPE });
     } catch (cause) {
+      if (cause instanceof BackupError) throw cause;
       throw new BackupError('invalid_container', 'The backup ZIP could not be created.', { cause });
     }
   }
@@ -336,40 +320,17 @@ export class BackupService {
       if (metadata.path !== expectedPhotoPath(metadata)) {
         throw new BackupError('invalid_manifest', 'A photo path is not canonical for its ID and content type.');
       }
-      if (metadata.byteSize > BACKUP_LIMITS.maxPhotoBytes) {
-        throw new BackupError('limit_exceeded', 'A declared photo byte size exceeds the backup limit.');
-      }
-      if (metadata.width > BACKUP_LIMITS.maxPhotoEdge || metadata.height > BACKUP_LIMITS.maxPhotoEdge) {
-        throw new BackupError('limit_exceeded', 'A declared photo dimension exceeds the backup limit.');
-      }
       if (await sha256(bytes) !== metadata.sha256) {
         throw new BackupError('checksum_mismatch', 'A photo checksum does not match the manifest.');
       }
-      if (bytes.byteLength !== metadata.byteSize) {
-        throw new BackupError('checksum_mismatch', 'A photo byte size does not match the manifest.');
-      }
-      if (sniffContentType(bytes) !== metadata.contentType) {
-        throw new BackupError('invalid_manifest', 'A photo content type does not match its bytes.');
-      }
       const blob = new Blob([bytesForBlob(bytes)], { type: metadata.contentType });
-      let dimensions: Awaited<ReturnType<PhotoInspector>>;
-      try {
-        dimensions = await this.photoInspector(blob);
-      } catch (cause) {
-        throw new BackupError('invalid_manifest', 'A photo cannot be decoded.', { cause });
-      }
-      if (
-        !Number.isInteger(dimensions.width) || dimensions.width < 1 ||
-        !Number.isInteger(dimensions.height) || dimensions.height < 1
-      ) {
-        throw new BackupError('invalid_manifest', 'A decoded photo has invalid dimensions.');
-      }
-      if (dimensions.width > BACKUP_LIMITS.maxPhotoEdge || dimensions.height > BACKUP_LIMITS.maxPhotoEdge) {
-        throw new BackupError('limit_exceeded', 'A decoded photo dimension exceeds the backup limit.');
-      }
-      if (dimensions.width !== metadata.width || dimensions.height !== metadata.height) {
-        throw new BackupError('invalid_manifest', 'Decoded photo dimensions do not match the manifest.');
-      }
+      await validateBackupPhoto({
+        blob,
+        bytes,
+        metadata,
+        photoInspector: this.photoInspector,
+        sizeMismatchCode: 'checksum_mismatch',
+      });
       const { path: _path, sha256: _sha256, ...photo } = metadata;
       snapshot.photos.push({ ...photo, blob });
     }
@@ -397,8 +358,12 @@ export class BackupService {
 
   async commitImport(plan: ImportPlan): Promise<ImportResult> {
     const validated = this.plans.get(plan);
-    if (!validated || validated.epoch !== this.planEpoch) {
+    if (!validated) {
       throw new BackupError('invalid_manifest', 'The import plan was not validated for the current data state.');
+    }
+    if (validated.epoch !== this.planEpoch) {
+      this.plans.delete(plan);
+      throw new BackupError('stale_plan', 'The import plan was invalidated by a private data change.');
     }
     this.plans.delete(plan);
     this.planEpoch += 1;

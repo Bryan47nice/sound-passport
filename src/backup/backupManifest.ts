@@ -63,8 +63,26 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   if (value.length === 0) invalid(`${label} must not be empty`);
 }
 
+export function assertBackupId(value: unknown, label: string): asserts value is string {
+  assertNonEmptyString(value, label);
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) invalid(`${label} must be well-formed Unicode`);
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      invalid(`${label} must be well-formed Unicode`);
+    }
+  }
+}
+
 function assertOptionalString(value: unknown, label: string): asserts value is string | undefined {
   if (value !== undefined) assertString(value, label);
+}
+
+function assertOptionalId(value: unknown, label: string): asserts value is string | undefined {
+  if (value !== undefined) assertBackupId(value, label);
 }
 
 function assertFiniteNumber(value: unknown, label: string): asserts value is number {
@@ -99,7 +117,7 @@ function validateJourney(value: unknown, index: number) {
     'id', 'title', 'countryCode', 'countryName', 'countryCoordinates', 'cityLabels',
     'startDate', 'endDate', 'summary', 'status', 'createdAt', 'updatedAt', 'source',
   ], ['coverPhotoAssetId'], label);
-  assertNonEmptyString(value.id, `${label}.id`);
+  assertBackupId(value.id, `${label}.id`);
   ['title', 'countryCode', 'countryName', 'startDate', 'endDate', 'summary'].forEach((key) =>
     assertString(value[key], `${label}.${key}`));
   if (!Array.isArray(value.countryCoordinates) || value.countryCoordinates.length !== 2) {
@@ -108,7 +126,7 @@ function validateJourney(value: unknown, index: number) {
   value.countryCoordinates.forEach((coordinate, coordinateIndex) =>
     assertFiniteNumber(coordinate, `${label}.countryCoordinates[${coordinateIndex}]`));
   assertStringArray(value.cityLabels, `${label}.cityLabels`);
-  assertOptionalString(value.coverPhotoAssetId, `${label}.coverPhotoAssetId`);
+  assertOptionalId(value.coverPhotoAssetId, `${label}.coverPhotoAssetId`);
   assertEnum(value.status, ['draft', 'review', 'complete'], `${label}.status`);
   assertTimestamp(value.createdAt, `${label}.createdAt`);
   assertTimestamp(value.updatedAt, `${label}.updatedAt`);
@@ -122,10 +140,10 @@ function validateMoment(value: unknown, index: number) {
     'id', 'journeyId', 'photoAssetId', 'photoAlt', 'songReferenceId', 'localDate', 'cityLabel',
     'placeLabel', 'caption', 'reason', 'reasonStatus', 'sortOrder', 'createdAt', 'updatedAt',
   ], ['localTime'], label);
-  assertNonEmptyString(value.id, `${label}.id`);
-  assertNonEmptyString(value.journeyId, `${label}.journeyId`);
-  assertNonEmptyString(value.photoAssetId, `${label}.photoAssetId`);
-  assertNonEmptyString(value.songReferenceId, `${label}.songReferenceId`);
+  assertBackupId(value.id, `${label}.id`);
+  assertBackupId(value.journeyId, `${label}.journeyId`);
+  assertBackupId(value.photoAssetId, `${label}.photoAssetId`);
+  assertBackupId(value.songReferenceId, `${label}.songReferenceId`);
   ['photoAlt', 'localDate', 'cityLabel', 'placeLabel', 'caption', 'reason'].forEach((key) =>
     assertString(value[key], `${label}.${key}`));
   assertOptionalString(value.localTime, `${label}.localTime`);
@@ -139,7 +157,7 @@ function validateSong(value: unknown, index: number) {
   const label = `songs[${index}]`;
   assertRecord(value, label);
   assertShape(value, ['id', 'provider', 'title', 'artist', 'availability'], ['providerItemId', 'sourceUrl'], label);
-  assertNonEmptyString(value.id, `${label}.id`);
+  assertBackupId(value.id, `${label}.id`);
   assertEnum(value.provider, ['youtube', 'manual'], `${label}.provider`);
   assertOptionalString(value.providerItemId, `${label}.providerItemId`);
   assertOptionalString(value.sourceUrl, `${label}.sourceUrl`);
@@ -154,7 +172,7 @@ function validatePhoto(value: unknown, index: number) {
   assertShape(value, [
     'id', 'contentType', 'originalFileName', 'width', 'height', 'byteSize', 'createdAt', 'path', 'sha256',
   ], [], label);
-  assertNonEmptyString(value.id, `${label}.id`);
+  assertBackupId(value.id, `${label}.id`);
   assertEnum(value.contentType, ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'], `${label}.contentType`);
   assertString(value.originalFileName, `${label}.originalFileName`);
   assertInteger(value.width, `${label}.width`, 1);

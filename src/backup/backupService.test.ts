@@ -7,7 +7,7 @@ import {
 } from '../data/ports';
 import type { Journey, PhotoAsset, PrivateJourneySnapshot } from '../domain/model';
 import { BackupError } from './backupManifest';
-import { BackupService, type BackupServiceOptions, type ImportPlan } from './backupService';
+import { BACKUP_LIMITS, BackupService, type BackupServiceOptions, type ImportPlan } from './backupService';
 
 const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -167,11 +167,30 @@ async function expectPlanError(
   expect(target.snapshot).toEqual(before);
 }
 
-function localCompressionMethod(bytes: Uint8Array, fileName: string) {
+function localEntry(bytes: Uint8Array, fileName: string) {
   const name = strToU8(fileName);
   const index = bytes.findIndex((_value, start) => name.every((byte, offset) => bytes[start + offset] === byte));
   expect(index).toBeGreaterThanOrEqual(30);
-  return new DataView(bytes.buffer, bytes.byteOffset + index - 30, 30).getUint16(8, true);
+  const view = new DataView(bytes.buffer, bytes.byteOffset + index - 30, 30);
+  expect(view.getUint32(0, true)).toBe(0x04034b50);
+  return {
+    compressionMethod: view.getUint16(8, true),
+    compressedSize: view.getUint32(18, true),
+    dataOffset: index + name.byteLength + view.getUint16(28, true),
+  };
+}
+
+function localCompressionMethod(bytes: Uint8Array, fileName: string) {
+  return localEntry(bytes, fileName).compressionMethod;
+}
+
+async function corruptStoredEntry(backup: Blob, fileName: string) {
+  const bytes = new Uint8Array(await backup.arrayBuffer());
+  const entry = localEntry(bytes, fileName);
+  expect(entry.compressionMethod).toBe(0);
+  expect(entry.compressedSize).toBeGreaterThan(0);
+  bytes[entry.dataOffset] ^= 0x01;
+  return new Blob([bytes.slice().buffer as ArrayBuffer], { type: backup.type });
 }
 
 describe('BackupService', () => {
@@ -186,11 +205,63 @@ describe('BackupService', () => {
     expect(plan.remapped).toBe(false);
   });
 
-  it('stores already-compressed photos with ZIP compression level 0', async () => {
+  it('stores every generated entry so the archive satisfies importer ratio policy', async () => {
     const bytes = new Uint8Array(await (await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup()).arrayBuffer());
 
+    expect(localCompressionMethod(bytes, 'manifest.json')).toBe(0);
     expect(localCompressionMethod(bytes, 'photos/photo-1.jpg')).toBe(0);
     expect(localCompressionMethod(bytes, 'photos/photo-2.png')).toBe(0);
+  });
+
+  it('decodes every exported photo through the same validation boundary as import', async () => {
+    const inspector = vi.fn(async (_blob: Blob) => ({ width: 8, height: 6 }));
+
+    await service(new MemoryPrivateDataPort(populatedSnapshot()), { photoInspector: inspector }).exportBackup();
+
+    expect(inspector).toHaveBeenCalledTimes(2);
+    expect(inspector.mock.calls.map(([blob]) => ({ size: blob.size, type: blob.type }))).toEqual([
+      { size: JPEG_BYTES.byteLength, type: 'image/jpeg' },
+      { size: PNG_BYTES.byteLength, type: 'image/png' },
+    ]);
+  });
+
+  it('rejects an undecodable photo during export', async () => {
+    const inspector = vi.fn().mockRejectedValue(new Error('synthetic decode failure'));
+
+    await expect(service(new MemoryPrivateDataPort(populatedSnapshot()), { photoInspector: inspector }).exportBackup())
+      .rejects.toMatchObject({ code: 'invalid_manifest' });
+  });
+
+  it('rejects decoded export dimensions above 2560px with a typed limit error', async () => {
+    const inspector = vi.fn(async (blob: Blob) => blob.type === 'image/jpeg'
+      ? { width: BACKUP_LIMITS.maxPhotoEdge + 1, height: 6 }
+      : { width: 8, height: 6 });
+
+    await expect(service(new MemoryPrivateDataPort(populatedSnapshot()), { photoInspector: inspector }).exportBackup())
+      .rejects.toMatchObject({ code: 'limit_exceeded' });
+  });
+
+  it('rejects an export blob above 25 MiB before reading it', async () => {
+    const snapshot = populatedSnapshot();
+    const arrayBuffer = vi.fn().mockRejectedValue(new Error('oversized blobs must not be read'));
+    const blob = {
+      size: BACKUP_LIMITS.maxPhotoBytes + 1,
+      type: 'image/jpeg',
+      arrayBuffer,
+    } as unknown as Blob;
+    snapshot.photos[0] = { ...snapshot.photos[0], blob, byteSize: blob.size };
+
+    await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
+      .rejects.toMatchObject({ code: 'limit_exceeded' });
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('rejects generated archives whose manifest exceeds importer limits', async () => {
+    const snapshot = populatedSnapshot();
+    snapshot.journeys[0].summary = 'x'.repeat(BACKUP_LIMITS.maxManifestBytes);
+
+    await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
+      .rejects.toMatchObject({ code: 'limit_exceeded' });
   });
 
   it('rejects malformed ZIP bytes as invalid_container without writing', async () => {
@@ -199,6 +270,13 @@ describe('BackupService', () => {
       new Blob([new Uint8Array([1, 2, 3])]),
       'invalid_container',
     );
+  });
+
+  it('rejects stored manifest byte corruption as invalid_container before parsing JSON', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const corrupted = await corruptStoredEntry(backup, 'manifest.json');
+
+    await expectPlanError(new MemoryPrivateDataPort(emptySnapshot()), corrupted, 'invalid_container');
   });
 
   it.each([
@@ -242,6 +320,16 @@ describe('BackupService', () => {
 
     await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
       .rejects.toMatchObject({ code: 'relationship_error' });
+  });
+
+  it.each(['\ud800', '\udc00'])('rejects malformed Unicode photo ID %j without leaking URIError', async (id) => {
+    const snapshot = populatedSnapshot();
+    snapshot.photos[0].id = id;
+    snapshot.journeys[0].coverPhotoAssetId = id;
+    snapshot.moments[0].photoAssetId = id;
+
+    await expect(service(new MemoryPrivateDataPort(snapshot)).exportBackup())
+      .rejects.toMatchObject({ name: 'BackupError', code: 'invalid_manifest' });
   });
 
   it('decodes every imported photo before producing a plan', async () => {
@@ -369,7 +457,7 @@ describe('BackupService', () => {
     expect(target.importCalls).toBe(1);
   });
 
-  it('invalidates sibling plans after a commit so preserved IDs cannot be silently overwritten', async () => {
+  it('reports a service-local sibling plan invalidated by commit as stale, then consumed', async () => {
     const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
     const target = new MemoryPrivateDataPort(emptySnapshot());
     const targetService = service(target);
@@ -377,8 +465,21 @@ describe('BackupService', () => {
     const stale = await targetService.planImport(backup);
 
     await targetService.commitImport(first);
+    await expect(targetService.commitImport(stale)).rejects.toMatchObject({ code: 'stale_plan' });
     await expect(targetService.commitImport(stale)).rejects.toMatchObject({ code: 'invalid_manifest' });
     expect(target.importCalls).toBe(1);
+  });
+
+  it('reports a service-local plan invalidated by clear as stale without importing', async () => {
+    const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
+    const target = new MemoryPrivateDataPort(emptySnapshot());
+    const targetService = service(target);
+    const plan = await targetService.planImport(backup);
+
+    await targetService.clearPrivateData();
+
+    await expect(targetService.commitImport(plan)).rejects.toMatchObject({ code: 'stale_plan' });
+    expect(target.importCalls).toBe(0);
   });
 
   it('delegates private-data clearing without exposing an unvalidated import method', async () => {
