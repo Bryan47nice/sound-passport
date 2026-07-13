@@ -1,5 +1,6 @@
 // @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
 import { Blob as NodeBlob } from 'node:buffer';
+import { openDB } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openSoundPassportDb } from '../data/indexedDb';
 import { createIndexedDbJourneyRepository } from '../data/indexedDbJourneyRepository';
@@ -145,6 +146,72 @@ afterEach(async () => {
 });
 
 describe('BackupService with IndexedDB', () => {
+  it('exports a true v1 migration whose generated journey timestamps postdate preserved moments', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const name = uniqueDbName('backup-v1-migration');
+    databaseNames.push(name);
+    const timestamp = '2025-02-03T00:00:00.000Z';
+    const legacyJourney = {
+      id: 'legacy-journey',
+      ...journeyInput('Legacy migration'),
+      status: 'draft' as const,
+    };
+    const legacyMoment = {
+      id: 'legacy-moment',
+      journeyId: legacyJourney.id,
+      photoAssetId: 'legacy-photo',
+      photoAlt: 'Legacy photo',
+      songReferenceId: 'legacy-song',
+      localDate: '2026-01-02',
+      cityLabel: 'Sample City',
+      placeLabel: 'Legacy place',
+      caption: 'Legacy caption',
+      reason: '',
+      reasonStatus: 'needs_review' as const,
+      sortOrder: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const legacySong = {
+      id: 'legacy-song',
+      provider: 'manual' as const,
+      title: 'Legacy song',
+      artist: 'Legacy artist',
+      availability: 'needs_link' as const,
+    };
+    const photoBlob = nodeBlob(JPEG_BYTES, 'image/jpeg');
+    const legacyPhoto = {
+      id: 'legacy-photo',
+      blob: photoBlob,
+      contentType: photoBlob.type,
+      originalFileName: 'legacy.jpg',
+      width: 1200,
+      height: 800,
+      byteSize: photoBlob.size,
+      createdAt: timestamp,
+    };
+    const legacyDb = await openDB(name, 1, {
+      upgrade(db) {
+        db.createObjectStore('journeys', { keyPath: 'id' }).put(legacyJourney);
+        db.createObjectStore('moments', { keyPath: 'id' }).put(legacyMoment);
+        db.createObjectStore('songs', { keyPath: 'id' }).put(legacySong);
+        db.createObjectStore('photos', { keyPath: 'id' }).put(legacyPhoto);
+      },
+    });
+    openDatabases.push(legacyDb);
+    legacyDb.close();
+
+    const db = await openSoundPassportDb(name);
+    openDatabases.push(db);
+    const repository = createIndexedDbJourneyRepository({ db });
+    const migrated = await repository.exportSnapshot();
+
+    expect(migrated.journeys[0].createdAt > migrated.moments[0].createdAt).toBe(true);
+    await expect(backupService(repository).exportBackup()).resolves.toMatchObject({
+      type: 'application/vnd.sound-passport.backup',
+    });
+  });
+
   it('roundtrips supported records and photo blobs across export, clear, plan, and commit', async () => {
     vi.stubGlobal('Blob', NodeBlob);
     const { db, repository } = await openTarget('backup-boundary-roundtrip');

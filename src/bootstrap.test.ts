@@ -43,6 +43,8 @@ function createPrivateRepository(): IndexedDbJourneyRepository {
     put: vi.fn(),
     compareAndDelete: vi.fn(),
     getMomentOutbox: vi.fn(),
+    listMomentOutboxesByJourney: vi.fn(),
+    adoptMomentOutbox: vi.fn(),
     putMomentOutbox: vi.fn(),
     compareAndDeleteMomentOutbox: vi.fn(),
   } as IndexedDbJourneyRepository;

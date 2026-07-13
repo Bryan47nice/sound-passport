@@ -332,4 +332,41 @@ describe('JourneyPage', () => {
     expect(await screen.findByRole('heading', { name: seoulStory.journey.title })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /播放這趟旅程/ })).toHaveAttribute('href', '/journeys/seoul-2025/play');
   });
+
+  it('shows a retry state for a rejected private read and never renders false not-found', async () => {
+    const user = userEvent.setup();
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('seoul-2025') as JourneyStory;
+    const privateStory: JourneyStory = {
+      journey: {
+        ...fixtureStory.journey,
+        id: 'private-read-retry',
+        title: '重新讀取後的私人旅程',
+        source: 'private',
+      },
+      moments: fixtureStory.moments.map((item) => ({ ...item, journeyId: 'private-read-retry' })),
+    };
+    const getJourneyStory = vi.fn()
+      .mockRejectedValueOnce(new Error('private IndexedDB read failed'))
+      .mockResolvedValueOnce(privateStory);
+    const repository: JourneyRepository = {
+      listCountrySummaries: vi.fn(async () => []),
+      listJourneysByCountry: vi.fn(async () => []),
+      getJourneyStory,
+    };
+    render(
+      <RepositoryProvider services={{ query: repository }}>
+        <MemoryRouter initialEntries={['/journeys/private-read-retry']}>
+          <Routes><Route path="/journeys/:journeyId" element={<JourneyPage />} /></Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: '無法讀取旅程' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '找不到這趟旅程' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('載入旅程')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重新讀取' }));
+
+    expect(await screen.findByRole('heading', { name: privateStory.journey.title })).toBeInTheDocument();
+    expect(getJourneyStory).toHaveBeenCalledTimes(2);
+  });
 });

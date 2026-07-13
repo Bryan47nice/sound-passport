@@ -138,6 +138,19 @@ function readBlobBytes(blob: Blob): Promise<Uint8Array> {
   return (blob as unknown as NodeBlob).arrayBuffer().then((bytes: ArrayBuffer) => new Uint8Array(bytes));
 }
 
+function sizedPhoto(
+  template: PrivateJourneySnapshot['photos'][number],
+  id: string,
+  byteSize: number,
+): PrivateJourneySnapshot['photos'][number] {
+  return {
+    ...template,
+    id,
+    blob: { size: byteSize, type: template.contentType } as Blob,
+    byteSize,
+  };
+}
+
 async function openRepository(testName: string) {
   const name = databaseName(testName);
   const db = trackDatabase(await openSoundPassportDb(name));
@@ -222,6 +235,53 @@ describe('indexedDbJourneyRepository', () => {
 
     await repository.deleteMoment(moment.id);
     await expect(repository.getMomentOutbox(moment.id, ownerB)).resolves.toBeUndefined();
+  });
+
+  it('lists moment recovery by journey and atomically adopts only the selected owner generation', async () => {
+    const { repository } = await openRepository('moment-outbox-adoption');
+    const firstJourney = await repository.createJourney(journeyInput({ title: 'First journey' }));
+    const secondJourney = await repository.createJourney(journeyInput({ title: 'Second journey' }));
+    const [firstMoment] = await repository.addMoments(firstJourney.id, [photoInput('first.jpg')]);
+    const [secondMoment] = await repository.addMoments(secondJourney.id, [photoInput('second.jpg')]);
+    const abandoned = momentOutboxRecord(
+      firstMoment.id,
+      firstJourney.id,
+      'abandoned-generation',
+      'Recovered caption',
+      ownerA,
+    );
+    const foreignJourney = momentOutboxRecord(
+      secondMoment.id,
+      secondJourney.id,
+      'foreign-generation',
+      'Foreign caption',
+      ownerC,
+    );
+    await repository.putMomentOutbox(abandoned);
+    await repository.putMomentOutbox(foreignJourney);
+
+    await expect(repository.listMomentOutboxesByJourney(firstJourney.id)).resolves.toEqual([abandoned]);
+    await expect(repository.adoptMomentOutbox(
+      firstMoment.id,
+      firstJourney.id,
+      ownerA,
+      ownerB,
+      'stale-generation',
+    )).resolves.toBeUndefined();
+    await expect(repository.adoptMomentOutbox(
+      firstMoment.id,
+      firstJourney.id,
+      ownerA,
+      ownerB,
+      abandoned.generation,
+    )).resolves.toEqual({ ...abandoned, ownerId: ownerB });
+
+    await expect(repository.getMomentOutbox(firstMoment.id, ownerA)).resolves.toBeUndefined();
+    await expect(repository.getMomentOutbox(firstMoment.id, ownerB)).resolves.toEqual({
+      ...abandoned,
+      ownerId: ownerB,
+    });
+    await expect(repository.listMomentOutboxesByJourney(secondJourney.id)).resolves.toEqual([foreignJourney]);
   });
 
   it('atomically overwrites one journey outbox record with its latest generation', async () => {
@@ -1079,6 +1139,48 @@ describe('indexedDbJourneyRepository', () => {
     expect(after.songs).toHaveLength(2);
     expect(after.photos).toHaveLength(2);
     db.close();
+  });
+
+  it('atomically rejects an additive import when 240 MiB existing plus 20 MiB incoming exceeds the total', async () => {
+    const { db, repository } = await openRepository('import-result-byte-limit');
+    const journey = await repository.createJourney(journeyInput({ title: 'Existing byte envelope' }));
+    await repository.addMoments(journey.id, [photoInput('existing.jpg')]);
+    const seed = await repository.exportSnapshot();
+    const photoStore = db.transaction('photos', 'readwrite');
+    for (let index = 0; index < 10; index += 1) {
+      await photoStore.store.put(sizedPhoto(
+        seed.photos[0],
+        index === 0 ? seed.photos[0].id : `existing-photo-${index}`,
+        24 * 1024 * 1024,
+      ));
+    }
+    await photoStore.done;
+    const before = await repository.exportSnapshot();
+    const imported = prefixedSnapshot(seed, 'incoming-');
+    imported.photos[0] = sizedPhoto(imported.photos[0], imported.photos[0].id, 20 * 1024 * 1024);
+
+    await expect(repository.importSnapshot(imported, primaryKeys(before))).rejects.toThrow(/aggregate_size/);
+
+    expect(await repository.exportSnapshot()).toEqual(before);
+  });
+
+  it('atomically rejects an additive import when the resulting distinct photo count exceeds 500', async () => {
+    const { db, repository } = await openRepository('import-result-count-limit');
+    const journey = await repository.createJourney(journeyInput({ title: 'Existing count envelope' }));
+    await repository.addMoments(journey.id, [photoInput('existing.jpg')]);
+    const seed = await repository.exportSnapshot();
+    const photoStore = db.transaction('photos', 'readwrite');
+    for (let index = 1; index < 499; index += 1) {
+      await photoStore.store.put(sizedPhoto(seed.photos[0], `existing-photo-${index}`, 1));
+    }
+    await photoStore.done;
+    const before = await repository.exportSnapshot();
+    const imported = prefixedSnapshot(seed, 'incoming-');
+    imported.photos.push(sizedPhoto(imported.photos[0], 'incoming-extra-photo', 1));
+
+    await expect(repository.importSnapshot(imported, primaryKeys(before))).rejects.toThrow(/photo_count/);
+
+    expect(await repository.exportSnapshot()).toEqual(before);
   });
 
   it.each(['addition', 'deletion'] as const)(

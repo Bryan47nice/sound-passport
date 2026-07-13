@@ -16,6 +16,8 @@ import {
   momentPatchMatches,
   type MomentPatchEnvelope,
 } from './momentPatch';
+import { readMomentOutbox } from './momentOutbox';
+import type { JourneyOutboxOwnerClaimer } from './journeyOutbox';
 import { useAutosave } from './useAutosave';
 
 export interface MomentAutosaveRegistration {
@@ -33,6 +35,7 @@ interface MomentEditorProps {
   onSaved?: () => void | Promise<void>;
   onAutosaveChange?: (registration: MomentAutosaveRegistration | undefined) => void;
   recovery?: MomentAutosaveOutboxPort;
+  recoveryClaimOwner?: JourneyOutboxOwnerClaimer;
   recoveryOwnerId?: string;
 }
 
@@ -74,6 +77,7 @@ export function MomentEditor({
   onSaved,
   onAutosaveChange,
   recovery,
+  recoveryClaimOwner,
   recoveryOwnerId,
 }: MomentEditorProps) {
   const [draft, setDraft] = useState(moment);
@@ -132,6 +136,14 @@ export function MomentEditor({
 
   const save = useCallback(async (envelope: MomentPatchEnvelope) => {
     const accepted = acceptedMomentRef.current;
+    if (momentPatchMatches(accepted, envelope.patch)) {
+      await acceptSave(envelope, accepted, accepted.updatedAt);
+      return;
+    }
+    const acceptedConflicts = momentPatchConflicts(accepted, envelope);
+    if (acceptedConflicts.length > 0) {
+      throw new MomentPatchConflictError(accepted, acceptedConflicts);
+    }
     try {
       const updated = await repository.updateMoment(moment.id, envelope.patch, {
         expectedUpdatedAt: accepted.updatedAt,
@@ -221,28 +233,67 @@ export function MomentEditor({
     setDraft(moment);
   }, [autosave.dirty, moment]);
   const restoredRecoveryRef = useRef<string | undefined>(undefined);
+  const recoveryLookupRef = useRef<{
+    key: string;
+    promise: Promise<{
+      record: Awaited<ReturnType<typeof readMomentOutbox>>;
+      remote: JourneyMoment | undefined;
+    }>;
+  } | undefined>(undefined);
 
   useEffect(() => {
-    if (!recovery || !recoveryOwnerId) return;
+    if (!recovery || !recoveryOwnerId || autosave.dirty) return;
     const recoveryKey = `${moment.id}\u0000${recoveryOwnerId}`;
     if (restoredRecoveryRef.current === recoveryKey) return;
-    restoredRecoveryRef.current = recoveryKey;
+    let lookup = recoveryLookupRef.current;
+    if (!lookup || lookup.key !== recoveryKey) {
+      const promise = readMomentOutbox(
+        recovery,
+        moment.id,
+        moment.journeyId,
+        recoveryOwnerId,
+        recoveryClaimOwner,
+      ).then(async (record) => ({
+        record,
+        remote: record
+          ? repository.getPrivateJourneyStory
+            ? await loadRemoteMoment()
+            : acceptedMomentRef.current
+          : undefined,
+      }));
+      lookup = { key: recoveryKey, promise };
+      recoveryLookupRef.current = lookup;
+    }
     let active = true;
-    void recovery.getMomentOutbox(moment.id, recoveryOwnerId).then(
-      (record) => {
-        if (!active || !record || autosave.dirty) return;
-        const recovered = applyMomentPatch(moment, record.envelope.patch);
+    void lookup.promise.then(
+      ({ record, remote }) => {
+        if (!active || restoredRecoveryRef.current === recoveryKey || autosave.dirty) return;
+        restoredRecoveryRef.current = recoveryKey;
+        if (!record || !remote) return;
+        acceptedMomentRef.current = remote;
+        const recovered = applyMomentPatch(remote, record.envelope.patch);
         draftRef.current = recovered;
         setDraft(recovered);
         onMomentChange(recovered);
         autosave.enqueue(record.envelope);
       },
       () => {
-        if (active) restoredRecoveryRef.current = undefined;
+        if (active && recoveryLookupRef.current === lookup) recoveryLookupRef.current = undefined;
       },
     );
     return () => { active = false; };
-  }, [autosave.dirty, autosave.enqueue, moment, onMomentChange, recovery, recoveryOwnerId]);
+  }, [
+    autosave.dirty,
+    autosave.enqueue,
+    loadRemoteMoment,
+    moment.id,
+    moment.journeyId,
+    onMomentChange,
+    recovery,
+    recoveryClaimOwner,
+    recoveryOwnerId,
+    repository.getPrivateJourneyStory,
+  ]);
   const registrationRef = useRef<MomentAutosaveRegistration>({
     dirty: autosave.dirty,
     flush: autosave.flush,

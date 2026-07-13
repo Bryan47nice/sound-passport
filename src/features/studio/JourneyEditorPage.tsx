@@ -50,6 +50,7 @@ import {
   claimJourneyOutboxOwner,
   clearJourneyOutbox,
   readJourneyOutbox,
+  type JourneyOutboxOwnerClaimer,
   type JourneyOutboxRecoveryCandidate,
   type JourneyOutboxPageOwnerClaim,
   writeJourneyOutbox,
@@ -205,6 +206,7 @@ function JourneyEditorWorkspace({
   isMobile,
   outbox,
   outboxOwnerId,
+  recoveryClaimOwner,
   momentOutbox,
   recoveredOutbox,
   story,
@@ -213,6 +215,7 @@ function JourneyEditorWorkspace({
   isMobile: boolean;
   outbox: JourneyAutosaveOutboxPort;
   outboxOwnerId: string;
+  recoveryClaimOwner: JourneyOutboxOwnerClaimer;
   momentOutbox?: MomentAutosaveOutboxPort;
   recoveredOutbox?: JourneyAutosaveOutboxRecord;
   story: JourneyStory;
@@ -731,6 +734,7 @@ function JourneyEditorWorkspace({
               }}
               onAutosaveChange={handleMomentAutosaveChange}
               recovery={momentOutbox}
+              recoveryClaimOwner={recoveryClaimOwner}
               recoveryOwnerId={outboxOwnerId}
             />
           ) : <p className="muted">加入或選取時刻後即可編輯</p>}
@@ -919,6 +923,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
       isMobile={isMobile}
       outbox={outbox}
       outboxOwnerId={outboxOwnerId!}
+      recoveryClaimOwner={ownerClaimState!.claim.claimRecoveryOwner}
       momentOutbox={momentOutbox}
       recoveredOutbox={currentLoadState.recoveredOutbox}
       story={currentLoadState.story}

@@ -88,11 +88,7 @@ function assertMomentSemantics(moment: Moment, journey: Journey) {
   if (!isCanonicalTimestamp(moment.createdAt) || !isCanonicalTimestamp(moment.updatedAt)) {
     invalid(`Moment ${moment.id} has a noncanonical timestamp.`);
   }
-  if (moment.createdAt > moment.updatedAt
-    || moment.createdAt < journey.createdAt
-    || moment.updatedAt > journey.updatedAt) {
-    relationship(`Moment ${moment.id} has an invalid joined lifecycle.`);
-  }
+  if (moment.createdAt > moment.updatedAt) relationship(`Moment ${moment.id} has an invalid lifecycle.`);
   if (moment.localDate < journey.startDate || moment.localDate > journey.endDate) {
     relationship(`Moment ${moment.id} falls outside its journey date range.`);
   }

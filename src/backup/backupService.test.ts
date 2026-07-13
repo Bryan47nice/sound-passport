@@ -320,8 +320,9 @@ describe('BackupService', () => {
     ['invalid completed lifecycle', (manifest: Record<string, any>) => {
       manifest.songs[0].title = '';
     }, 'relationship_error'],
-    ['moment newer than its journey', (manifest: Record<string, any>) => {
-      manifest.moments[0].updatedAt = '2026-01-05T00:00:00.000Z';
+    ['invalid moment lifecycle', (manifest: Record<string, any>) => {
+      manifest.moments[0].createdAt = '2026-01-03T00:00:00.000Z';
+      manifest.moments[0].updatedAt = '2026-01-02T00:00:00.000Z';
     }, 'relationship_error'],
   ] as const)('atomically rejects semantic archive violation: %s', async (_label, mutate, code) => {
     const backup = await service(new MemoryPrivateDataPort(populatedSnapshot())).exportBackup();
@@ -471,6 +472,63 @@ describe('BackupService', () => {
     expect(first.snapshot.journeys[0].coverPhotoAssetId).toBe(first.snapshot.photos[0].id);
     expect(target.importCalls).toBe(0);
     expect(target.snapshot).toEqual(existing);
+  });
+
+  it('keeps deterministic collision remaps canonical when every source ID is already 128 characters', async () => {
+    const original = populatedSnapshot();
+    const ids = {
+      journey: `j${'a'.repeat(127)}`,
+      moments: [`m${'a'.repeat(127)}`, `m${'b'.repeat(127)}`],
+      songs: [`s${'a'.repeat(127)}`, `s${'b'.repeat(127)}`],
+      photos: [`p${'a'.repeat(127)}`, `p${'b'.repeat(127)}`],
+    };
+    original.journeys[0] = {
+      ...original.journeys[0],
+      id: ids.journey,
+      coverPhotoAssetId: ids.photos[0],
+    };
+    original.moments = original.moments.map((moment, index) => ({
+      ...moment,
+      id: ids.moments[index],
+      journeyId: ids.journey,
+      songReferenceId: ids.songs[index],
+      photoAssetId: ids.photos[index],
+    }));
+    original.songs = original.songs.map((song, index) => ({ ...song, id: ids.songs[index] }));
+    original.photos = original.photos.map((asset, index) => ({ ...asset, id: ids.photos[index] }));
+    const backup = await service(new MemoryPrivateDataPort(original)).exportBackup();
+    const existing: PrivateJourneySnapshot = {
+      ...emptySnapshot(),
+      journeys: [{
+        ...journey(ids.journey),
+        coverPhotoAssetId: undefined,
+        status: 'draft',
+      }],
+    };
+    const targetService = service(new MemoryPrivateDataPort(existing));
+
+    const first = await targetService.planImport(backup);
+    const second = await targetService.planImport(backup);
+    const remappedIds = [
+      ...first.snapshot.journeys.map(({ id }) => id),
+      ...first.snapshot.moments.map(({ id }) => id),
+      ...first.snapshot.songs.map(({ id }) => id),
+      ...first.snapshot.photos.map(({ id }) => id),
+    ];
+
+    expect(first.snapshot).toEqual(second.snapshot);
+    expect(remappedIds.every((id) => id.length <= 128)).toBe(true);
+    expect(remappedIds.every((id) => /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/.test(id))).toBe(true);
+    expect(new Set(first.snapshot.moments.map(({ journeyId }) => journeyId))).toEqual(
+      new Set([first.snapshot.journeys[0].id]),
+    );
+    expect(first.snapshot.moments.map(({ songReferenceId }) => songReferenceId)).toEqual(
+      first.snapshot.songs.map(({ id }) => id),
+    );
+    expect(first.snapshot.moments.map(({ photoAssetId }) => photoAssetId)).toEqual(
+      first.snapshot.photos.map(({ id }) => id),
+    );
+    expect(first.snapshot.journeys[0].coverPhotoAssetId).toBe(first.snapshot.photos[0].id);
   });
 
   it('commits only a plan produced by the same service and calls importSnapshot exactly once', async () => {

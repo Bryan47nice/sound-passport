@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { storageWriteFailureMessage } from '../../data/storageErrors';
 
 export type AutosaveState = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -155,7 +156,7 @@ export function useAutosave<T>({
       state: 'error',
       dirty: true,
       error,
-      errorAnnouncement: '自動儲存失敗',
+      errorAnnouncement: storageWriteFailureMessage(error, '自動儲存失敗'),
     }));
     rejectFlushes(error);
   }, [publish, rejectFlushes]);

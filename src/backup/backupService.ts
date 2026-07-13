@@ -197,8 +197,12 @@ function createIdMap(values: Array<{ id: string }>, existing: Array<{ id: string
   const result = new Map<string, string>();
   for (const { id } of values) {
     let suffix = 1;
-    let candidate = `${id}~import-${suffix}`;
-    while (reserved.has(candidate)) candidate = `${id}~import-${++suffix}`;
+    const candidateFor = (value: number) => {
+      const ending = `~import-${value}`;
+      return `${id.slice(0, 128 - ending.length)}${ending}`;
+    };
+    let candidate = candidateFor(suffix);
+    while (reserved.has(candidate)) candidate = candidateFor(++suffix);
     reserved.add(candidate);
     result.set(id, candidate);
   }

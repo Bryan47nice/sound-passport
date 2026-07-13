@@ -56,7 +56,7 @@ type OutboxWriteTransaction = IDBPTransaction<
 >;
 type MomentOutboxWriteTransaction = IDBPTransaction<
   SoundPassportDb,
-  ['moments', 'momentAutosaveOutbox'],
+  ['journeys', 'moments', 'momentAutosaveOutbox'],
   'readwrite'
 >;
 
@@ -268,7 +268,7 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
   }
 
   async function runMomentOutboxWrite<T>(work: (tx: MomentOutboxWriteTransaction) => Promise<T>) {
-    const tx = db.transaction(['moments', 'momentAutosaveOutbox'], 'readwrite');
+    const tx = db.transaction(['journeys', 'moments', 'momentAutosaveOutbox'], 'readwrite');
     try {
       const result = await work(tx);
       await tx.done;
@@ -313,6 +313,18 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
 
   async function deleteJourneyOutboxes(tx: OutboxWriteTransaction, journeyId: string) {
     const store = tx.objectStore('journeyAutosaveOutbox');
+    const keys = await store.index('journeyId').getAllKeys(journeyId);
+    for (const key of keys) await store.delete(key);
+  }
+
+  async function deleteMomentOutboxesByMoment(tx: MomentOutboxWriteTransaction, momentId: string) {
+    const store = tx.objectStore('momentAutosaveOutbox');
+    const keys = await store.index('momentId').getAllKeys(momentId);
+    for (const key of keys) await store.delete(key);
+  }
+
+  async function deleteMomentOutboxesByJourney(tx: MomentOutboxWriteTransaction, journeyId: string) {
+    const store = tx.objectStore('momentAutosaveOutbox');
     const keys = await store.index('journeyId').getAllKeys(journeyId);
     for (const key of keys) await store.delete(key);
   }
@@ -720,11 +732,75 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       return runMomentOutboxWrite(async (tx) => {
         const store = tx.objectStore('momentAutosaveOutbox');
         const key: [string, string] = [momentId, ownerId];
-        if (!(await tx.objectStore('moments').get(momentId))) {
+        const moment = await tx.objectStore('moments').get(momentId);
+        if (!moment) {
+          await deleteMomentOutboxesByMoment(tx, momentId);
+          return undefined;
+        }
+        const record = await store.get(key);
+        if (record && record.journeyId !== moment.journeyId) {
           await store.delete(key);
           return undefined;
         }
-        return store.get(key);
+        return record;
+      });
+    },
+
+    async listMomentOutboxesByJourney(journeyId: string) {
+      return runMomentOutboxWrite(async (tx) => {
+        if (!(await tx.objectStore('journeys').get(journeyId))) {
+          await deleteMomentOutboxesByJourney(tx, journeyId);
+          return [];
+        }
+        const store = tx.objectStore('momentAutosaveOutbox');
+        const records = await store.index('journeyId').getAll(journeyId);
+        const retained: MomentAutosaveOutboxRecord[] = [];
+        for (const record of records) {
+          const parent = await tx.objectStore('moments').get(record.momentId);
+          if (!parent || parent.journeyId !== journeyId) {
+            await store.delete([record.momentId, record.ownerId]);
+          } else {
+            retained.push(record);
+          }
+        }
+        return retained.sort((left, right) => (
+          left.momentId.localeCompare(right.momentId) || left.ownerId.localeCompare(right.ownerId)
+        ));
+      });
+    },
+
+    async adoptMomentOutbox(
+      momentId: string,
+      journeyId: string,
+      fromOwnerId: string,
+      toOwnerId: string,
+      expectedGeneration: string,
+    ) {
+      return runMomentOutboxWrite(async (tx) => {
+        const moment = await tx.objectStore('moments').get(momentId);
+        if (!moment || moment.journeyId !== journeyId) {
+          if (!moment) await deleteMomentOutboxesByMoment(tx, momentId);
+          return undefined;
+        }
+
+        const store = tx.objectStore('momentAutosaveOutbox');
+        const targetKey: [string, string] = [momentId, toOwnerId];
+        const exact = await store.get(targetKey);
+        if (exact?.journeyId === journeyId) return exact;
+        if (exact) await store.delete(targetKey);
+
+        const sourceKey: [string, string] = [momentId, fromOwnerId];
+        const source = await store.get(sourceKey);
+        if (
+          !source ||
+          source.journeyId !== journeyId ||
+          source.generation !== expectedGeneration
+        ) return undefined;
+
+        const adopted = { ...source, ownerId: toOwnerId };
+        await store.delete(sourceKey);
+        await store.put(adopted);
+        return adopted;
       });
     },
 
@@ -771,6 +847,8 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
         const photoIds = assertUniqueIds('photo', snapshot.photos);
 
         await assertTargetKeysUnchanged(tx, expectedKeys);
+        const existingPhotos = await tx.objectStore('photos').getAll();
+        assertPhotoEnvelope([...existingPhotos, ...snapshot.photos]);
         for (const photo of snapshot.photos) await tx.objectStore('photos').add(photo);
         for (const song of snapshot.songs) await tx.objectStore('songs').add(song);
         for (const journey of snapshot.journeys) {

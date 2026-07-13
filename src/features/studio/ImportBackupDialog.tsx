@@ -6,6 +6,7 @@ import type {
 } from '../../backup/backupService';
 import { BackupError } from '../../backup/backupManifest';
 import { useInvalidateRepositoryQueries } from '../../data/RepositoryContext';
+import { storageWriteFailureMessage } from '../../data/storageErrors';
 import { AccessibleDialog } from './AccessibleDialog';
 
 type ImportState =
@@ -49,7 +50,7 @@ function planImportInFlight(backup: BackupService, file: File) {
 
 function localizedImportError(error: unknown) {
   if (!(error instanceof BackupError)) {
-    return '無法驗證備份檔，請確認檔案後再試一次。';
+    return storageWriteFailureMessage(error, '無法驗證備份檔，請確認檔案後再試一次。');
   }
   switch (error.code) {
     case 'invalid_container':

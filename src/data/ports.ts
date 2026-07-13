@@ -155,6 +155,14 @@ export interface MomentAutosaveOutboxRecord {
 
 export interface MomentAutosaveOutboxPort {
   getMomentOutbox(momentId: string, ownerId: string): Promise<MomentAutosaveOutboxRecord | undefined>;
+  listMomentOutboxesByJourney(journeyId: string): Promise<MomentAutosaveOutboxRecord[]>;
+  adoptMomentOutbox(
+    momentId: string,
+    journeyId: string,
+    fromOwnerId: string,
+    toOwnerId: string,
+    expectedGeneration: string,
+  ): Promise<MomentAutosaveOutboxRecord | undefined>;
   putMomentOutbox(record: MomentAutosaveOutboxRecord): Promise<void>;
   compareAndDeleteMomentOutbox(momentId: string, ownerId: string, generation: string): Promise<boolean>;
 }

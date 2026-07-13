@@ -13,6 +13,11 @@ import type { JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { AccessibleDialog } from '../studio/AccessibleDialog';
 
+type JourneyLoadState =
+  | { kind: 'loading'; journeyId: string }
+  | { kind: 'ready'; journeyId: string; story: JourneyStory | undefined }
+  | { kind: 'error'; journeyId: string };
+
 export function JourneyPage() {
   const { journeyId = '' } = useParams();
   const navigate = useGuardedNavigate();
@@ -21,9 +26,10 @@ export function JourneyPage() {
   const editor = useOptionalJourneyEditorRepository();
   const repositoryRevision = useRepositoryRevision();
   const invalidateQueries = useInvalidateRepositoryQueries();
-  const [story, setStory] = useState<JourneyStory>();
-  const [loaded, setLoaded] = useState(false);
-  const [resolvedJourneyId, setResolvedJourneyId] = useState<string>();
+  const [loadState, setLoadState] = useState<JourneyLoadState>(() => ({
+    kind: 'loading',
+    journeyId,
+  }));
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState('');
@@ -32,23 +38,36 @@ export function JourneyPage() {
 
   useEffect(() => {
     let isCurrent = true;
-    setStory(undefined);
-    setLoaded(false);
+    setLoadState({ kind: 'loading', journeyId });
 
-    void repository.getJourneyStory(journeyId).then((value) => {
-      if (isCurrent) {
-        setStory(value);
-        setResolvedJourneyId(journeyId);
-        setLoaded(true);
-      }
-    });
+    void repository.getJourneyStory(journeyId)
+      .then((story) => {
+        if (isCurrent) setLoadState({ kind: 'ready', journeyId, story });
+      })
+      .catch(() => {
+        if (isCurrent) setLoadState({ kind: 'error', journeyId });
+      });
 
     return () => {
       isCurrent = false;
     };
   }, [journeyId, repository, repositoryRevision]);
 
-  if (!loaded || resolvedJourneyId !== journeyId) return <section className="page" aria-label="載入旅程" />;
+  const currentState = loadState.journeyId === journeyId
+    ? loadState
+    : { kind: 'loading', journeyId } as const;
+  if (currentState.kind === 'loading') return <section className="page" aria-label="載入旅程" />;
+  if (currentState.kind === 'error') {
+    return (
+      <section className="page empty-state" role="alert">
+        <h1>無法讀取旅程</h1>
+        <p>私人旅程資料暫時無法讀取，請重新讀取。</p>
+        <button className="secondary-command" type="button" onClick={invalidateQueries}>重新讀取</button>
+      </section>
+    );
+  }
+
+  const { story } = currentState;
   if (!story) return <section className="page empty-state"><h1>找不到這趟旅程</h1></section>;
 
   const canManage = story.journey.source === 'private' && editor !== undefined;

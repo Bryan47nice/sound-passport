@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StrictMode, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { STORAGE_CAPACITY_GUIDANCE, StorageCapacityError } from '../../data/storageErrors';
 import { useAutosave, type AutosaveRecoveryPersistence } from './useAutosave';
 
 interface SaveContext {
@@ -224,6 +225,21 @@ describe('useAutosave', () => {
 
     expect(save).toHaveBeenCalledTimes(2);
     expect(save).toHaveBeenLastCalledWith('失敗後最新版', { revision: 2 });
+  });
+
+  it('announces centralized backup and deletion guidance when autosave exceeds storage capacity', async () => {
+    vi.useFakeTimers();
+    const save = vi.fn<Save>().mockRejectedValue(
+      new StorageCapacityError(new DOMException('quota', 'QuotaExceededError')),
+    );
+    render(<AutosaveHarness save={save} />);
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '需要更多空間' } });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+
+    expect(screen.getByText(STORAGE_CAPACITY_GUIDANCE)).toHaveAttribute('aria-live', 'assertive');
+    expect(screen.getByLabelText('是否有未儲存變更')).toHaveTextContent('true');
   });
 
   it('flushes all newer work before resolving', async () => {

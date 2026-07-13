@@ -13,6 +13,7 @@ import {
   useRepositoryRevision,
 } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
+import { STORAGE_CAPACITY_GUIDANCE, StorageCapacityError } from '../../data/storageErrors';
 import { ImportBackupDialog } from './ImportBackupDialog';
 
 const validPlan: ImportPlan = {
@@ -209,6 +210,24 @@ describe('ImportBackupDialog', () => {
 
     expect(screen.queryByRole('dialog', { name: '匯入私人備份' })).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
+  });
+
+  it('uses centralized backup and deletion guidance for a storage-capacity failure', async () => {
+    const user = userEvent.setup();
+    const backup = backupStub({
+      planImport: vi.fn(async () => validPlan),
+      commitImport: vi.fn(async () => {
+        throw new StorageCapacityError(new DOMException('quota', 'QuotaExceededError'));
+      }),
+    });
+    renderDialog(backup);
+
+    const dialog = await screen.findByRole('dialog', { name: '匯入私人備份' });
+    await within(dialog).findByText('2 趟旅程');
+    await user.click(within(dialog).getByRole('button', { name: '確認匯入' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(STORAGE_CAPACITY_GUIDANCE);
+    expect(screen.getByLabelText('repository revision')).toHaveTextContent('0');
   });
 
   it('deduplicates a rejected in-flight plan under StrictMode without leaking the rejection', async () => {

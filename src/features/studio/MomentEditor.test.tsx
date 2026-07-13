@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MomentVersionConflictError, type UpdateMomentOptions } from '../../data/ports';
 import type { JourneyMoment, MomentPatch } from '../../domain/model';
+import { claimJourneyOutboxOwner } from './journeyOutbox';
 import { MomentEditor } from './MomentEditor';
 
 const moment: JourneyMoment = {
@@ -74,7 +76,9 @@ function renderEditor(
   options: {
     getPrivateJourneyStory?: () => Promise<ReturnType<typeof storyWithMoment> | undefined>;
     recovery?: object;
+    recoveryClaimOwner?: (ownerId: string) => Promise<{ ownerId: string; release(): Promise<void> } | undefined>;
     recoveryOwnerId?: string;
+    strict?: boolean;
   } = {},
 ) {
   const onMomentChange = vi.fn();
@@ -90,9 +94,11 @@ function renderEditor(
     onDelete,
     onSaved,
     recovery: options.recovery,
+    recoveryClaimOwner: options.recoveryClaimOwner,
     recoveryOwnerId: options.recoveryOwnerId,
   };
-  const view = render(<MomentEditor {...(props as any)} />);
+  const editor = <MomentEditor {...(props as any)} />;
+  const view = render(options.strict ? <StrictMode>{editor}</StrictMode> : editor);
   const rerenderMoment = (nextMoment: JourneyMoment) => view.rerender(
     <MomentEditor {...({ ...props, moment: nextMoment } as any)} />,
   );
@@ -424,5 +430,195 @@ describe('MomentEditor', () => {
 
     await act(flushMicrotasks);
     expect(screen.getByLabelText('時刻文案')).toHaveValue('重新載入後仍要保留');
+  });
+
+  it('does not write a stale same-field recovered patch before an explicit overwrite choice', async () => {
+    vi.useFakeTimers();
+    const remote = {
+      ...moment,
+      caption: '其他位置已儲存的文案',
+      updatedAt: '2026-07-13T00:00:00.010Z',
+    };
+    const recovered = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: 'owner-a',
+      generation: 'recovered-generation',
+      envelope: {
+        patch: { caption: '重新開啟後的本機文案' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const committed = {
+      ...remote,
+      caption: recovered.envelope.patch.caption,
+      updatedAt: '2026-07-13T00:00:00.011Z',
+    };
+    const updateMoment = vi.fn(async () => committed);
+    const recovery = {
+      getMomentOutbox: vi.fn(async () => recovered),
+      listMomentOutboxesByJourney: vi.fn(async () => []),
+      adoptMomentOutbox: vi.fn(),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    renderEditor(updateMoment, undefined, {
+      getPrivateJourneyStory: vi.fn(async () => storyWithMoment(remote)),
+      recovery,
+      recoveryOwnerId: recovered.ownerId,
+    });
+
+    await act(flushMicrotasks);
+    expect(screen.getByLabelText('時刻文案')).toHaveValue('重新開啟後的本機文案');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+    });
+
+    expect(updateMoment).not.toHaveBeenCalled();
+    expect(screen.getByText('時刻內容已在其他位置更新，本機草稿尚未覆寫。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '覆寫遠端內容' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '捨棄並重新載入' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '覆寫遠端內容' }));
+    await act(flushMicrotasks);
+
+    expect(updateMoment).toHaveBeenCalledOnce();
+    expect(updateMoment).toHaveBeenCalledWith(
+      moment.id,
+      recovered.envelope.patch,
+      { expectedUpdatedAt: remote.updatedAt },
+    );
+  });
+
+  it('rebases recovered fields onto the latest moment and auto-merges only non-overlapping changes', async () => {
+    vi.useFakeTimers();
+    const remote = {
+      ...moment,
+      cityLabel: '新北',
+      updatedAt: '2026-07-13T00:00:00.010Z',
+    };
+    const recovered = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: 'owner-a',
+      generation: 'non-overlap-generation',
+      envelope: {
+        patch: { caption: '本機保留文案' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const updateMoment = vi.fn(async () => ({
+      ...remote,
+      caption: recovered.envelope.patch.caption,
+      updatedAt: '2026-07-13T00:00:00.011Z',
+    }));
+    const recovery = {
+      getMomentOutbox: vi.fn(async () => recovered),
+      listMomentOutboxesByJourney: vi.fn(async () => []),
+      adoptMomentOutbox: vi.fn(),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    renderEditor(updateMoment, undefined, {
+      getPrivateJourneyStory: vi.fn(async () => storyWithMoment(remote)),
+      recovery,
+      recoveryOwnerId: recovered.ownerId,
+    });
+
+    await act(flushMicrotasks);
+
+    expect(screen.getByLabelText('城市')).toHaveValue('新北');
+    expect(screen.getByLabelText('時刻文案')).toHaveValue('本機保留文案');
+    expect(updateMoment).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+    });
+
+    expect(updateMoment).toHaveBeenCalledWith(
+      moment.id,
+      recovered.envelope.patch,
+      { expectedUpdatedAt: remote.updatedAt },
+    );
+  });
+
+  it('adopts one prior no-lock owner under StrictMode exactly once without crossing journey scope', async () => {
+    vi.stubGlobal('navigator', {});
+    const oldOwnerId = '11111111-1111-4111-8111-111111111111';
+    let storedOwnerId = oldOwnerId;
+    const storage = {
+      getItem: vi.fn(() => storedOwnerId),
+      setItem: vi.fn((_key: string, value: string) => { storedOwnerId = value; }),
+    };
+    const pageClaim = await claimJourneyOutboxOwner({ storage });
+    expect(pageClaim.ownerId).not.toBe(oldOwnerId);
+
+    let stored = {
+      momentId: moment.id,
+      journeyId: moment.journeyId,
+      ownerId: oldOwnerId,
+      generation: 'abandoned-generation',
+      envelope: {
+        patch: { caption: '輪替後找回的文案' },
+        base: { caption: moment.caption },
+      },
+      updatedAt: '2026-07-13T00:00:00.005Z',
+    };
+    const foreignJourneyRecord = {
+      ...stored,
+      journeyId: 'journey-elsewhere',
+      ownerId: '22222222-2222-4222-8222-222222222222',
+      envelope: {
+        patch: { caption: '不可洩漏的其他旅程文案' },
+        base: { caption: moment.caption },
+      },
+    };
+    const recovery = {
+      getMomentOutbox: vi.fn(async (_momentId: string, ownerId: string) => (
+        stored.ownerId === ownerId ? stored : undefined
+      )),
+      listMomentOutboxesByJourney: vi.fn(async () => [stored, foreignJourneyRecord]),
+      adoptMomentOutbox: vi.fn(async (
+        _momentId: string,
+        _journeyId: string,
+        fromOwnerId: string,
+        toOwnerId: string,
+        generation: string,
+      ) => {
+        if (stored.ownerId !== fromOwnerId || stored.generation !== generation) return undefined;
+        stored = { ...stored, ownerId: toOwnerId };
+        return stored;
+      }),
+      putMomentOutbox: vi.fn(async () => undefined),
+      compareAndDeleteMomentOutbox: vi.fn(async () => true),
+    };
+    const { onMomentChange } = renderEditor(vi.fn(async () => moment), undefined, {
+      getPrivateJourneyStory: vi.fn(async () => storyWithMoment(moment)),
+      recovery,
+      recoveryClaimOwner: pageClaim.claimRecoveryOwner,
+      recoveryOwnerId: pageClaim.ownerId,
+      strict: true,
+    });
+
+    await act(flushMicrotasks);
+
+    expect(screen.getByLabelText('時刻文案')).toHaveValue('輪替後找回的文案');
+    expect(screen.queryByDisplayValue('不可洩漏的其他旅程文案')).not.toBeInTheDocument();
+    expect(recovery.listMomentOutboxesByJourney).toHaveBeenCalledWith(moment.journeyId);
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledOnce();
+    expect(recovery.adoptMomentOutbox).toHaveBeenCalledWith(
+      moment.id,
+      moment.journeyId,
+      oldOwnerId,
+      pageClaim.ownerId,
+      stored.generation,
+    );
+    expect(onMomentChange).toHaveBeenCalledOnce();
+    await pageClaim.release();
   });
 });
