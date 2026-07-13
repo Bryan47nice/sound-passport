@@ -51,10 +51,14 @@ export function ClearPrivateDataDialog({
     }
   };
 
+  const requestClose = () => {
+    if (!clearPendingRef.current) onClose();
+  };
+
   return (
     <AccessibleDialog
       descriptionId={descriptionId}
-      onDismiss={() => { if (!busy) onClose(); }}
+      onDismiss={requestClose}
       open={open}
       title="清除私人資料"
     >
@@ -73,7 +77,7 @@ export function ClearPrivateDataDialog({
       </div>
       {error && <p className="field-error" role="alert">{error}</p>}
       <div className="dialog-actions">
-        <button type="button" disabled={busy} onClick={onClose}>取消</button>
+        <button type="button" disabled={busy} onClick={requestClose}>取消</button>
         <button
           className="destructive-command"
           type="button"

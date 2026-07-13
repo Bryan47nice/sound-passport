@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BackupService } from '../../backup/backupService';
@@ -71,21 +78,71 @@ describe('BackupControls', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:sound-passport-backup');
   });
 
-  it('uses the extension only as a picker filter and still validates the selected contents', async () => {
+  it('shows a visible localized alert when export fails', async () => {
+    const user = userEvent.setup();
+    const backup = backupStub({
+      exportBackup: vi.fn(async () => {
+        throw new Error('export failed');
+      }),
+    });
+    renderControls(backup);
+
+    await user.click(screen.getByRole('button', { name: '匯出私人備份' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '無法匯出備份，私人資料未受影響，請再試一次。',
+    );
+    expect(screen.getByRole('alert')).toBeVisible();
+  });
+
+  it('keeps the native file input out of the tab order and uses the visible import button as its trigger', async () => {
+    const user = userEvent.setup();
+    const { container } = renderControls(backupStub());
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+    const clickInput = vi.spyOn(input!, 'click').mockImplementation(() => undefined);
+    const exportButton = screen.getByRole('button', { name: '匯出私人備份' });
+    const importButton = screen.getByRole('button', { name: '匯入私人備份' });
+    const clearButton = screen.getByRole('button', { name: '清除私人資料' });
+
+    await user.click(importButton);
+    expect(clickInput).toHaveBeenCalledTimes(1);
+
+    exportButton.focus();
+    await user.tab();
+    expect(importButton).toHaveFocus();
+    await user.tab();
+    expect(clearButton).toHaveFocus();
+    expect(input).toHaveAttribute('accept', '.soundpassport');
+    expect(input).toHaveAttribute('tabindex', '-1');
+    expect(input).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('validates selected contents and restores focus to the visible import button after close', async () => {
+    const user = userEvent.setup();
     const invalidBackup = new File(['not a zip'], 'renamed.soundpassport');
     const planImport = vi.fn(async () => {
       throw new BackupError('invalid_container', 'not a zip');
     });
     const backup = backupStub({ planImport });
-    renderControls(backup);
-    const input = screen.getByLabelText('選擇 Sound Passport 備份檔');
+    const { container } = renderControls(backup);
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
+    const importButton = screen.getByRole('button', { name: '匯入私人備份' });
+    expect(input).not.toBeNull();
 
     expect(input).toHaveAttribute('accept', '.soundpassport');
-    fireEvent.change(input, { target: { files: [invalidBackup] } });
+    input!.focus();
+    fireEvent.change(input!, { target: { files: [invalidBackup] } });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('無法讀取備份檔，請選擇有效的 Sound Passport 備份。');
     expect(planImport).toHaveBeenCalledTimes(1);
     expect(planImport).toHaveBeenCalledWith(invalidBackup);
     expect(backup.commitImport).not.toHaveBeenCalled();
+
+    const dialog = screen.getByRole('dialog', { name: '匯入私人備份' });
+    await user.click(within(dialog).getByRole('button', { name: '取消' }));
+
+    expect(screen.queryByRole('dialog', { name: '匯入私人備份' })).not.toBeInTheDocument();
+    expect(importButton).toHaveFocus();
   });
 });

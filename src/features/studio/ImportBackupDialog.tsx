@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type {
   BackupService,
   ImportPlan,
@@ -22,6 +22,29 @@ interface ImportBackupDialogProps {
   onClose: () => void;
   onImported?: (summary: ImportSummary) => void;
   open: boolean;
+}
+
+const inFlightImportPlans = new WeakMap<
+  BackupService,
+  WeakMap<File, Promise<ImportPlan>>
+>();
+
+function planImportInFlight(backup: BackupService, file: File) {
+  let plansByFile = inFlightImportPlans.get(backup);
+  if (!plansByFile) {
+    plansByFile = new WeakMap();
+    inFlightImportPlans.set(backup, plansByFile);
+  }
+  const existing = plansByFile.get(file);
+  if (existing) return existing;
+
+  const request = Promise.resolve().then(() => backup.planImport(file));
+  plansByFile.set(file, request);
+  const release = () => {
+    if (plansByFile.get(file) === request) plansByFile.delete(file);
+  };
+  void request.then(release, release);
+  return request;
 }
 
 function localizedImportError(error: unknown) {
@@ -59,6 +82,7 @@ export function ImportBackupDialog({
   const invalidateQueries = useInvalidateRepositoryQueries();
   const [state, setState] = useState<ImportState>({ kind: 'idle' });
   const commitPendingRef = useRef(false);
+  const primaryActionRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) {
@@ -67,7 +91,7 @@ export function ImportBackupDialog({
     }
     let isCurrent = true;
     setState({ kind: 'validating' });
-    void backup.planImport(file).then(
+    void planImportInFlight(backup, file).then(
       (plan) => { if (isCurrent) setState({ kind: 'ready', plan }); },
       (error: unknown) => {
         if (isCurrent) setState({ kind: 'invalid', message: localizedImportError(error) });
@@ -75,6 +99,16 @@ export function ImportBackupDialog({
     );
     return () => { isCurrent = false; };
   }, [backup, file, open]);
+
+  useLayoutEffect(() => {
+    if (open && (state.kind === 'complete' || state.kind === 'invalid')) {
+      primaryActionRef.current?.focus();
+    }
+  }, [open, state.kind]);
+
+  const requestClose = () => {
+    if (!commitPendingRef.current) onClose();
+  };
 
   const confirmImport = async () => {
     if (state.kind !== 'ready' || commitPendingRef.current) return;
@@ -99,11 +133,21 @@ export function ImportBackupDialog({
     : state.kind === 'complete'
       ? state.summary
       : undefined;
+  const primaryLabel = state.kind === 'validating'
+    ? '驗證中'
+    : state.kind === 'committing'
+      ? '匯入中'
+      : state.kind === 'complete'
+        ? '完成'
+        : state.kind === 'invalid'
+          ? '關閉'
+          : '確認匯入';
+  const primaryDisabled = state.kind === 'idle' || state.kind === 'validating';
 
   return (
     <AccessibleDialog
       descriptionId={descriptionId}
-      onDismiss={() => { if (!busy) onClose(); }}
+      onDismiss={requestClose}
       open={open}
       title="匯入私人備份"
     >
@@ -122,21 +166,21 @@ export function ImportBackupDialog({
       {state.kind === 'invalid' && <p className="field-error" role="alert">{state.message}</p>}
       {state.kind === 'complete' && <p role="status">匯入完成</p>}
       <div className="dialog-actions">
-        {state.kind === 'complete' ? (
-          <button className="primary-command" type="button" onClick={onClose}>完成</button>
-        ) : (
-          <>
-            <button type="button" disabled={busy} onClick={onClose}>取消</button>
-            <button
-              className="primary-command"
-              type="button"
-              disabled={state.kind !== 'ready'}
-              onClick={() => void confirmImport()}
-            >
-              {state.kind === 'validating' ? '驗證中' : busy ? '匯入中' : '確認匯入'}
-            </button>
-          </>
-        )}
+        <button type="button" disabled={busy} onClick={requestClose}>
+          {state.kind === 'complete' ? '關閉' : '取消'}
+        </button>
+        <button
+          ref={primaryActionRef}
+          className="primary-command"
+          type="button"
+          disabled={primaryDisabled || busy}
+          onClick={() => {
+            if (state.kind === 'complete' || state.kind === 'invalid') requestClose();
+            else void confirmImport();
+          }}
+        >
+          {primaryLabel}
+        </button>
       </div>
     </AccessibleDialog>
   );

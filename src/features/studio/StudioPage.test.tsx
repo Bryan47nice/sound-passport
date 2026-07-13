@@ -244,7 +244,11 @@ describe('StudioPage', () => {
     expect(screen.getByRole('button', { name: '匯出私人備份' })).toBeEnabled();
     expect(screen.getByRole('button', { name: '匯入私人備份' })).toBeEnabled();
     expect(screen.getByRole('button', { name: '清除私人資料' })).toBeEnabled();
-    expect(screen.getByLabelText('選擇 Sound Passport 備份檔')).toHaveAttribute('accept', '.soundpassport');
+    const fileInput = screen.getByRole('toolbar', { name: '旅程工具' })
+      .querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).toHaveAttribute('accept', '.soundpassport');
+    expect(fileInput).toHaveAttribute('aria-hidden', 'true');
+    expect(fileInput).toHaveAttribute('tabindex', '-1');
     expect(screen.getByText('備份檔包含您的私人照片與文字，請妥善保管。')).toBeVisible();
   });
 

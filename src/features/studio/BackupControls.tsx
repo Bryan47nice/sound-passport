@@ -19,8 +19,10 @@ function backupFilename(date: Date) {
 export function BackupControls({ children }: PropsWithChildren) {
   const backup = useBackupService();
   const inputRef = useRef<HTMLInputElement>(null);
+  const importButtonRef = useRef<HTMLButtonElement>(null);
   const exportPendingRef = useRef(false);
   const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState('');
   const [importFile, setImportFile] = useState<File>();
   const [clearOpen, setClearOpen] = useState(false);
   const [status, setStatus] = useState('');
@@ -29,6 +31,7 @@ export function BackupControls({ children }: PropsWithChildren) {
     if (exportPendingRef.current) return;
     exportPendingRef.current = true;
     setExportBusy(true);
+    setExportError('');
     setStatus('');
     let objectUrl: string | undefined;
     try {
@@ -45,7 +48,7 @@ export function BackupControls({ children }: PropsWithChildren) {
       }
       setStatus('私人備份已下載。');
     } catch {
-      setStatus('無法匯出備份，私人資料未受影響，請再試一次。');
+      setExportError('無法匯出備份，私人資料未受影響，請再試一次。');
     } finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       exportPendingRef.current = false;
@@ -56,7 +59,11 @@ export function BackupControls({ children }: PropsWithChildren) {
   const chooseImport = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
-    if (file) setImportFile(file);
+    importButtonRef.current?.focus();
+    if (file) {
+      setExportError('');
+      setImportFile(file);
+    }
   };
 
   return (
@@ -74,6 +81,7 @@ export function BackupControls({ children }: PropsWithChildren) {
           <Download size={18} aria-hidden="true" />
         </button>
         <button
+          ref={importButtonRef}
           className="icon-command"
           type="button"
           title="匯入私人備份"
@@ -87,7 +95,8 @@ export function BackupControls({ children }: PropsWithChildren) {
           className="visually-hidden"
           type="file"
           accept=".soundpassport"
-          aria-label="選擇 Sound Passport 備份檔"
+          aria-hidden="true"
+          tabIndex={-1}
           onChange={chooseImport}
         />
         <button
@@ -101,6 +110,7 @@ export function BackupControls({ children }: PropsWithChildren) {
         </button>
       </div>
       <p className="field-error">備份檔包含您的私人照片與文字，請妥善保管。</p>
+      {exportError && <p className="field-error" role="alert">{exportError}</p>}
       <span className="visually-hidden" role="status" aria-live="polite">{status}</span>
       {importFile && (
         <ImportBackupDialog
