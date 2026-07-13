@@ -2,11 +2,18 @@ import { renderHook } from '@testing-library/react';
 import type { ComponentProps, PropsWithChildren } from 'react';
 import { describe, expect, it } from 'vitest';
 import { fixtureJourneyRepository } from './fixtureJourneyRepository';
-import type { JourneyEditorRepository, PhotoAssetRepository, PrivateDataPort } from './ports';
+import type {
+  JourneyAutosaveOutboxPort,
+  JourneyEditorRepository,
+  PhotoAssetRepository,
+  PrivateDataPort,
+} from './ports';
 import {
   RepositoryProvider,
+  useJourneyAutosaveOutbox,
   useJourneyEditorRepository,
   useJourneyRepository,
+  useOptionalJourneyAutosaveOutbox,
   useOptionalJourneyEditorRepository,
   usePhotoAssetRepository,
   usePrivateDataPort,
@@ -22,6 +29,7 @@ void providerHasNoLegacyRepositoryProp;
 void providerRequiresServices;
 
 const editor = {} as JourneyEditorRepository;
+const outbox = {} as JourneyAutosaveOutboxPort;
 const photos = {} as PhotoAssetRepository;
 const privateData = {} as PrivateDataPort;
 
@@ -30,6 +38,7 @@ function AllServicesProvider({ children }: PropsWithChildren) {
     <RepositoryProvider services={{
       query: fixtureJourneyRepository,
       editor,
+      outbox,
       photos,
       privateData,
     }}>
@@ -52,6 +61,8 @@ describe('repository service hooks', () => {
       .toBe(fixtureJourneyRepository);
     expect(renderHook(useJourneyEditorRepository, { wrapper: AllServicesProvider }).result.current)
       .toBe(editor);
+    expect(renderHook(useJourneyAutosaveOutbox, { wrapper: AllServicesProvider }).result.current)
+      .toBe(outbox);
     expect(renderHook(usePhotoAssetRepository, { wrapper: AllServicesProvider }).result.current)
       .toBe(photos);
     expect(renderHook(usePrivateDataPort, { wrapper: AllServicesProvider }).result.current)
@@ -70,6 +81,13 @@ describe('repository service hooks', () => {
   it('returns undefined from the optional editor hook when local storage is unavailable', () => {
     expect(renderHook(useOptionalJourneyEditorRepository, { wrapper: QueryOnlyProvider }).result.current)
       .toBeUndefined();
+  });
+
+  it('keeps the outbox unavailable in fixture-only services', () => {
+    expect(renderHook(useOptionalJourneyAutosaveOutbox, { wrapper: QueryOnlyProvider }).result.current)
+      .toBeUndefined();
+    expect(() => renderHook(useJourneyAutosaveOutbox, { wrapper: QueryOnlyProvider }))
+      .toThrowError(/^JourneyAutosaveOutboxPort is not available$/);
   });
 
   it('throws the exact photo-service error when photos are absent', () => {

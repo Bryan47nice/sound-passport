@@ -18,6 +18,8 @@ import { parseYouTubeVideoId } from '../domain/youtube';
 import {
   JourneyVersionConflictError,
   PrivateDataStateConflictError,
+  type JourneyAutosaveOutboxPort,
+  type JourneyAutosaveOutboxRecord,
   type PrivateDataPrimaryKeys,
   JourneyEditorRepository,
   JourneyRepository,
@@ -27,10 +29,15 @@ import {
 import type { SoundPassportDb } from './indexedDb';
 
 const stores = ['journeys', 'moments', 'songs', 'photos'] as const;
+const privateStores = [...stores, 'journeyAutosaveOutbox'] as const;
 type WriteTransaction = IDBPTransaction<SoundPassportDb, typeof stores, 'readwrite'>;
 
 export interface IndexedDbJourneyRepository
-  extends JourneyRepository, JourneyEditorRepository, PhotoAssetRepository, PrivateDataPort {}
+  extends JourneyRepository,
+    JourneyEditorRepository,
+    JourneyAutosaveOutboxPort,
+    PhotoAssetRepository,
+    PrivateDataPort {}
 
 export interface IndexedDbJourneyRepositoryOptions {
   db: IDBPDatabase<SoundPassportDb>;
@@ -152,6 +159,30 @@ async function advanceJourneyStoryVersion(tx: WriteTransaction, journeyId: strin
 export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyRepositoryOptions): IndexedDbJourneyRepository {
   async function runWrite<T>(work: (tx: WriteTransaction) => Promise<T>) {
     const tx = db.transaction(stores, 'readwrite');
+    try {
+      const result = await work(tx);
+      await tx.done;
+      return result;
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+        // A failed IndexedDB request may have already aborted the transaction.
+      }
+      try {
+        await tx.done;
+      } catch {
+        // Preserve the operation error, which carries more detail than AbortError.
+      }
+      if (isQuotaExceededError(error)) throw new StorageCapacityError(error);
+      throw error;
+    }
+  }
+
+  async function runOutboxWrite<T>(work: (
+    tx: IDBPTransaction<SoundPassportDb, ['journeyAutosaveOutbox'], 'readwrite'>,
+  ) => Promise<T>) {
+    const tx = db.transaction('journeyAutosaveOutbox', 'readwrite');
     try {
       const result = await work(tx);
       await tx.done;
@@ -430,6 +461,28 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       return updateJourney(id, { status });
     },
 
+    async get(journeyId: string) {
+      const tx = db.transaction('journeyAutosaveOutbox', 'readonly');
+      const record = await tx.store.get(journeyId);
+      await tx.done;
+      return record;
+    },
+
+    async put(record: JourneyAutosaveOutboxRecord) {
+      await runOutboxWrite(async (tx) => {
+        await tx.store.put(record);
+      });
+    },
+
+    async compareAndDelete(journeyId: string, generation: string) {
+      return runOutboxWrite(async (tx) => {
+        const stored = await tx.store.get(journeyId);
+        if (!stored || stored.generation !== generation) return false;
+        await tx.store.delete(journeyId);
+        return true;
+      });
+    },
+
     async getPhotoAsset(id) {
       const tx = db.transaction('photos', 'readonly');
       const photo = await tx.store.get(id);
@@ -477,9 +530,24 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     },
 
     async clearPrivateData() {
-      await runWrite(async (tx) => {
-        for (const storeName of stores) await tx.objectStore(storeName).clear();
-      });
+      const tx = db.transaction(privateStores, 'readwrite');
+      try {
+        for (const storeName of privateStores) await tx.objectStore(storeName).clear();
+        await tx.done;
+      } catch (error) {
+        try {
+          tx.abort();
+        } catch {
+          // A failed IndexedDB request may have already aborted the transaction.
+        }
+        try {
+          await tx.done;
+        } catch {
+          // Preserve the operation error, which carries more detail than AbortError.
+        }
+        if (isQuotaExceededError(error)) throw new StorageCapacityError(error);
+        throw error;
+      }
     },
   };
 }

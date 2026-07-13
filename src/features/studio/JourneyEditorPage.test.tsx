@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../app/App';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
-import { JourneyVersionConflictError, type JourneyEditorRepository } from '../../data/ports';
+import {
+  JourneyVersionConflictError,
+  type JourneyAutosaveOutboxPort,
+  type JourneyAutosaveOutboxRecord,
+  type JourneyEditorRepository,
+} from '../../data/ports';
 import type { Journey, JourneyPatch, JourneyStory } from '../../domain/model';
 
 const story: JourneyStory = {
@@ -92,9 +97,54 @@ function editorStub(overrides: Partial<JourneyEditorRepository> = {}): JourneyEd
   return { ...repository, ...overrides };
 }
 
-function renderRoute(editor: JourneyEditorRepository | null = editorStub(), path = '/studio/journeys/private-tokyo') {
+type InspectableOutbox = JourneyAutosaveOutboxPort & {
+  peek: (journeyId: string) => JourneyAutosaveOutboxRecord | undefined;
+};
+
+function outboxStub(initial?: JourneyAutosaveOutboxRecord): InspectableOutbox {
+  const records = new Map<string, JourneyAutosaveOutboxRecord>();
+  if (initial) records.set(initial.journeyId, initial);
+  return {
+    get: vi.fn(async (journeyId) => records.get(journeyId)),
+    put: vi.fn(async (record) => { records.set(record.journeyId, record); }),
+    compareAndDelete: vi.fn(async (journeyId, generation) => {
+      if (records.get(journeyId)?.generation !== generation) return false;
+      records.delete(journeyId);
+      return true;
+    }),
+    peek: (journeyId) => records.get(journeyId),
+  };
+}
+
+function controllableMatchMedia(initialMatches: boolean) {
+  let matches = initialMatches;
+  const listeners = new Set<() => void>();
+  const result = {
+    get matches() { return matches; },
+    media: '(max-width: 640px)',
+    addEventListener: vi.fn((_type: string, listener: () => void) => listeners.add(listener)),
+    removeEventListener: vi.fn((_type: string, listener: () => void) => listeners.delete(listener)),
+  };
+  return {
+    matchMedia: vi.fn(() => result),
+    setMatches(next: boolean) {
+      matches = next;
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+function renderRoute(
+  editor: JourneyEditorRepository | null = editorStub(),
+  path = '/studio/journeys/private-tokyo',
+  outbox: JourneyAutosaveOutboxPort = outboxStub(),
+) {
   return render(
-    <RepositoryProvider services={{ query: fixtureJourneyRepository, editor: editor ?? undefined }}>
+    <RepositoryProvider services={{
+      query: fixtureJourneyRepository,
+      editor: editor ?? undefined,
+      outbox: editor ? outbox : undefined,
+    }}>
       <MemoryRouter initialEntries={[path]}><App /></MemoryRouter>
     </RepositoryProvider>,
   );
@@ -109,7 +159,6 @@ describe('JourneyEditorPage', () => {
   afterEach(async () => {
     cleanup();
     await flushMicrotasks();
-    sessionStorage.clear();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -143,7 +192,7 @@ describe('JourneyEditorPage', () => {
     ));
     const editor = editorStub({ getPrivateJourneyStory });
     render(
-      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
+      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor, outbox: outboxStub() }}>
         <MemoryRouter initialEntries={['/studio/journeys/private-tokyo']}>
           <RouteSwitcher />
           <App />
@@ -476,19 +525,21 @@ describe('JourneyEditorPage', () => {
       return persisted;
     });
     const editor = editorStub({ getPrivateJourneyStory, updateJourney });
-    const firstView = renderRoute(editor);
+    const outbox = outboxStub();
+    const firstView = renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
     await screen.findByRole('heading', { name: '東京夜行' });
     vi.useFakeTimers();
 
     fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '重新掛載後復原' } });
-    expect(sessionStorage).toHaveLength(1);
+    await act(flushMicrotasks);
+    expect(outbox.peek('private-tokyo')?.envelope.patch).toEqual({ title: '重新掛載後復原' });
     firstView.unmount();
     await act(flushMicrotasks);
     expect(updateJourney).toHaveBeenCalledTimes(1);
-    expect(sessionStorage).toHaveLength(1);
+    expect(outbox.peek('private-tokyo')).toBeDefined();
 
     rejectWrite = false;
-    renderRoute(editor);
+    renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
     await act(flushMicrotasks);
     expect(screen.getByLabelText('旅程標題')).toHaveValue('重新掛載後復原');
     await act(() => vi.advanceTimersByTimeAsync(500));
@@ -496,7 +547,131 @@ describe('JourneyEditorPage', () => {
 
     expect(updateJourney).toHaveBeenCalledTimes(2);
     expect(updateJourney.mock.calls[1][1]).toEqual({ title: '重新掛載後復原' });
-    expect(sessionStorage).toHaveLength(0);
+    expect(outbox.peek('private-tokyo')).toBeUndefined();
+  });
+
+  it('surfaces outbox persistence failure, keeps the unload guard, and retries before saving', async () => {
+    const outbox = outboxStub();
+    vi.mocked(outbox.put).mockRejectedValueOnce(new Error('IndexedDB unavailable'));
+    const editor = editorStub();
+    renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '保留在記憶體' } });
+    await act(flushMicrotasks);
+
+    expect(screen.getByText('儲存失敗')).toBeInTheDocument();
+    expect(screen.getByText('自動儲存失敗')).toHaveAttribute('aria-live', 'assertive');
+    const beforeUnload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(true);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(editor.updateJourney).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '重試儲存' }));
+    await act(flushMicrotasks);
+    expect(outbox.put).toHaveBeenCalledTimes(2);
+    expect(editor.updateJourney).toHaveBeenCalledWith(
+      'private-tokyo',
+      { title: '保留在記憶體' },
+      { expectedUpdatedAt: story.journey.updatedAt },
+    );
+  });
+
+  it('keeps one autosave owner and protects a newer generation across mobile guidance changes', async () => {
+    const media = controllableMatchMedia(false);
+    vi.stubGlobal('matchMedia', media.matchMedia);
+    const firstWrite = deferred<Journey>();
+    let persisted = story.journey;
+    const getPrivateJourneyStory = vi.fn(async () => ({ ...story, journey: persisted }));
+    const updateJourney = vi.fn()
+      .mockImplementationOnce(() => firstWrite.promise)
+      .mockImplementation(async (_id: string, patch: JourneyPatch) => {
+        persisted = { ...persisted, ...patch, updatedAt: versionAfter(persisted.updatedAt) };
+        return persisted;
+      });
+    const editor = editorStub({ getPrivateJourneyStory, updateJourney });
+    const outbox = outboxStub();
+    renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '第一個版本' } });
+    await act(flushMicrotasks);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+    const firstGeneration = outbox.peek('private-tokyo')!.generation;
+    const readsBeforeResponsiveChange = getPrivateJourneyStory.mock.calls.length;
+
+    act(() => media.setMatches(true));
+    expect(screen.getByRole('heading', { name: '請使用電腦整理旅程' })).toBeInTheDocument();
+    act(() => media.setMatches(false));
+    expect(screen.getByLabelText('旅程標題')).toHaveValue('第一個版本');
+    expect(getPrivateJourneyStory).toHaveBeenCalledTimes(readsBeforeResponsiveChange);
+    expect(outbox.peek('private-tokyo')?.generation).toBe(firstGeneration);
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '響應式切換後的新版本' } });
+    await act(flushMicrotasks);
+    expect(outbox.peek('private-tokyo')?.generation).not.toBe(firstGeneration);
+
+    persisted = {
+      ...persisted,
+      title: '第一個版本',
+      updatedAt: versionAfter(persisted.updatedAt),
+    };
+    await act(async () => { firstWrite.resolve(persisted); await firstWrite.promise; await flushMicrotasks(); });
+    expect(screen.getByLabelText('旅程標題')).toHaveValue('響應式切換後的新版本');
+    expect(outbox.peek('private-tokyo')).toBeDefined();
+    expect(outbox.peek('private-tokyo')?.generation).not.toBe(firstGeneration);
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+    expect(updateJourney).toHaveBeenCalledTimes(2);
+    expect(outbox.peek('private-tokyo')).toBeUndefined();
+  });
+
+  it('does not let an old editor instance clear a newer remount generation', async () => {
+    const oldWrite = deferred<Journey>();
+    let persisted = story.journey;
+    const getPrivateJourneyStory = vi.fn(async () => ({ ...story, journey: persisted }));
+    const updateJourney = vi.fn()
+      .mockImplementationOnce(() => oldWrite.promise)
+      .mockImplementation(async (_id: string, patch: JourneyPatch) => {
+        persisted = { ...persisted, ...patch, updatedAt: versionAfter(persisted.updatedAt) };
+        return persisted;
+      });
+    const editor = editorStub({ getPrivateJourneyStory, updateJourney });
+    const outbox = outboxStub();
+    const oldView = renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '跨實例復原' } });
+    await act(flushMicrotasks);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+    const oldGeneration = outbox.peek('private-tokyo')!.generation;
+    oldView.unmount();
+
+    renderRoute(editor, '/studio/journeys/private-tokyo', outbox);
+    await act(flushMicrotasks);
+    expect(screen.getByLabelText('旅程標題')).toHaveValue('跨實例復原');
+    const newerGeneration = outbox.peek('private-tokyo')!.generation;
+    expect(newerGeneration).not.toBe(oldGeneration);
+
+    persisted = {
+      ...persisted,
+      title: '跨實例復原',
+      updatedAt: versionAfter(persisted.updatedAt),
+    };
+    await act(async () => { oldWrite.resolve(persisted); await oldWrite.promise; await flushMicrotasks(); });
+    expect(outbox.peek('private-tokyo')?.generation).toBe(newerGeneration);
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+    expect(updateJourney).toHaveBeenCalledTimes(1);
+    expect(outbox.peek('private-tokyo')).toBeUndefined();
   });
 
   it('marks and describes both date inputs when the range is invalid', async () => {

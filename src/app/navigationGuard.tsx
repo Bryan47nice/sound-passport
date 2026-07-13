@@ -15,9 +15,11 @@ import {
   type Location,
   type NavigateFunction,
   type NavigateOptions,
+  NavigationType,
   type To,
   useLocation,
   useNavigate,
+  useNavigationType,
 } from 'react-router';
 
 interface NavigationGuardRegistration {
@@ -32,8 +34,42 @@ interface OwnedNavigationGuard {
 
 interface NavigationGuardContextValue {
   routeLocation: Location;
-  requestNavigation: (commit: () => void) => void;
+  requestNavigation: (request: AppNavigationRequest) => void;
   updateGuard: (owner: symbol, registration: NavigationGuardRegistration | undefined) => void;
+}
+
+interface HistoryEntry {
+  location: Location;
+  index: number | undefined;
+}
+
+interface AppNavigationRequest {
+  kind: 'app';
+  action: NavigationType.Push | NavigationType.Replace;
+  commit: () => void;
+}
+
+interface PopNavigationRequest {
+  kind: 'pop';
+  entry: HistoryEntry;
+}
+
+type DesiredTransition = AppNavigationRequest | PopNavigationRequest;
+
+interface ActiveTransition {
+  token: symbol;
+  committed: HistoryEntry;
+  desired: DesiredTransition;
+  flushPromise: Promise<void> | undefined;
+  phase: 'flushing' | 'settling-success' | 'settling-failure' | 'applying';
+}
+
+interface NavigationSuppression {
+  token: symbol;
+  transitionToken: symbol;
+  action: NavigationType;
+  target?: HistoryEntry;
+  resume: (entry: HistoryEntry) => void;
 }
 
 const NavigationGuardContext = createContext<NavigationGuardContextValue | null>(null);
@@ -48,7 +84,27 @@ function sameRoute(left: Location, right: Location) {
 
 function browserHistoryIndex(location: Location) {
   const state = window.history.state as { idx?: unknown; key?: unknown } | null;
-  return state?.key === location.key && typeof state.idx === 'number' ? state.idx : undefined;
+  if (typeof state?.idx !== 'number') return undefined;
+  if (state.key === location.key) return state.idx;
+  return location.key === 'default' && state.key === undefined ? state.idx : undefined;
+}
+
+function historyEntry(location: Location): HistoryEntry {
+  return { location, index: browserHistoryIndex(location) };
+}
+
+function sameHistoryEntry(left: HistoryEntry, right: HistoryEntry) {
+  if (left.index !== undefined && right.index !== undefined) {
+    return left.index === right.index && sameRoute(left.location, right.location);
+  }
+  return left.location.key === right.location.key && sameRoute(left.location, right.location);
+}
+
+function matchesHistoryTarget(actual: HistoryEntry, target: HistoryEntry) {
+  if (actual.index !== undefined && target.index !== undefined) {
+    return actual.index === target.index && sameRoute(actual.location, target.location);
+  }
+  return sameRoute(actual.location, target.location);
 }
 
 function isPlainPrimaryClick(event: MouseEvent<HTMLAnchorElement>) {
@@ -57,24 +113,173 @@ function isPlainPrimaryClick(event: MouseEvent<HTMLAnchorElement>) {
 
 export function NavigationGuardProvider({ children }: PropsWithChildren) {
   const location = useLocation();
+  const navigationType = useNavigationType();
   const rawNavigate = useNavigate();
   const [routeLocation, setRouteLocation] = useState(location);
   const [guardDirty, setGuardDirty] = useState(false);
   const guardRef = useRef<OwnedNavigationGuard | undefined>(undefined);
-  const routeLocationRef = useRef(routeLocation);
-  const actualLocationRef = useRef(location);
-  const acceptedHistoryIndexRef = useRef(browserHistoryIndex(location));
-  const approvedNavigationRef = useRef(false);
-  const transitionRef = useRef<Promise<void> | undefined>(undefined);
+  const committedEntryRef = useRef(historyEntry(location));
+  const actualEntryRef = useRef(historyEntry(location));
+  const transitionRef = useRef<ActiveTransition | undefined>(undefined);
+  const suppressionRef = useRef<NavigationSuppression | undefined>(undefined);
+  const mountedRef = useRef(true);
+  const settleTransitionRef = useRef<(transition: ActiveTransition, succeeded: boolean) => void>(() => {});
+  const applySuccessfulTransitionRef = useRef<(transition: ActiveTransition) => void>(() => {});
+  const startTransitionRef = useRef<(desired: DesiredTransition) => void>(() => {});
 
-  routeLocationRef.current = routeLocation;
-  actualLocationRef.current = location;
+  actualEntryRef.current = historyEntry(location);
 
-  const acceptLocation = useCallback((nextLocation: Location) => {
-    routeLocationRef.current = nextLocation;
-    acceptedHistoryIndexRef.current = browserHistoryIndex(nextLocation);
-    setRouteLocation(nextLocation);
+  const acceptEntry = useCallback((entry: HistoryEntry) => {
+    if (!mountedRef.current) return;
+    committedEntryRef.current = entry;
+    setRouteLocation(entry.location);
   }, []);
+
+  const finishTransition = useCallback((transition: ActiveTransition) => {
+    if (transitionRef.current?.token !== transition.token) return;
+    if (suppressionRef.current?.transitionToken === transition.token) {
+      suppressionRef.current = undefined;
+    }
+    transitionRef.current = undefined;
+  }, []);
+
+  const navigateWithoutFlush = useCallback((
+    transition: ActiveTransition,
+    target: HistoryEntry,
+    resume: (entry: HistoryEntry) => void,
+  ) => {
+    if (transitionRef.current?.token !== transition.token) return;
+    const actual = actualEntryRef.current;
+    if (sameHistoryEntry(actual, target)) {
+      resume(actual);
+      return;
+    }
+
+    const delta = actual.index !== undefined && target.index !== undefined
+      ? target.index - actual.index
+      : 0;
+    const action = delta === 0 ? NavigationType.Replace : NavigationType.Pop;
+    const suppression: NavigationSuppression = {
+      token: Symbol('navigation-suppression'),
+      transitionToken: transition.token,
+      action,
+      target,
+      resume,
+    };
+    suppressionRef.current = suppression;
+
+    try {
+      if (delta !== 0) rawNavigate(delta);
+      else rawNavigate(routePath(target.location), {
+        replace: true,
+        state: target.location.state,
+      });
+    } catch {
+      if (suppressionRef.current?.token === suppression.token) suppressionRef.current = undefined;
+      finishTransition(transition);
+    }
+  }, [finishTransition, rawNavigate]);
+
+  const applySuccessfulTransition = useCallback((transition: ActiveTransition) => {
+    if (!mountedRef.current || transitionRef.current?.token !== transition.token) return;
+    const desired = transition.desired;
+    const actual = actualEntryRef.current;
+
+    if (desired.kind === 'pop') {
+      if (sameHistoryEntry(actual, desired.entry)) {
+        acceptEntry(actual);
+        finishTransition(transition);
+        return;
+      }
+      transition.phase = 'applying';
+      navigateWithoutFlush(transition, desired.entry, (entry) => {
+        acceptEntry(entry);
+        finishTransition(transition);
+      });
+      return;
+    }
+
+    if (!sameHistoryEntry(actual, transition.committed)) {
+      transition.phase = 'settling-success';
+      navigateWithoutFlush(transition, transition.committed, (entry) => {
+        transition.committed = entry;
+        acceptEntry(entry);
+        applySuccessfulTransitionRef.current(transition);
+      });
+      return;
+    }
+
+    transition.phase = 'applying';
+    const suppression: NavigationSuppression = {
+      token: Symbol('navigation-suppression'),
+      transitionToken: transition.token,
+      action: desired.action,
+      resume: (entry) => {
+        acceptEntry(entry);
+        finishTransition(transition);
+      },
+    };
+    suppressionRef.current = suppression;
+    try {
+      desired.commit();
+    } catch {
+      if (suppressionRef.current?.token === suppression.token) suppressionRef.current = undefined;
+      finishTransition(transition);
+    }
+  }, [acceptEntry, finishTransition, navigateWithoutFlush]);
+  applySuccessfulTransitionRef.current = applySuccessfulTransition;
+
+  const settleTransition = useCallback((transition: ActiveTransition, succeeded: boolean) => {
+    if (!mountedRef.current || transitionRef.current?.token !== transition.token) return;
+    if (succeeded) {
+      transition.phase = 'settling-success';
+      applySuccessfulTransitionRef.current(transition);
+      return;
+    }
+
+    transition.phase = 'settling-failure';
+    const actual = actualEntryRef.current;
+    if (sameHistoryEntry(actual, transition.committed)) {
+      acceptEntry(actual);
+      finishTransition(transition);
+      return;
+    }
+    navigateWithoutFlush(transition, transition.committed, (entry) => {
+      transition.committed = entry;
+      acceptEntry(entry);
+      finishTransition(transition);
+    });
+  }, [acceptEntry, finishTransition, navigateWithoutFlush]);
+  settleTransitionRef.current = settleTransition;
+
+  const startTransition = useCallback((desired: DesiredTransition) => {
+    const guard = guardRef.current?.registration;
+    if (!guard?.dirty) {
+      if (desired.kind === 'app') desired.commit();
+      else acceptEntry(desired.entry);
+      return;
+    }
+
+    const transition: ActiveTransition = {
+      token: Symbol('navigation-transition'),
+      committed: committedEntryRef.current,
+      desired,
+      flushPromise: undefined,
+      phase: 'flushing',
+    };
+    transitionRef.current = transition;
+    try {
+      const flushPromise = guard.flush();
+      transition.flushPromise = flushPromise;
+      void flushPromise.then(
+        () => settleTransitionRef.current(transition, true),
+        () => settleTransitionRef.current(transition, false),
+      );
+    } catch {
+      settleTransitionRef.current(transition, false);
+    }
+  }, [acceptEntry]);
+  startTransitionRef.current = startTransition;
 
   const updateGuard = useCallback((
     owner: symbol,
@@ -90,77 +295,65 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
     setGuardDirty(registration.dirty);
   }, []);
 
-  const requestNavigation = useCallback((commit: () => void) => {
-    if (transitionRef.current) return;
+  const requestNavigation = useCallback((request: AppNavigationRequest) => {
+    const activeTransition = transitionRef.current;
+    if (activeTransition) {
+      if (activeTransition.phase === 'flushing' || activeTransition.phase === 'settling-success') {
+        activeTransition.desired = request;
+      }
+      return;
+    }
     const guard = guardRef.current?.registration;
     if (!guard?.dirty) {
-      commit();
+      request.commit();
       return;
     }
-
-    let flushResult: Promise<void>;
-    try {
-      flushResult = guard.flush();
-    } catch {
-      return;
-    }
-
-    const transition = flushResult
-      .then(() => {
-        approvedNavigationRef.current = true;
-        commit();
-      })
-      .catch(() => {
-        // The mounted editor keeps the retryable failure visible.
-      });
-    transitionRef.current = transition;
-    void transition.then(() => {
-      if (transitionRef.current === transition) transitionRef.current = undefined;
-    });
+    startTransitionRef.current(request);
   }, []);
 
   useEffect(() => {
-    if (sameRoute(location, routeLocationRef.current)) return;
-    if (approvedNavigationRef.current) {
-      approvedNavigationRef.current = false;
-      acceptLocation(location);
+    const actual = historyEntry(location);
+    actualEntryRef.current = actual;
+    const suppression = suppressionRef.current;
+    if (
+      suppression &&
+      suppression.action === navigationType &&
+      (!suppression.target || matchesHistoryTarget(actual, suppression.target))
+    ) {
+      suppressionRef.current = undefined;
+      const transition = transitionRef.current;
+      if (transition?.token === suppression.transitionToken) suppression.resume(actual);
       return;
     }
 
+    const activeTransition = transitionRef.current;
+    if (activeTransition) {
+      if (
+        navigationType === NavigationType.Pop &&
+        (activeTransition.phase === 'flushing' || activeTransition.phase === 'settling-success')
+      ) {
+        activeTransition.desired = { kind: 'pop', entry: actual };
+      }
+      return;
+    }
+
+    if (sameHistoryEntry(actual, committedEntryRef.current)) return;
     const guard = guardRef.current?.registration;
     if (!guard?.dirty) {
-      acceptLocation(location);
+      acceptEntry(actual);
       return;
     }
-    if (transitionRef.current) return;
+    startTransitionRef.current({ kind: 'pop', entry: actual });
+  }, [acceptEntry, location, navigationType]);
 
-    const attemptedLocation = location;
-    const acceptedLocation = routeLocationRef.current;
-    const attemptedHistoryIndex = browserHistoryIndex(attemptedLocation);
-    let flushResult: Promise<void>;
-    try {
-      flushResult = guard.flush();
-    } catch {
-      flushResult = Promise.reject();
-    }
-
-    const transition = flushResult
-      .then(() => {
-        if (sameRoute(actualLocationRef.current, attemptedLocation)) acceptLocation(attemptedLocation);
-      })
-      .catch(() => {
-        const acceptedHistoryIndex = acceptedHistoryIndexRef.current;
-        const delta = acceptedHistoryIndex !== undefined && attemptedHistoryIndex !== undefined
-          ? acceptedHistoryIndex - attemptedHistoryIndex
-          : 0;
-        if (delta !== 0) rawNavigate(delta);
-        else rawNavigate(routePath(acceptedLocation), { replace: true });
-      });
-    transitionRef.current = transition;
-    void transition.then(() => {
-      if (transitionRef.current === transition) transitionRef.current = undefined;
-    });
-  }, [acceptLocation, location, rawNavigate]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      transitionRef.current = undefined;
+      suppressionRef.current = undefined;
+    };
+  }, []);
 
   useEffect(() => {
     if (!guardDirty) return;
@@ -203,7 +396,11 @@ export function useGuardedNavigate(): NavigateFunction {
       rawNavigate(to, options);
       return;
     }
-    requestNavigation(() => rawNavigate(to, options));
+    requestNavigation({
+      kind: 'app',
+      action: options?.replace ? NavigationType.Replace : NavigationType.Push,
+      commit: () => rawNavigate(to, options),
+    });
   }) as NavigateFunction, [rawNavigate, requestNavigation]);
 }
 

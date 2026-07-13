@@ -32,10 +32,13 @@ function GuardHarness({ dirty, flush }: { dirty: boolean; flush: () => Promise<v
       <output aria-label="畫面路徑">{routeLocation.pathname}</output>
       <GuardedLink to="/next">連結前往下一頁</GuardedLink>
       <button type="button" onClick={() => navigate('/next')}>程式前往下一頁</button>
+      <button type="button" onClick={() => navigate('/middle')}>程式前往中間頁</button>
+      <button type="button" onClick={() => navigate('/current')}>程式回到編輯頁</button>
       <button type="button" onClick={() => navigate('/next', { replace: true })}>程式取代下一頁</button>
       <button type="button" onClick={() => rawNavigate(-1)}>瀏覽器上一頁</button>
       <Routes location={routeLocation}>
         <Route path="/previous" element={<h1>上一頁</h1>} />
+        <Route path="/middle" element={<h1>中間頁</h1>} />
         <Route path="/current" element={<h1>編輯頁</h1>} />
         <Route path="/next" element={<h1>下一頁</h1>} />
       </Routes>
@@ -57,6 +60,25 @@ function renderGuard(dirty: boolean, flush: () => Promise<void>) {
       <GuardTree dirty={dirty} flush={flush} />
     </MemoryRouter>,
   );
+}
+
+async function renderBrowserHistory(flush: () => Promise<void>) {
+  window.history.replaceState(null, '', '/previous');
+  const view = render(
+    <BrowserRouter>
+      <GuardTree dirty={false} flush={flush} />
+    </BrowserRouter>,
+  );
+  fireEvent.click(screen.getByRole('button', { name: '程式前往中間頁' }));
+  await waitFor(() => expect(window.location.pathname).toBe('/middle'));
+  fireEvent.click(screen.getByRole('button', { name: '程式回到編輯頁' }));
+  await waitFor(() => expect(window.location.pathname).toBe('/current'));
+  view.rerender(
+    <BrowserRouter>
+      <GuardTree dirty flush={flush} />
+    </BrowserRouter>,
+  );
+  return view;
 }
 
 describe('useDirtyNavigationGuard', () => {
@@ -119,6 +141,21 @@ describe('useDirtyNavigationGuard', () => {
 
     await act(async () => { pending.resolve(undefined); await pending.promise; });
     expect(screen.getByLabelText('瀏覽器路徑')).toHaveTextContent('/next');
+  });
+
+  it('replaces an active app transition with the latest PUSH or REPLACE request', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    renderGuard(true, flush);
+
+    fireEvent.click(screen.getByRole('button', { name: '程式前往中間頁' }));
+    fireEvent.click(screen.getByRole('button', { name: '程式取代下一頁' }));
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('瀏覽器路徑')).toHaveTextContent('/current');
+
+    await act(async () => { pending.resolve(undefined); await pending.promise; });
+    expect(screen.getByLabelText('瀏覽器路徑')).toHaveTextContent('/next');
+    expect(screen.getByRole('heading', { name: '下一頁' })).toBeInTheDocument();
   });
 
   it('keeps the current route mounted during POP and accepts it after flush succeeds', async () => {
@@ -188,6 +225,71 @@ describe('useDirtyNavigationGuard', () => {
     expect(locations()[0]).toHaveTextContent('/next');
     expect(locations()[1]).toHaveTextContent('/next');
     expect(screen.getByRole('heading')).toHaveTextContent(/.+/);
+  });
+
+  it('uses the latest observed target when BrowserRouter receives two POPs during one flush', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    const view = await renderBrowserHistory(flush);
+    const locations = () => view.container.querySelectorAll('output');
+
+    act(() => window.history.back());
+    await waitFor(() => expect(locations()[0]).toHaveTextContent('/middle'));
+    act(() => window.history.back());
+    await waitFor(() => expect(locations()[0]).toHaveTextContent('/previous'));
+    expect(locations()[1]).toHaveTextContent('/current');
+    expect(flush).toHaveBeenCalledTimes(1);
+
+    await act(async () => { pending.resolve(undefined); await pending.promise; });
+
+    await waitFor(() => expect(window.location.pathname).toBe('/previous'));
+    expect(locations()[0]).toHaveTextContent('/previous');
+    expect(locations()[1]).toHaveTextContent('/previous');
+    expect(screen.getByRole('heading', { name: '上一頁' })).toBeInTheDocument();
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the latest BrowserRouter POP supersede an app PUSH during the active flush', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    const view = await renderBrowserHistory(flush);
+    const locations = () => view.container.querySelectorAll('output');
+
+    fireEvent.click(screen.getByRole('button', { name: '程式前往下一頁' }));
+    expect(flush).toHaveBeenCalledTimes(1);
+    act(() => window.history.back());
+    await waitFor(() => expect(locations()[0]).toHaveTextContent('/middle'));
+    expect(locations()[1]).toHaveTextContent('/current');
+
+    await act(async () => { pending.resolve(undefined); await pending.promise; });
+
+    await waitFor(() => expect(window.location.pathname).toBe('/middle'));
+    expect(locations()[1]).toHaveTextContent('/middle');
+    expect(screen.getByRole('heading', { name: '中間頁' })).toBeInTheDocument();
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles a failed BrowserRouter double POP to the editor URL without loops', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    const view = await renderBrowserHistory(flush);
+    const locations = () => view.container.querySelectorAll('output');
+
+    act(() => window.history.back());
+    await waitFor(() => expect(locations()[0]).toHaveTextContent('/middle'));
+    act(() => window.history.back());
+    await waitFor(() => expect(locations()[0]).toHaveTextContent('/previous'));
+
+    await act(async () => {
+      pending.reject(new Error('write failed'));
+      try { await pending.promise; } catch {}
+    });
+
+    await waitFor(() => expect(window.location.pathname).toBe('/current'));
+    expect(locations()[0]).toHaveTextContent('/current');
+    expect(locations()[1]).toHaveTextContent('/current');
+    expect(screen.getByRole('heading', { name: '編輯頁' })).toBeInTheDocument();
+    expect(flush).toHaveBeenCalledTimes(1);
   });
 
   it('registers only beforeunload globally while dirty and removes it when clean', () => {

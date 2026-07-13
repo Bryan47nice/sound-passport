@@ -1,5 +1,6 @@
 import { createContext, useContext, type PropsWithChildren } from 'react';
 import type {
+  JourneyAutosaveOutboxPort,
   JourneyEditorRepository,
   JourneyRepository,
   PhotoAssetRepository,
@@ -9,6 +10,7 @@ import type {
 export interface RepositoryServices {
   query: JourneyRepository;
   editor?: JourneyEditorRepository;
+  outbox?: JourneyAutosaveOutboxPort;
   photos?: PhotoAssetRepository;
   privateData?: PrivateDataPort;
 }
@@ -35,6 +37,16 @@ export function useJourneyEditorRepository(): JourneyEditorRepository {
 
 export function useOptionalJourneyEditorRepository(): JourneyEditorRepository | undefined {
   return useContext(Context)?.editor;
+}
+
+export function useJourneyAutosaveOutbox(): JourneyAutosaveOutboxPort {
+  const outbox = useContext(Context)?.outbox;
+  if (!outbox) throw new Error('JourneyAutosaveOutboxPort is not available');
+  return outbox;
+}
+
+export function useOptionalJourneyAutosaveOutbox(): JourneyAutosaveOutboxPort | undefined {
+  return useContext(Context)?.outbox;
 }
 
 export function usePhotoAssetRepository(): PhotoAssetRepository {

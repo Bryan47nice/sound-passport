@@ -35,6 +35,9 @@ function createPrivateRepository(): IndexedDbJourneyRepository {
     exportSnapshot: vi.fn(),
     importSnapshot: vi.fn(),
     clearPrivateData: vi.fn(),
+    get: vi.fn(),
+    put: vi.fn(),
+    compareAndDelete: vi.fn(),
   } as IndexedDbJourneyRepository;
 }
 
@@ -69,6 +72,7 @@ describe('bootstrapRepositoryServices', () => {
     const upgraded = renderServices.mock.calls[1][0];
     expect(renderServices).toHaveBeenCalledTimes(2);
     expect(upgraded.editor).toBe(privateRepository);
+    expect(upgraded.outbox).toBe(privateRepository);
     expect(upgraded.photos).toBe(privateRepository);
     expect(upgraded.privateData).toBe(privateRepository);
     expect(await upgraded.query.listCountrySummaries()).toEqual(

@@ -6,6 +6,7 @@ import type { NewJourney, NormalizedPhotoInput, PrivateJourneySnapshot } from '.
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
 import { DB_VERSION, openSoundPassportDb, type SoundPassportDb } from './indexedDb';
 import { createIndexedDbJourneyRepository } from './indexedDbJourneyRepository';
+import type { JourneyAutosaveOutboxRecord } from './ports';
 
 const databaseNames: string[] = [];
 const openDatabases: Array<{ close(): void }> = [];
@@ -44,6 +45,22 @@ function photoInput(fileName: string, contents = fileName): NormalizedPhotoInput
     width: 1200,
     height: 800,
     byteSize: blob.size,
+  };
+}
+
+function outboxRecord(
+  journeyId: string,
+  generation: string,
+  title: string,
+): JourneyAutosaveOutboxRecord {
+  return {
+    journeyId,
+    generation,
+    envelope: {
+      patch: { title },
+      base: { title: 'Test Journey' },
+    },
+    updatedAt: '2026-07-13T00:00:00.000Z',
   };
 }
 
@@ -145,6 +162,62 @@ afterEach(async () => {
 });
 
 describe('indexedDbJourneyRepository', () => {
+  it('atomically overwrites one journey outbox record with its latest generation', async () => {
+    const { db, repository } = await openRepository('outbox-overwrite');
+    const first = outboxRecord('journey-1', 'generation-1', 'First pending title');
+    const latest = outboxRecord('journey-1', 'generation-2', 'Latest pending title');
+    const transactionSpy = vi.spyOn(db, 'transaction');
+
+    await repository.put(first);
+    await repository.put(latest);
+
+    expect(await repository.get('journey-1')).toEqual(latest);
+    expect(transactionSpy.mock.calls.filter(([stores, mode]) => (
+      stores === 'journeyAutosaveOutbox' && mode === 'readwrite'
+    ))).toHaveLength(2);
+  });
+
+  it('deletes an outbox record only when its generation exactly matches', async () => {
+    const { repository } = await openRepository('outbox-compare-delete');
+    const latest = outboxRecord('journey-1', 'generation-2', 'Latest pending title');
+    await repository.put(latest);
+
+    await expect(repository.compareAndDelete('journey-1', 'generation-1')).resolves.toBe(false);
+    await expect(repository.get('journey-1')).resolves.toEqual(latest);
+    await expect(repository.compareAndDelete('journey-1', 'generation-2')).resolves.toBe(true);
+    await expect(repository.get('journey-1')).resolves.toBeUndefined();
+  });
+
+  it('maps an outbox quota failure and leaves the prior generation intact', async () => {
+    const { repository } = await openRepository('outbox-quota');
+    const first = outboxRecord('journey-1', 'generation-1', 'Recoverable title');
+    await repository.put(first);
+    const quotaError = new DOMException('quota reached', 'QuotaExceededError');
+    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementationOnce(() => { throw quotaError; });
+
+    await expect(repository.put(outboxRecord('journey-1', 'generation-2', 'Lost title')))
+      .rejects.toMatchObject({ name: 'StorageCapacityError', cause: quotaError });
+    await expect(repository.get('journey-1')).resolves.toEqual(first);
+  });
+
+  it('clears the private outbox but never includes it in export snapshots', async () => {
+    const { repository } = await openRepository('outbox-private-data');
+    const journey = await repository.createJourney(journeyInput());
+    await repository.put(outboxRecord(journey.id, 'generation-1', 'Private pending title'));
+
+    const exported = await repository.exportSnapshot();
+    expect(Object.keys(exported).sort()).toEqual(['journeys', 'moments', 'photos', 'songs']);
+    expect(exported.journeys).toHaveLength(1);
+    await expect(repository.get(journey.id)).resolves.toBeDefined();
+
+    await repository.clearPrivateData();
+
+    await expect(repository.get(journey.id)).resolves.toBeUndefined();
+    await expect(repository.exportSnapshot()).resolves.toEqual({
+      journeys: [], moments: [], songs: [], photos: [],
+    });
+  });
+
   it('persists a new private draft after the database is reopened', async () => {
     const name = databaseName('reopen');
     const db = trackDatabase(await openSoundPassportDb(name));
@@ -634,5 +707,39 @@ describe('indexedDbJourneyRepository', () => {
       expect.arrayContaining(['journeyId', 'journeyIdSortOrder']),
     );
     db.close();
+  });
+
+  it('upgrades a version 2 database by adding the private outbox store without changing content', async () => {
+    const name = databaseName('outbox-migration');
+    const existingJourney = {
+      ...journeyInput(),
+      id: 'existing-v2-journey',
+      status: 'draft' as const,
+      source: 'private' as const,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+    };
+    const version2Db = trackDatabase(await openDB(name, 2, {
+      upgrade(db) {
+        const journeys = db.createObjectStore('journeys', { keyPath: 'id' });
+        journeys.createIndex('countryCode', 'countryCode');
+        journeys.createIndex('status', 'status');
+        const moments = db.createObjectStore('moments', { keyPath: 'id' });
+        moments.createIndex('journeyId', 'journeyId');
+        moments.createIndex('journeyIdSortOrder', ['journeyId', 'sortOrder']);
+        db.createObjectStore('songs', { keyPath: 'id' });
+        db.createObjectStore('photos', { keyPath: 'id' });
+        journeys.put(existingJourney);
+      },
+    }));
+    version2Db.close();
+
+    const db = trackDatabase(await openSoundPassportDb(name));
+    const repository = createIndexedDbJourneyRepository({ db });
+
+    expect(DB_VERSION).toBe(3);
+    expect(db.objectStoreNames.contains('journeyAutosaveOutbox')).toBe(true);
+    await expect(repository.listPrivateJourneys()).resolves.toEqual([existingJourney]);
+    await expect(repository.get(existingJourney.id)).resolves.toBeUndefined();
   });
 });

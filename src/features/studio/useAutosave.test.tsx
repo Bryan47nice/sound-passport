@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StrictMode, useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useAutosave } from './useAutosave';
+import { useAutosave, type AutosaveRecoveryPersistence } from './useAutosave';
 
 interface SaveContext {
   revision: number;
@@ -20,21 +20,25 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+async function flushMicrotasks() {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+}
+
 const replaceLatest = (_current: string, next: string) => next;
 
 function AutosaveHarness({
   save,
   forceSave,
-  onUnsavedChange,
+  recovery,
   capture,
 }: {
   save: Save;
   forceSave?: Save;
-  onUnsavedChange?: (value: string | undefined) => void;
+  recovery?: AutosaveRecoveryPersistence<string>;
   capture?: (api: AutosaveApi) => void;
 }) {
   const [title, setTitle] = useState('東京夜行');
-  const autosave = useAutosave({ save, forceSave, delay: 500, merge: replaceLatest, onUnsavedChange });
+  const autosave = useAutosave({ save, forceSave, delay: 500, merge: replaceLatest, recovery });
   capture?.(autosave);
 
   return (
@@ -328,26 +332,122 @@ describe('useAutosave', () => {
     expect(autosave.saveNow('第二版')).toBe(2);
   });
 
-  it('publishes the latest unsaved value and clears it only after confirmed persistence', async () => {
+  it('persists a unique recovery generation before saving and compare-deletes it after success', async () => {
+    vi.useFakeTimers();
+    const recoveryWrite = deferred();
+    const repositoryWrite = deferred();
+    const recovery: AutosaveRecoveryPersistence<string> = {
+      put: vi.fn(() => recoveryWrite.promise),
+      compareAndDelete: vi.fn(async () => true),
+    };
+    const save = vi.fn<Save>(() => repositoryWrite.promise);
+    render(<AutosaveHarness save={save} recovery={recovery} />);
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '第一版' } });
+    expect(recovery.put).toHaveBeenCalledWith('第一版', {
+      generation: expect.any(String),
+      revision: 1,
+    });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(save).not.toHaveBeenCalled();
+
+    await act(async () => { recoveryWrite.resolve(undefined); await recoveryWrite.promise; await flushMicrotasks(); });
+    expect(save).toHaveBeenCalledWith('第一版', { revision: 1 });
+    const generation = vi.mocked(recovery.put).mock.calls[0][1].generation;
+
+    await act(async () => { repositoryWrite.resolve(undefined); await repositoryWrite.promise; await flushMicrotasks(); });
+    expect(recovery.compareAndDelete).toHaveBeenCalledWith(generation);
+    expect(screen.getByLabelText('是否有未儲存變更')).toHaveTextContent('false');
+  });
+
+  it('surfaces outbox persistence failure and retries it before the normal save', async () => {
+    vi.useFakeTimers();
+    const persistenceFailure = new Error('IndexedDB unavailable');
+    const recovery: AutosaveRecoveryPersistence<string> = {
+      put: vi.fn()
+        .mockRejectedValueOnce(persistenceFailure)
+        .mockResolvedValueOnce(undefined),
+      compareAndDelete: vi.fn(async () => true),
+    };
+    const save = vi.fn<Save>(async () => undefined);
+    render(<AutosaveHarness save={save} recovery={recovery} />);
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: 'Still in memory' } });
+    await act(flushMicrotasks);
+    expect(screen.getByLabelText('儲存狀態')).toHaveTextContent('error');
+    expect(screen.getAllByText('自動儲存失敗')).toHaveLength(1);
+    expect(screen.getByLabelText('是否有未儲存變更')).toHaveTextContent('true');
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(save).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '重試儲存' }));
+    await act(flushMicrotasks);
+    expect(recovery.put).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenCalledWith('Still in memory', { revision: 1 });
+  });
+
+  it('retains explicit force mode when its outbox retry fails before the repository call', async () => {
+    vi.useFakeTimers();
+    const recovery: AutosaveRecoveryPersistence<string> = {
+      put: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('outbox write failed'))
+        .mockResolvedValueOnce(undefined),
+      compareAndDelete: vi.fn(async () => true),
+    };
+    const save = vi.fn<Save>().mockRejectedValueOnce(new Error('field conflict'));
+    const forceSave = vi.fn<Save>(async () => undefined);
+    render(<AutosaveHarness save={save} forceSave={forceSave} recovery={recovery} />);
+
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: 'Force this value' } });
+    await act(flushMicrotasks);
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    await act(flushMicrotasks);
+
+    fireEvent.click(screen.getByRole('button', { name: '重試並套用' }));
+    await act(flushMicrotasks);
+    expect(forceSave).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '重試儲存' }));
+    await act(flushMicrotasks);
+    expect(recovery.put).toHaveBeenCalledTimes(3);
+    expect(forceSave).toHaveBeenCalledWith('Force this value', { revision: 1 });
+  });
+
+  it('keeps a newer recovery generation when an older save completes', async () => {
     vi.useFakeTimers();
     const first = deferred();
     const second = deferred();
+    let storedGeneration: string | undefined;
+    const recovery: AutosaveRecoveryPersistence<string> = {
+      put: vi.fn(async (_value, context) => { storedGeneration = context.generation; }),
+      compareAndDelete: vi.fn(async (generation) => {
+        if (storedGeneration !== generation) return false;
+        storedGeneration = undefined;
+        return true;
+      }),
+    };
     const save = vi.fn<Save>()
       .mockImplementationOnce(() => first.promise)
       .mockImplementationOnce(() => second.promise);
-    const onUnsavedChange = vi.fn<(value: string | undefined) => void>();
-    render(<AutosaveHarness save={save} onUnsavedChange={onUnsavedChange} />);
+    render(<AutosaveHarness save={save} recovery={recovery} />);
 
-    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '第一版' } });
-    expect(onUnsavedChange).toHaveBeenLastCalledWith('第一版');
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: 'First value' } });
+    await act(flushMicrotasks);
     await act(() => vi.advanceTimersByTimeAsync(500));
-    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: '未確認最新版' } });
-    expect(onUnsavedChange).toHaveBeenLastCalledWith('未確認最新版');
+    const firstGeneration = vi.mocked(recovery.put).mock.calls[0][1].generation;
 
-    await act(async () => { first.resolve(undefined); await first.promise; });
-    expect(onUnsavedChange).toHaveBeenLastCalledWith('未確認最新版');
+    fireEvent.change(screen.getByLabelText('旅程標題'), { target: { value: 'Newer value' } });
+    await act(flushMicrotasks);
+    expect(storedGeneration).not.toBe(firstGeneration);
+
+    await act(async () => { first.resolve(undefined); await first.promise; await flushMicrotasks(); });
+    expect(recovery.compareAndDelete).toHaveBeenCalledWith(firstGeneration);
+    expect(storedGeneration).toEqual(expect.any(String));
+    expect(storedGeneration).not.toBe(firstGeneration);
+
     await act(() => vi.advanceTimersByTimeAsync(500));
-    await act(async () => { second.resolve(undefined); await second.promise; });
-    expect(onUnsavedChange).toHaveBeenLastCalledWith(undefined);
+    await act(async () => { second.resolve(undefined); await second.promise; await flushMicrotasks(); });
+    expect(storedGeneration).toBeUndefined();
   });
 });

@@ -9,8 +9,16 @@ import {
   useState,
 } from 'react';
 import { useParams } from 'react-router';
-import { useOptionalJourneyEditorRepository } from '../../data/RepositoryContext';
-import { JourneyVersionConflictError, type JourneyEditorRepository } from '../../data/ports';
+import {
+  useOptionalJourneyAutosaveOutbox,
+  useOptionalJourneyEditorRepository,
+} from '../../data/RepositoryContext';
+import {
+  JourneyVersionConflictError,
+  type JourneyAutosaveOutboxPort,
+  type JourneyAutosaveOutboxRecord,
+  type JourneyEditorRepository,
+} from '../../data/ports';
 import { validateJourneyForReview } from '../../domain/journeyValidation';
 import type { Journey, JourneyPatch, JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
@@ -20,6 +28,7 @@ import {
   JourneyPatchConflictError,
   journeyUserPatchKeys,
   journeyPatchBaseMatches,
+  journeyPatchMatchesPersisted,
   mergeJourneyPatchEnvelopes,
   type JourneyPatchEnvelope,
   type JourneyUserPatchKey,
@@ -32,7 +41,12 @@ import { useMobileStudio } from './useMobileStudio';
 
 type LoadState =
   | { kind: 'loading'; journeyId: string }
-  | { kind: 'ready'; journeyId: string; story: JourneyStory }
+  | {
+      kind: 'ready';
+      journeyId: string;
+      story: JourneyStory;
+      recoveredOutbox?: JourneyAutosaveOutboxRecord;
+    }
   | { kind: 'not-found'; journeyId: string }
   | { kind: 'error'; journeyId: string };
 
@@ -79,8 +93,20 @@ function SaveStatus({ autosave }: {
   );
 }
 
-function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorRepository; story: JourneyStory }) {
-  const [recoveredEnvelope] = useState(() => readJourneyOutbox(story.journey.id));
+function JourneyEditorWorkspace({
+  editor,
+  isMobile,
+  outbox,
+  recoveredOutbox,
+  story,
+}: {
+  editor: JourneyEditorRepository;
+  isMobile: boolean;
+  outbox: JourneyAutosaveOutboxPort;
+  recoveredOutbox?: JourneyAutosaveOutboxRecord;
+  story: JourneyStory;
+}) {
+  const recoveredEnvelope = recoveredOutbox?.envelope;
   const initialDraft = recoveredEnvelope
     ? { ...story.journey, ...recoveredEnvelope.patch }
     : story.journey;
@@ -170,6 +196,10 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
     if (!currentStory) throw new Error('Journey is no longer available.');
 
     if (!journeyPatchBaseMatches(envelope, currentStory.journey)) {
+      if (journeyPatchMatchesPersisted(envelope, currentStory.journey)) {
+        rebaseDraft(currentStory.journey, revision);
+        return;
+      }
       rebaseDraft(currentStory.journey, revision, envelope.patch);
       throw new JourneyPatchConflictError();
     }
@@ -185,17 +215,29 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
     await persistEnvelope(envelope, currentStory, revision);
   }, [editor, persistEnvelope, story.journey.id]);
 
-  const handleUnsavedChange = useCallback((envelope: JourneyPatchEnvelope | undefined) => {
-    if (envelope) writeJourneyOutbox(story.journey.id, envelope);
-    else clearJourneyOutbox(story.journey.id);
-  }, [story.journey.id]);
+  const persistRecovery = useCallback((
+    envelope: JourneyPatchEnvelope,
+    { generation }: { generation: string },
+  ) => writeJourneyOutbox(outbox, {
+    journeyId: story.journey.id,
+    generation,
+    envelope,
+    updatedAt: new Date().toISOString(),
+  }), [outbox, story.journey.id]);
+
+  const clearRecovery = useCallback((generation: string) => (
+    clearJourneyOutbox(outbox, story.journey.id, generation)
+  ), [outbox, story.journey.id]);
 
   const autosave = useAutosave({
     save,
     forceSave,
     delay: 500,
     merge: mergeJourneyPatchEnvelopes,
-    onUnsavedChange: handleUnsavedChange,
+    recovery: {
+      put: persistRecovery,
+      compareAndDelete: clearRecovery,
+    },
   });
   useDirtyNavigationGuard({ dirty: autosave.dirty, flush: autosave.flush });
 
@@ -292,6 +334,10 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
       : autosave.errorAnnouncement
     : '';
 
+  if (isMobile) {
+    return <section className="studio-mobile-only"><h1>請使用電腦整理旅程</h1></section>;
+  }
+
   return (
     <section className="journey-editor-page">
       <header className="journey-editor-header">
@@ -384,30 +430,40 @@ function JourneyEditorWorkspace({ editor, story }: { editor: JourneyEditorReposi
 export function JourneyEditorPage({ onBootstrapRetry = () => window.location.reload() }: JourneyEditorPageProps) {
   const { journeyId = '' } = useParams();
   const editor = useOptionalJourneyEditorRepository();
+  const outbox = useOptionalJourneyAutosaveOutbox();
   const isMobile = useMobileStudio();
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [loadState, setLoadState] = useState<LoadState>(() => ({ kind: 'loading', journeyId }));
 
   useEffect(() => {
-    if (!editor || isMobile) return;
+    if (!editor || !outbox) return;
     let active = true;
     setLoadState({ kind: 'loading', journeyId });
-    void editor.getPrivateJourneyStory(journeyId)
-      .then((nextStory) => {
+    void Promise.all([
+      editor.getPrivateJourneyStory(journeyId),
+      readJourneyOutbox(outbox, journeyId),
+    ])
+      .then(([nextStory, recoveredOutbox]) => {
         if (!active) return;
         setLoadState(nextStory
-          ? { kind: 'ready', journeyId, story: nextStory }
+          ? { kind: 'ready', journeyId, story: nextStory, recoveredOutbox }
           : { kind: 'not-found', journeyId });
       })
       .catch(() => {
         if (active) setLoadState({ kind: 'error', journeyId });
-      });
+    });
     return () => { active = false; };
-  }, [editor, isMobile, journeyId, loadAttempt]);
+  }, [editor, journeyId, loadAttempt, outbox]);
 
-  if (isMobile) return <section className="studio-mobile-only"><h1>請使用電腦整理旅程</h1></section>;
+  const currentLoadState: LoadState = loadState.journeyId === journeyId
+    ? loadState
+    : { kind: 'loading', journeyId };
 
-  if (!editor) {
+  if (isMobile && currentLoadState.kind !== 'ready') {
+    return <section className="studio-mobile-only"><h1>請使用電腦整理旅程</h1></section>;
+  }
+
+  if (!editor || !outbox) {
     return (
       <section className="page studio-guidance">
         <h1 className="page-title">本機儲存空間暫時無法使用</h1>
@@ -415,10 +471,6 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
       </section>
     );
   }
-
-  const currentLoadState: LoadState = loadState.journeyId === journeyId
-    ? loadState
-    : { kind: 'loading', journeyId };
 
   if (currentLoadState.kind === 'loading') {
     return <section className="page studio-editor-state"><p>正在載入旅程…</p></section>;
@@ -437,5 +489,14 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
     );
   }
 
-  return <JourneyEditorWorkspace key={currentLoadState.journeyId} editor={editor} story={currentLoadState.story} />;
+  return (
+    <JourneyEditorWorkspace
+      key={currentLoadState.journeyId}
+      editor={editor}
+      isMobile={isMobile}
+      outbox={outbox}
+      recoveredOutbox={currentLoadState.recoveredOutbox}
+      story={currentLoadState.story}
+    />
+  );
 }

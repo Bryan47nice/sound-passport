@@ -46,6 +46,37 @@ export interface JourneyEditorRepository {
   setJourneyStatus(id: string, status: JourneyStatus): Promise<Journey>;
 }
 
+export type JourneyAutosaveField =
+  | 'title'
+  | 'countryCode'
+  | 'countryName'
+  | 'countryCoordinates'
+  | 'cityLabels'
+  | 'startDate'
+  | 'endDate'
+  | 'summary'
+  | 'coverPhotoAssetId';
+
+export type JourneyAutosavePatch = Partial<Pick<Journey, JourneyAutosaveField>>;
+
+export interface JourneyAutosaveFieldPatchEnvelope {
+  patch: JourneyAutosavePatch;
+  base: JourneyAutosavePatch;
+}
+
+export interface JourneyAutosaveOutboxRecord {
+  journeyId: string;
+  generation: string;
+  envelope: JourneyAutosaveFieldPatchEnvelope;
+  updatedAt: string;
+}
+
+export interface JourneyAutosaveOutboxPort {
+  get(journeyId: string): Promise<JourneyAutosaveOutboxRecord | undefined>;
+  put(record: JourneyAutosaveOutboxRecord): Promise<void>;
+  compareAndDelete(journeyId: string, generation: string): Promise<boolean>;
+}
+
 export interface PhotoAssetRepository {
   getPhotoAsset(id: string): Promise<PhotoAsset | undefined>;
 }

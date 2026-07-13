@@ -1,7 +1,10 @@
 import type { Journey } from '../../domain/model';
+import type {
+  JourneyAutosaveOutboxPort,
+  JourneyAutosaveOutboxRecord,
+} from '../../data/ports';
 import type { JourneyPatchEnvelope, JourneyUserPatch } from './journeyPatch';
 
-const storagePrefix = 'sound-passport.private.journey-outbox.v1:';
 const patchKeys = [
   'title',
   'countryCode',
@@ -15,11 +18,6 @@ const patchKeys = [
 ] as const;
 
 type PatchKey = typeof patchKeys[number];
-type StoredPatch = Record<string, unknown>;
-
-function storageKey(journeyId: string) {
-  return `${storagePrefix}${encodeURIComponent(journeyId)}`;
-}
 
 function hasOwn(value: object, key: PropertyKey) {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -40,8 +38,8 @@ function isPatchValue(key: PatchKey, value: unknown) {
   return typeof value === 'string';
 }
 
-function copyPatchValue(value: unknown) {
-  return Array.isArray(value) ? [...value] : value;
+function copyPatchValue<T>(value: T): T {
+  return (Array.isArray(value) ? [...value] : value) as T;
 }
 
 function normalizeEnvelope(value: unknown): JourneyPatchEnvelope | undefined {
@@ -55,49 +53,55 @@ function normalizeEnvelope(value: unknown): JourneyPatchEnvelope | undefined {
     const patchValue = value.patch[key];
     const baseValue = value.base[key];
     if (!isPatchValue(key, patchValue) || !isPatchValue(key, baseValue)) return undefined;
-    Object.assign(patch, { [key]: copyPatchValue(patchValue === null ? undefined : patchValue) });
-    Object.assign(base, { [key]: copyPatchValue(baseValue === null ? undefined : baseValue) });
+    Object.assign(patch, {
+      [key]: copyPatchValue(patchValue === null ? undefined : patchValue) as Journey[PatchKey],
+    });
+    Object.assign(base, {
+      [key]: copyPatchValue(baseValue === null ? undefined : baseValue) as Journey[PatchKey],
+    });
   }
 
   return Object.keys(patch).length > 0 ? { patch, base } : undefined;
 }
 
-function encodePatch(patch: JourneyUserPatch): StoredPatch {
-  const encoded: StoredPatch = {};
-  patchKeys.forEach((key) => {
-    if (!hasOwn(patch, key)) return;
-    const value = patch[key] as Journey[PatchKey];
-    encoded[key] = value === undefined ? null : copyPatchValue(value);
-  });
-  return encoded;
+function normalizeRecord(
+  value: unknown,
+  expectedJourneyId?: string,
+): JourneyAutosaveOutboxRecord | undefined {
+  if (!isRecord(value)) return undefined;
+  const { journeyId, generation, updatedAt } = value;
+  const envelope = normalizeEnvelope(value.envelope);
+  if (
+    typeof journeyId !== 'string' || journeyId.length === 0 ||
+    (expectedJourneyId !== undefined && journeyId !== expectedJourneyId) ||
+    typeof generation !== 'string' || generation.length === 0 ||
+    typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt)) ||
+    !envelope
+  ) return undefined;
+
+  return { journeyId, generation, envelope, updatedAt };
 }
 
-export function readJourneyOutbox(journeyId: string): JourneyPatchEnvelope | undefined {
-  try {
-    const serialized = sessionStorage.getItem(storageKey(journeyId));
-    return serialized ? normalizeEnvelope(JSON.parse(serialized)) : undefined;
-  } catch {
-    return undefined;
-  }
+export async function readJourneyOutbox(
+  outbox: JourneyAutosaveOutboxPort,
+  journeyId: string,
+) {
+  return normalizeRecord(await outbox.get(journeyId), journeyId);
 }
 
-export function writeJourneyOutbox(journeyId: string, envelope: JourneyPatchEnvelope) {
-  const normalized = normalizeEnvelope(envelope);
-  if (!normalized) return;
-  try {
-    sessionStorage.setItem(storageKey(journeyId), JSON.stringify({
-      patch: encodePatch(normalized.patch),
-      base: encodePatch(normalized.base),
-    }));
-  } catch {
-    // Autosave continues even when session storage is unavailable.
-  }
+export async function writeJourneyOutbox(
+  outbox: JourneyAutosaveOutboxPort,
+  record: JourneyAutosaveOutboxRecord,
+) {
+  const normalized = normalizeRecord(record, record.journeyId);
+  if (!normalized) throw new TypeError('Journey autosave outbox record is invalid.');
+  await outbox.put(normalized);
 }
 
-export function clearJourneyOutbox(journeyId: string) {
-  try {
-    sessionStorage.removeItem(storageKey(journeyId));
-  } catch {
-    // There is nothing else to clear when session storage is unavailable.
-  }
+export function clearJourneyOutbox(
+  outbox: JourneyAutosaveOutboxPort,
+  journeyId: string,
+  generation: string,
+) {
+  return outbox.compareAndDelete(journeyId, generation);
 }

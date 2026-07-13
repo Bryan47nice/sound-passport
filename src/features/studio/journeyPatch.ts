@@ -89,3 +89,10 @@ export function journeyPatchBaseMatches(envelope: JourneyPatchEnvelope, persiste
     sameValue(envelope.base[key] as Journey[JourneyUserPatchKey], persisted[key])
   ));
 }
+
+export function journeyPatchMatchesPersisted(envelope: JourneyPatchEnvelope, persisted: Journey) {
+  return journeyUserPatchKeys.every((key) => (
+    !hasOwn(envelope.patch, key) ||
+    sameValue(envelope.patch[key] as Journey[JourneyUserPatchKey], persisted[key])
+  ));
+}

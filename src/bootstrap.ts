@@ -1,5 +1,6 @@
 import { createCombinedJourneyRepository } from './data/combinedJourneyRepository';
 import type {
+  JourneyAutosaveOutboxPort,
   JourneyEditorRepository,
   JourneyRepository,
   PhotoAssetRepository,
@@ -9,6 +10,7 @@ import type { RepositoryServices } from './data/RepositoryContext';
 
 type PrivateRepository = JourneyRepository
   & JourneyEditorRepository
+  & JourneyAutosaveOutboxPort
   & PhotoAssetRepository
   & PrivateDataPort;
 
@@ -33,6 +35,7 @@ export function bootstrapRepositoryServices<Database>({
       renderServices({
         query: createCombinedJourneyRepository(fixtureRepository, privateRepository),
         editor: privateRepository,
+        outbox: privateRepository,
         photos: privateRepository,
         privateData: privateRepository,
       });

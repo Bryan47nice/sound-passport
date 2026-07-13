@@ -3,6 +3,7 @@ import type { Journey } from '../../domain/model';
 import {
   createJourneyPatchEnvelope,
   journeyPatchBaseMatches,
+  journeyPatchMatchesPersisted,
   mergeJourneyPatchEnvelopes,
   type JourneyUserPatch,
 } from './journeyPatch';
@@ -60,5 +61,23 @@ describe('journey patch envelopes', () => {
     expect(envelope.patch.cityLabels).toEqual(['東京', '京都']);
     expect(journeyPatchBaseMatches(envelope, { ...journey, summary: '其他分頁的新總文' })).toBe(true);
     expect(journeyPatchBaseMatches(envelope, { ...journey, cityLabels: ['札幌'] })).toBe(false);
+  });
+
+  it('recognizes an idempotent recovered patch without accepting a different persisted value', () => {
+    const envelope = createJourneyPatchEnvelope(journey, {
+      title: '已由舊實例儲存',
+      cityLabels: ['東京', '京都'],
+    });
+
+    expect(journeyPatchMatchesPersisted(envelope, {
+      ...journey,
+      title: '已由舊實例儲存',
+      cityLabels: ['東京', '京都'],
+    })).toBe(true);
+    expect(journeyPatchMatchesPersisted(envelope, {
+      ...journey,
+      title: '其他位置的新標題',
+      cityLabels: ['東京', '京都'],
+    })).toBe(false);
   });
 });

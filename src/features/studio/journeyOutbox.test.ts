@@ -1,4 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  JourneyAutosaveOutboxPort,
+  JourneyAutosaveOutboxRecord,
+} from '../../data/ports';
 import type { JourneyPatchEnvelope } from './journeyPatch';
 import {
   clearJourneyOutbox,
@@ -7,54 +11,79 @@ import {
 } from './journeyOutbox';
 
 const firstEnvelope: JourneyPatchEnvelope = {
-  patch: { title: '離線標題', cityLabels: ['東京', '橫濱'] },
-  base: { title: '東京夜行', cityLabels: ['東京'] },
+  patch: { title: 'Pending title', cityLabels: ['Tokyo', 'Yokohama'] },
+  base: { title: 'Original title', cityLabels: ['Tokyo'] },
 };
 
+function record(
+  generation = 'generation-1',
+  envelope: JourneyPatchEnvelope = firstEnvelope,
+): JourneyAutosaveOutboxRecord {
+  return {
+    journeyId: 'private-tokyo',
+    generation,
+    envelope,
+    updatedAt: '2026-07-13T00:00:00.000Z',
+  };
+}
+
+function outboxStub(initial?: JourneyAutosaveOutboxRecord): JourneyAutosaveOutboxPort {
+  let stored = initial;
+  return {
+    get: vi.fn(async (journeyId) => stored && stored.journeyId === journeyId ? stored : undefined),
+    put: vi.fn(async (next) => { stored = next; }),
+    compareAndDelete: vi.fn(async (journeyId, generation) => {
+      const current = stored;
+      if (!current || current.journeyId !== journeyId || current.generation !== generation) return false;
+      stored = undefined;
+      return true;
+    }),
+  };
+}
+
 describe('journeyOutbox', () => {
-  afterEach(() => sessionStorage.clear());
+  it('reads and validates one typed IndexedDB outbox record', async () => {
+    const stored = record();
+    const outbox = outboxStub(stored);
 
-  it('keeps only the latest field-patch envelope for each journey in tab-local storage', () => {
-    const latestEnvelope: JourneyPatchEnvelope = {
-      patch: { title: '最後標題' },
-      base: { title: '東京夜行' },
-    };
-
-    writeJourneyOutbox('private-tokyo', firstEnvelope);
-    writeJourneyOutbox('private-tokyo', latestEnvelope);
-    writeJourneyOutbox('private-kyoto', firstEnvelope);
-
-    expect(readJourneyOutbox('private-tokyo')).toEqual(latestEnvelope);
-    expect(readJourneyOutbox('private-kyoto')).toEqual(firstEnvelope);
-    expect(sessionStorage).toHaveLength(2);
+    await expect(readJourneyOutbox(outbox, 'private-tokyo')).resolves.toEqual(stored);
+    expect(outbox.get).toHaveBeenCalledWith('private-tokyo');
   });
 
-  it('serializes only supported field patches and excludes unrelated photo or fixture data', () => {
+  it('writes only supported field patches and excludes unrelated private or fixture data', async () => {
+    const outbox = outboxStub();
     const contaminated = {
-      ...firstEnvelope,
+      ...record(),
       photo: new Blob(['private photo']),
       fixtureJourney: { id: 'fixture-tokyo' },
-      patch: { ...firstEnvelope.patch, source: 'fixture' },
-    } as unknown as JourneyPatchEnvelope;
+      envelope: {
+        ...firstEnvelope,
+        patch: { ...firstEnvelope.patch, source: 'fixture' },
+      },
+    } as unknown as JourneyAutosaveOutboxRecord;
 
-    writeJourneyOutbox('private-tokyo', contaminated);
+    await writeJourneyOutbox(outbox, contaminated);
 
-    expect(readJourneyOutbox('private-tokyo')).toEqual(firstEnvelope);
-    const serialized = sessionStorage.getItem(sessionStorage.key(0)!);
-    expect(serialized).not.toContain('private photo');
-    expect(serialized).not.toContain('fixture');
-    expect(serialized).not.toContain('source');
+    expect(outbox.put).toHaveBeenCalledWith(record());
+    expect(JSON.stringify(vi.mocked(outbox.put).mock.calls[0][0])).not.toMatch(/photo|fixture|source/);
   });
 
-  it('ignores malformed storage and clears an envelope only when asked', () => {
-    writeJourneyOutbox('private-tokyo', firstEnvelope);
-    const key = sessionStorage.key(0)!;
-    sessionStorage.setItem(key, '{broken');
+  it('ignores malformed records and compare-deletes only the requested generation', async () => {
+    const malformed = { ...record(), generation: '' } as JourneyAutosaveOutboxRecord;
+    const outbox = outboxStub(malformed);
 
-    expect(readJourneyOutbox('private-tokyo')).toBeUndefined();
-    expect(sessionStorage.getItem(key)).toBe('{broken');
+    await expect(readJourneyOutbox(outbox, 'private-tokyo')).resolves.toBeUndefined();
 
-    clearJourneyOutbox('private-tokyo');
-    expect(sessionStorage.getItem(key)).toBeNull();
+    const validOutbox = outboxStub(record('generation-2'));
+    await expect(clearJourneyOutbox(validOutbox, 'private-tokyo', 'generation-1')).resolves.toBe(false);
+    await expect(clearJourneyOutbox(validOutbox, 'private-tokyo', 'generation-2')).resolves.toBe(true);
+  });
+
+  it('propagates IndexedDB persistence failures instead of swallowing recovery loss', async () => {
+    const failure = new Error('IndexedDB unavailable');
+    const outbox = outboxStub();
+    vi.mocked(outbox.put).mockRejectedValueOnce(failure);
+
+    await expect(writeJourneyOutbox(outbox, record())).rejects.toBe(failure);
   });
 });
