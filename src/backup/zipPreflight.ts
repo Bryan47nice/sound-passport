@@ -4,13 +4,14 @@ import { BACKUP_LIMITS } from './backupLimits';
 const LOCAL_HEADER_SIGNATURE = 0x04034b50;
 const CENTRAL_HEADER_SIGNATURE = 0x02014b50;
 const END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+const ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50;
+const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
 const ZIP64_UINT16 = 0xffff;
 const ZIP64_UINT32 = 0xffffffff;
 const MINIMUM_EOCD_BYTES = 22;
-const MAXIMUM_ZIP_COMMENT_BYTES = 0xffff;
 const UTF8_FLAG = 0x0800;
-const DATA_DESCRIPTOR_FLAG = 0x0008;
-const ALLOWED_FLAGS = 0x080e;
+const ALLOWED_FLAGS = UTF8_FLAG;
+const PHOTO_PATH = /^photos\/(.+)\.(jpg|png|webp|gif|avif)$/;
 const dangerousSegments = new Set(['__proto__', 'prototype', 'constructor']);
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -63,14 +64,79 @@ function crc32(bytes: Uint8Array) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function findEndOfCentralDirectory(bytes: Uint8Array, view: DataView) {
-  const minimumOffset = Math.max(0, bytes.byteLength - MINIMUM_EOCD_BYTES - MAXIMUM_ZIP_COMMENT_BYTES);
-  for (let offset = bytes.byteLength - MINIMUM_EOCD_BYTES; offset >= minimumOffset; offset -= 1) {
-    if (view.getUint32(offset, true) !== END_OF_CENTRAL_DIRECTORY_SIGNATURE) continue;
-    const commentLength = view.getUint16(offset + 20, true);
-    if (offset + MINIMUM_EOCD_BYTES + commentLength === bytes.byteLength) return offset;
+function isPlausibleEocd(view: DataView, offset: number, boundary: number) {
+  if (offset > boundary - MINIMUM_EOCD_BYTES) return false;
+  const commentLength = view.getUint16(offset + 20, true);
+  if (offset + MINIMUM_EOCD_BYTES + commentLength > boundary) return false;
+
+  const diskNumber = view.getUint16(offset + 4, true);
+  const centralDirectoryDisk = view.getUint16(offset + 6, true);
+  const diskEntryCount = view.getUint16(offset + 8, true);
+  const entryCount = view.getUint16(offset + 10, true);
+  const centralSize = view.getUint32(offset + 12, true);
+  const centralOffset = view.getUint32(offset + 16, true);
+  if (
+    diskNumber !== 0 || centralDirectoryDisk !== 0 || diskEntryCount !== entryCount ||
+    entryCount === ZIP64_UINT16 || centralSize === ZIP64_UINT32 || centralOffset === ZIP64_UINT32 ||
+    centralOffset > offset || centralSize !== offset - centralOffset
+  ) {
+    return false;
   }
-  invalidContainer('the end-of-central-directory record is missing');
+
+  let cursor = centralOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (cursor > offset - 46 || view.getUint32(cursor, true) !== CENTRAL_HEADER_SIGNATURE) return false;
+    const recordLength = 46 + view.getUint16(cursor + 28, true) +
+      view.getUint16(cursor + 30, true) + view.getUint16(cursor + 32, true);
+    if (recordLength > offset - cursor) return false;
+    cursor += recordLength;
+  }
+  return cursor === offset;
+}
+
+function assertSingleEocd(bytes: Uint8Array, view: DataView, finalOffset: number) {
+  for (
+    let offset = bytes.indexOf(0x50);
+    offset >= 0 && offset < finalOffset;
+    offset = bytes.indexOf(0x50, offset + 1)
+  ) {
+    if (
+      view.getUint32(offset, true) === END_OF_CENTRAL_DIRECTORY_SIGNATURE &&
+      isPlausibleEocd(view, offset, finalOffset)
+    ) {
+      invalidContainer('multiple end-of-central-directory records are ambiguous');
+    }
+  }
+}
+
+function assertNoZip64EndRecords(bytes: Uint8Array, view: DataView, eocdOffset: number) {
+  const locatorOffset = eocdOffset - 20;
+  if (
+    locatorOffset < 0 ||
+    view.getUint32(locatorOffset, true) !== ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE
+  ) {
+    return;
+  }
+
+  const zip64EocdOffset = view.getUint32(locatorOffset + 8, true);
+  if (
+    zip64EocdOffset <= bytes.byteLength - 4 &&
+    view.getUint32(zip64EocdOffset, true) === ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE
+  ) {
+    invalidContainer('ZIP64 end-of-central-directory records are not supported');
+  }
+  invalidContainer('ZIP64 end-of-central-directory locators are not supported');
+}
+
+function findEndOfCentralDirectory(bytes: Uint8Array, view: DataView) {
+  const offset = bytes.byteLength - MINIMUM_EOCD_BYTES;
+  if (view.getUint32(offset, true) !== END_OF_CENTRAL_DIRECTORY_SIGNATURE) {
+    invalidContainer('the end-of-central-directory record is not at the physical end');
+  }
+  if (view.getUint16(offset + 20, true) !== 0) invalidContainer('ZIP comments are not supported');
+  assertNoZip64EndRecords(bytes, view, offset);
+  assertSingleEocd(bytes, view, offset);
+  return offset;
 }
 
 function decodeEntryName(nameBytes: Uint8Array, flags: number) {
@@ -103,6 +169,23 @@ function decodeEntryName(nameBytes: Uint8Array, flags: number) {
     );
   if (!isCanonical) invalidContainer('an entry name is unsafe or noncanonical');
   return name;
+}
+
+function isCanonicalPhotoPath(name: string) {
+  const match = PHOTO_PATH.exec(name);
+  if (!match) return false;
+  try {
+    const id = decodeURIComponent(match[1]);
+    return id.length > 0 && encodeURIComponent(id) === match[1];
+  } catch {
+    return false;
+  }
+}
+
+function assertV1EntryName(name: string) {
+  if (name !== 'manifest.json' && !isCanonicalPhotoPath(name)) {
+    invalidContainer('an entry name is not part of the version 1 backup format');
+  }
 }
 
 function validateCentralLimits(entry: ParsedZipEntry, totals: { compressed: number; uncompressed: number }) {
@@ -143,14 +226,8 @@ function validateLocalHeaders(
   const localOffsets = new Set<number>();
 
   for (const entry of entries) {
-    if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
-      invalidContainer('an entry uses an unsupported compression method');
-    }
     if (entry.flags & ~ALLOWED_FLAGS) invalidContainer('an entry uses unsupported ZIP flags');
-    if (entry.compressionMethod === 0 && (entry.flags & 0x0006)) {
-      invalidContainer('a stored entry uses deflate-only flags');
-    }
-    if (entry.compressionMethod === 0 && entry.compressedSize !== entry.uncompressedSize) {
+    if (entry.compressedSize !== entry.uncompressedSize) {
       invalidContainer('a stored entry declares inconsistent sizes');
     }
     if (localOffsets.has(entry.localHeaderOffset)) invalidContainer('local header offsets are duplicated');
@@ -176,11 +253,11 @@ function validateLocalHeaders(
     if (localFlags !== entry.flags || localMethod !== entry.compressionMethod) {
       invalidContainer('local and central entry metadata differ');
     }
-    if (!(entry.flags & DATA_DESCRIPTOR_FLAG) && (
+    if (
       localCrc32 !== entry.crc32 ||
       localCompressedSize !== entry.compressedSize ||
       localUncompressedSize !== entry.uncompressedSize
-    )) {
+    ) {
       invalidContainer('local and central entry sizes differ');
     }
     ranges.push({ start: entry.localHeaderOffset, end: dataOffset + entry.compressedSize });
@@ -190,6 +267,12 @@ function validateLocalHeaders(
   for (let index = 1; index < ranges.length; index += 1) {
     if (ranges[index].start < ranges[index - 1].end) invalidContainer('local entries overlap');
   }
+  let expectedOffset = 0;
+  for (const range of ranges) {
+    if (range.start !== expectedOffset) invalidContainer('local entries are not contiguous');
+    expectedOffset = range.end;
+  }
+  if (expectedOffset !== centralOffset) invalidContainer('unreferenced records precede the central directory');
 }
 
 export function assertBackupContainerSize(size: number) {
@@ -252,8 +335,11 @@ export function preflightZip(bytes: Uint8Array): ZipEntryMetadata[] {
     ) {
       invalidContainer('ZIP64 or multi-disk entry metadata is not supported');
     }
+    if (commentLength !== 0) invalidContainer('ZIP comments are not supported');
+    if (compressionMethod !== 0) invalidContainer('version 1 entries must use stored compression');
     const nameBytes = bytes.slice(cursor + 46, cursor + 46 + nameLength);
     const name = decodeEntryName(nameBytes, flags);
+    assertV1EntryName(name);
     if (names.has(name)) invalidContainer('entry names must be unique');
     names.add(name);
 
@@ -273,6 +359,7 @@ export function preflightZip(bytes: Uint8Array): ZipEntryMetadata[] {
   }
 
   if (cursor !== centralEnd) invalidContainer('the central-directory size is inconsistent');
+  if (!names.has('manifest.json')) invalidContainer('manifest.json is missing');
   validateLocalHeaders(bytes, view, centralOffset, entries);
   return entries.map(({ name, compressionMethod, crc32, compressedSize, uncompressedSize }) => ({
     name,

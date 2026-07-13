@@ -25,6 +25,11 @@ interface SyntheticZipEntry {
   compressedSize?: number;
   uncompressedSize?: number;
   data?: Uint8Array;
+  comment?: Uint8Array;
+}
+
+interface SyntheticZipOptions {
+  comment?: Uint8Array;
 }
 
 class EmptyPrivateDataPort implements PrivateDataPort {
@@ -49,13 +54,14 @@ function pushUint32(target: number[], value: number) {
   target.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
 }
 
-function syntheticZip(entries: SyntheticZipEntry[]) {
+function syntheticZip(entries: SyntheticZipEntry[], options: SyntheticZipOptions = {}) {
   const bytes: number[] = [];
   const encoder = new TextEncoder();
   const records = entries.map((entry) => ({
     ...entry,
     method: entry.method ?? 0,
     data: entry.data ?? new Uint8Array([0]),
+    comment: entry.comment ?? new Uint8Array(),
     nameBytes: encoder.encode(entry.name),
     localOffset: 0,
   }));
@@ -94,12 +100,12 @@ function syntheticZip(entries: SyntheticZipEntry[]) {
     pushUint32(bytes, uncompressedSize);
     pushUint16(bytes, record.nameBytes.byteLength);
     pushUint16(bytes, 0);
-    pushUint16(bytes, 0);
+    pushUint16(bytes, record.comment.byteLength);
     pushUint16(bytes, 0);
     pushUint16(bytes, 0);
     pushUint32(bytes, 0);
     pushUint32(bytes, record.localOffset);
-    bytes.push(...record.nameBytes);
+    bytes.push(...record.nameBytes, ...record.comment);
   }
 
   const centralSize = bytes.length - centralOffset;
@@ -110,9 +116,47 @@ function syntheticZip(entries: SyntheticZipEntry[]) {
   pushUint16(bytes, records.length);
   pushUint32(bytes, centralSize);
   pushUint32(bytes, centralOffset);
-  pushUint16(bytes, 0);
+  pushUint16(bytes, options.comment?.byteLength ?? 0);
+  if (options.comment) bytes.push(...options.comment);
 
   return new Blob([new Uint8Array(bytes).buffer]);
+}
+
+async function withSecondCentralDirectory(file: Blob) {
+  const original = new Uint8Array(await file.arrayBuffer());
+  const originalEocdOffset = original.byteLength - 22;
+  const originalView = new DataView(original.buffer, original.byteOffset, original.byteLength);
+  const centralSize = originalView.getUint32(originalEocdOffset + 12, true);
+  const centralOffset = originalView.getUint32(originalEocdOffset + 16, true);
+  const centralDirectory = original.slice(centralOffset, centralOffset + centralSize);
+  const result = new Uint8Array(original.byteLength + centralDirectory.byteLength + 22);
+  result.set(original);
+  result.set(centralDirectory, original.byteLength);
+  result.set(original.subarray(originalEocdOffset), original.byteLength + centralDirectory.byteLength);
+  new DataView(result.buffer).setUint32(
+    original.byteLength + centralDirectory.byteLength + 16,
+    original.byteLength,
+    true,
+  );
+  return new Blob([result.buffer]);
+}
+
+function hybridZip64LocatorZip() {
+  const nameLength = new TextEncoder().encode('manifest.json').byteLength;
+  const zip64EocdOffset = 30 + nameLength;
+  const data = new Uint8Array(56);
+  const zip64View = new DataView(data.buffer);
+  zip64View.setUint32(0, 0x06064b50, true);
+  zip64View.setUint32(32, 1, true);
+  zip64View.setUint32(48, 0, true);
+
+  const locator = new Uint8Array(20);
+  const locatorView = new DataView(locator.buffer);
+  locatorView.setUint32(0, 0x07064b50, true);
+  locatorView.setUint32(8, zip64EocdOffset, true);
+  locatorView.setUint32(16, 1, true);
+
+  return syntheticZip([{ name: 'manifest.json', data, comment: locator }]);
 }
 
 function service() {
@@ -154,6 +198,30 @@ describe('backup ZIP central-directory preflight', () => {
     ]), 'invalid_container');
   });
 
+  it('rejects an archive comment before decompression', async () => {
+    await expectPreflightError(syntheticZip(
+      [{ name: 'manifest.json' }],
+      { comment: new TextEncoder().encode('not allowed') },
+    ), 'invalid_container');
+  });
+
+  it('rejects a central-directory entry comment before decompression', async () => {
+    await expectPreflightError(syntheticZip([{
+      name: 'manifest.json',
+      comment: new TextEncoder().encode('not allowed'),
+    }]), 'invalid_container');
+  });
+
+  it('rejects a second valid central-directory and EOCD pair before decompression', async () => {
+    const dualEocd = await withSecondCentralDirectory(syntheticZip([{ name: 'manifest.json' }]));
+
+    await expectPreflightError(dualEocd, 'invalid_container');
+  });
+
+  it('rejects a hybrid ZIP64 locator and EOCD before decompression', async () => {
+    await expectPreflightError(hybridZip64LocatorZip(), 'invalid_container');
+  });
+
   it.each(['../manifest.json', '/manifest.json', 'photos\\photo.jpg', 'photos//photo.jpg'])(
     'rejects unsafe or noncanonical entry name %s before decompression',
     async (name) => {
@@ -161,8 +229,34 @@ describe('backup ZIP central-directory preflight', () => {
     },
   );
 
+  it.each(['notes.txt', 'manifest.json.bak', 'photos/nested/photo.jpg', 'photos/photo.exe'])(
+    'rejects unexpected v1 entry name %s before decompression',
+    async (name) => {
+      await expectPreflightError(syntheticZip([{ name }]), 'invalid_container');
+    },
+  );
+
   it('rejects unsupported compression methods before decompression', async () => {
     await expectPreflightError(syntheticZip([{ name: 'manifest.json', method: 12 }]), 'invalid_container');
+  });
+
+  it('rejects deflated v1 entries before decompression', async () => {
+    await expectPreflightError(syntheticZip([{ name: 'manifest.json', method: 8 }]), 'invalid_container');
+  });
+
+  it('rejects many worker-eligible deflated entries before decompression', async () => {
+    const compressedBytes = 6 * 1024;
+    const entries: SyntheticZipEntry[] = [
+      { name: 'manifest.json', data: new TextEncoder().encode('{}') },
+      ...Array.from({ length: 64 }, (_, index) => ({
+        name: `photos/hostile-${index}.jpg`,
+        method: 8,
+        data: new Uint8Array(compressedBytes),
+        uncompressedSize: 600 * 1024,
+      })),
+    ];
+
+    await expectPreflightError(syntheticZip(entries), 'invalid_container');
   });
 
   it('rejects excessive entry counts before parsing entry bodies', async () => {
@@ -183,7 +277,7 @@ describe('backup ZIP central-directory preflight', () => {
 
   it('rejects an excessive declared uncompressed size without allocating it', async () => {
     await expectPreflightError(syntheticZip([{
-      name: 'photo.bin',
+      name: 'photos/photo.jpg',
       compressedSize: 1024 * 1024,
       uncompressedSize: BACKUP_LIMITS.maxEntryUncompressedBytes + 1,
     }]), 'limit_exceeded');
@@ -199,7 +293,7 @@ describe('backup ZIP central-directory preflight', () => {
 
   it('rejects an excessive total declared uncompressed size before decompression', async () => {
     const entries = Array.from({ length: 11 }, (_, index) => ({
-      name: `entry-${index}.bin`,
+      name: `photos/photo-${index}.jpg`,
       compressedSize: 256 * 1024,
       uncompressedSize: 25 * 1024 * 1024,
     }));
@@ -208,7 +302,7 @@ describe('backup ZIP central-directory preflight', () => {
 
   it('rejects an excessive total declared compressed size before decompression', async () => {
     const entries = Array.from({ length: 11 }, (_, index) => ({
-      name: `entry-${index}.bin`,
+      name: `photos/photo-${index}.jpg`,
       compressedSize: 25 * 1024 * 1024,
       uncompressedSize: 25 * 1024 * 1024,
     }));

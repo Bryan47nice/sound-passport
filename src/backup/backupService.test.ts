@@ -133,9 +133,9 @@ function service(port: PrivateDataPort, options: Partial<BackupServiceOptions> =
   });
 }
 
-function zipAsync(files: AsyncZippable): Promise<Uint8Array> {
+function zipStoredAsync(files: AsyncZippable): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
-    zip(files, (error, bytes) => error ? reject(error) : resolve(bytes));
+    zip(files, { level: 0 }, (error, bytes) => error ? reject(error) : resolve(bytes));
   });
 }
 
@@ -153,7 +153,7 @@ async function alterBackup(
   const manifest = JSON.parse(strFromU8(files['manifest.json'])) as Record<string, any>;
   alter(files, manifest);
   files['manifest.json'] = strToU8(JSON.stringify(manifest));
-  return new Blob([(await zipAsync(files)).slice().buffer as ArrayBuffer], { type: backup.type });
+  return new Blob([(await zipStoredAsync(files)).slice().buffer as ArrayBuffer], { type: backup.type });
 }
 
 async function expectPlanError(
@@ -307,7 +307,7 @@ describe('BackupService', () => {
       manifest.photos[0].path = noncanonical;
     });
 
-    await expectPlanError(new MemoryPrivateDataPort(emptySnapshot()), altered, 'invalid_manifest');
+    await expectPlanError(new MemoryPrivateDataPort(emptySnapshot()), altered, 'invalid_container');
   });
 
   it.each([
