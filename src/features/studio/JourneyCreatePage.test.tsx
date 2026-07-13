@@ -1,4 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,9 @@ import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import type { JourneyEditorRepository } from '../../data/ports';
 import { findCountry } from '../../domain/countryCatalog';
 import { JourneyCreatePage } from './JourneyCreatePage';
+
+type RecoveryPageProps = { onBootstrapRetry: () => void };
+const RecoveryJourneyCreatePage = JourneyCreatePage as unknown as (props: RecoveryPageProps) => ReactElement;
 
 function editorStub(): JourneyEditorRepository {
   return {
@@ -98,6 +102,19 @@ describe('JourneyCreatePage', () => {
       createdAt: '2024-05-01T00:00:00.000Z', updatedAt: '2024-05-01T00:00:00.000Z',
     });
     expect(await screen.findByRole('heading', { name: '編輯器目標' })).toBeInTheDocument();
+  });
+
+  it('retries bootstrap when the editor service is unavailable', async () => {
+    const user = userEvent.setup();
+    const onBootstrapRetry = vi.fn();
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
+        <MemoryRouter><RecoveryJourneyCreatePage onBootstrapRetry={onBootstrapRetry} /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(screen.getByRole('button', { name: '重新嘗試' }));
+    expect(onBootstrapRetry).toHaveBeenCalledTimes(1);
   });
 
   it('shows mobile guidance and suppresses every editable control', () => {

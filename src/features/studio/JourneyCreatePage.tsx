@@ -8,11 +8,15 @@ import { useMobileStudio } from './useMobileStudio';
 type FieldName = 'title' | 'country' | 'startDate' | 'endDate';
 type ValidationErrors = Partial<Record<FieldName, string>>;
 
+type JourneyCreatePageProps = {
+  onBootstrapRetry?: () => void;
+};
+
 function fieldError(errors: ValidationErrors, name: FieldName) {
   return errors[name] ? <p className="field-error" id={`${name}-error`}>{errors[name]}</p> : null;
 }
 
-export function JourneyCreatePage() {
+export function JourneyCreatePage({ onBootstrapRetry = () => window.location.reload() }: JourneyCreatePageProps) {
   const editor = useOptionalJourneyEditorRepository();
   const navigate = useNavigate();
   const isMobile = useMobileStudio();
@@ -34,7 +38,14 @@ export function JourneyCreatePage() {
   }
 
   if (!editor) {
-    return <section className="page studio-guidance"><h1 className="page-title">本機儲存空間暫時無法使用</h1></section>;
+    return (
+      <section className="page studio-guidance">
+        <h1 className="page-title">本機儲存空間暫時無法使用</h1>
+        <button className="secondary-command studio-state-action" type="button" onClick={onBootstrapRetry}>
+          重新嘗試
+        </button>
+      </section>
+    );
   }
 
   const selectCountry = (value: string) => {

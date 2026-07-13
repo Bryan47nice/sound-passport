@@ -1,4 +1,5 @@
 import { act, cleanup, render, screen, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,9 @@ import type { JourneyEditorRepository } from '../../data/ports';
 import type { Journey, JourneyStory } from '../../domain/model';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import { StudioPage } from './StudioPage';
+
+type RecoveryPageProps = { onBootstrapRetry: () => void };
+const RecoveryStudioPage = StudioPage as unknown as (props: RecoveryPageProps) => ReactElement;
 
 const journeys: Journey[] = [
   {
@@ -115,18 +119,21 @@ describe('StudioPage', () => {
     const reviewTab = screen.getByRole('tab', { name: '待整理' });
     const completeTab = screen.getByRole('tab', { name: '已完成' });
     expect(draftTab).toHaveAttribute('id', 'studio-tab-draft');
-    expect(draftTab).toHaveAttribute('aria-controls', 'studio-panel-draft');
     expect(draftTab).toHaveAttribute('tabindex', '0');
     expect(reviewTab).toHaveAttribute('tabindex', '-1');
+    for (const tab of [draftTab, reviewTab, completeTab]) {
+      expect(tab).toHaveAttribute('aria-controls', 'studio-panel');
+      expect(document.getElementById(tab.getAttribute('aria-controls')!)).toBeInTheDocument();
+    }
     expect(screen.getAllByRole('tabpanel')).toHaveLength(1);
-    expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'studio-panel-draft');
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'studio-panel');
     expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'studio-tab-draft');
 
     draftTab.focus();
     await user.keyboard('{ArrowRight}');
     expect(reviewTab).toHaveFocus();
     expect(reviewTab).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'studio-panel-review');
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'studio-panel');
     expect(await screen.findByText('釜山的傍晚')).toBeInTheDocument();
 
     await user.keyboard('{End}');
@@ -213,6 +220,19 @@ describe('StudioPage', () => {
 
     expect(screen.getByText('本機儲存空間暫時無法使用')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '新增旅程' })).not.toBeInTheDocument();
+  });
+
+  it('retries bootstrap when the editor service is unavailable', async () => {
+    const user = userEvent.setup();
+    const onBootstrapRetry = vi.fn();
+    render(
+      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
+        <MemoryRouter><RecoveryStudioPage onBootstrapRetry={onBootstrapRetry} /></MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(screen.getByRole('button', { name: '重新嘗試' }));
+    expect(onBootstrapRetry).toHaveBeenCalledTimes(1);
   });
 
   it('prioritizes mobile guidance over the unavailable editor state', () => {

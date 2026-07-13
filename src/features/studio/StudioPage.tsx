@@ -22,6 +22,10 @@ type DashboardState =
   | { kind: 'ready'; editor: JourneyEditorRepository; rows: JourneyRow[] }
   | { kind: 'error'; editor: JourneyEditorRepository };
 
+type StudioPageProps = {
+  onBootstrapRetry?: () => void;
+};
+
 const tabs: { label: string; status: JourneyStatus }[] = [
   { label: '草稿', status: 'draft' },
   { label: '待整理', status: 'review' },
@@ -46,7 +50,7 @@ const updatedAtFormatter = new Intl.DateTimeFormat('zh-TW', {
   timeStyle: 'short',
 });
 
-export function StudioPage() {
+export function StudioPage({ onBootstrapRetry = () => window.location.reload() }: StudioPageProps) {
   const editor = useOptionalJourneyEditorRepository();
   const isMobile = useMobileStudio();
   const [status, setStatus] = useState<JourneyStatus>('draft');
@@ -101,6 +105,9 @@ export function StudioPage() {
         <p className="eyebrow">整理工作台</p>
         <h1 className="page-title">本機儲存空間暫時無法使用</h1>
         <p className="muted">請確認瀏覽器允許本機儲存後重新開啟；世界地圖的示範旅程仍可使用。</p>
+        <button className="secondary-command studio-state-action" type="button" onClick={onBootstrapRetry}>
+          <RefreshCw size={17} aria-hidden="true" />重新嘗試
+        </button>
       </section>
     );
   }
@@ -159,7 +166,7 @@ export function StudioPage() {
             id={`studio-tab-${tab.status}`}
             type="button"
             role="tab"
-            aria-controls={`studio-panel-${tab.status}`}
+            aria-controls="studio-panel"
             aria-selected={status === tab.status}
             tabIndex={status === tab.status ? 0 : -1}
             className={status === tab.status ? 'is-active' : undefined}
@@ -173,7 +180,7 @@ export function StudioPage() {
 
       <div
         className="studio-panel"
-        id={`studio-panel-${status}`}
+        id="studio-panel"
         role="tabpanel"
         aria-labelledby={`studio-tab-${status}`}
       >
