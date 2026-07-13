@@ -380,7 +380,7 @@ backup.soundpassport
 - [x] 單元測試、IndexedDB integration tests、TypeScript typecheck 與 production build 全部通過。
 - [x] 桌機與手機尺寸 Playwright E2E 全部通過。
 - [x] 直式／橫式圖片沒有錯誤裁切，頁面沒有文字重疊或水平捲動。
-- [ ] GitHub Draft PR 已更新，附上驗證結果與本機試用網址。
+- [x] GitHub Draft PR 已更新，附上驗證結果與本機試用網址。
 
 ## 16. 後續階段
 
