@@ -18,7 +18,7 @@ import {
   type JourneyEditorRepository,
 } from '../../data/ports';
 import { validateJourneyForReview } from '../../domain/journeyValidation';
-import type { Journey, JourneyMoment, JourneyPatch, JourneyStory } from '../../domain/model';
+import type { Journey, JourneyMoment, JourneyPatch, JourneyStory, Moment } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
 import { JourneyDetailsForm } from './JourneyDetailsForm';
 import { MomentEditor, type MomentAutosaveRegistration } from './MomentEditor';
@@ -67,6 +67,11 @@ type LoadState =
   | { kind: 'error'; journeyId: string };
 
 type JourneyEditorPageProps = { onBootstrapRetry?: () => void };
+interface StoryRefreshOptions {
+  expectedMomentOrder?: string[];
+  protectedMomentIds?: string[];
+}
+
 type OwnerClaimState =
   | {
       kind: 'ready';
@@ -79,6 +84,19 @@ type OwnerClaimState =
       editor: JourneyEditorRepository;
       outbox: JourneyAutosaveOutboxPort;
     };
+
+function optimisticCreatedMoment(moment: Moment): JourneyMoment {
+  return {
+    ...moment,
+    song: {
+      id: moment.songReferenceId,
+      provider: 'manual',
+      title: '',
+      artist: '',
+      availability: 'needs_link',
+    },
+  };
+}
 
 const recoveryTimeFormatter = new Intl.DateTimeFormat('zh-TW', {
   dateStyle: 'medium',
@@ -197,10 +215,13 @@ function JourneyEditorWorkspace({
   const [selectedMomentId, setSelectedMomentId] = useState(story.moments[0]?.id);
   const [momentDirty, setMomentDirty] = useState(false);
   const draftRef = useRef(initialDraft);
+  const selectedMomentIdRef = useRef(selectedMomentId);
   const fieldRevisionsRef = useRef<Partial<Record<JourneyUserPatchKey, number>>>({});
   const recoveredQueuedRef = useRef(false);
   const mountedRef = useRef(false);
+  const storyRefreshGenerationRef = useRef(0);
   const momentAutosaveRef = useRef<MomentAutosaveRegistration | undefined>(undefined);
+  selectedMomentIdRef.current = selectedMomentId;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -362,10 +383,12 @@ function JourneyEditorWorkspace({
     applyUserPatch({ [field]: value }, true);
   };
 
-  const refreshStory = useCallback(async () => {
+  const refreshStory = useCallback(async (options?: StoryRefreshOptions) => {
+    const generation = storyRefreshGenerationRef.current + 1;
+    storyRefreshGenerationRef.current = generation;
     const refreshed = await editor.getPrivateJourneyStory(story.journey.id);
     if (!refreshed) throw new Error('Journey is no longer available.');
-    if (!mountedRef.current) return refreshed;
+    if (!mountedRef.current || generation !== storyRefreshGenerationRef.current) return refreshed;
 
     const previousStatus = draftRef.current.status;
     const nextDraft = {
@@ -375,7 +398,39 @@ function JourneyEditorWorkspace({
     };
     draftRef.current = nextDraft;
     setDraft(nextDraft);
-    setEditorStory(refreshed);
+    setEditorStory((current) => {
+      const currentById = new Map(current.moments.map((moment) => [moment.id, moment]));
+      const protectedIds = new Set(options?.protectedMomentIds ?? []);
+      let nextMoments = refreshed.moments.map((refreshedMoment) => {
+        const currentMoment = currentById.get(refreshedMoment.id);
+        if (!currentMoment) return refreshedMoment;
+        const protectsDirtySelection =
+          currentMoment.id === selectedMomentIdRef.current &&
+          momentAutosaveRef.current?.dirty;
+        const currentIsNewer = currentMoment.updatedAt > refreshedMoment.updatedAt;
+        return protectsDirtySelection || currentIsNewer ? currentMoment : refreshedMoment;
+      });
+      const refreshedIds = new Set(nextMoments.map(({ id }) => id));
+      for (const momentId of protectedIds) {
+        const currentMoment = currentById.get(momentId);
+        if (currentMoment && !refreshedIds.has(momentId)) nextMoments.push(currentMoment);
+      }
+
+      if (options?.expectedMomentOrder) {
+        const momentsById = new Map(nextMoments.map((moment) => [moment.id, moment]));
+        if (options.expectedMomentOrder.every((id) => momentsById.has(id))) {
+          const orderedIds = new Set(options.expectedMomentOrder);
+          nextMoments = [
+            ...options.expectedMomentOrder.map((id, sortOrder) => ({
+              ...momentsById.get(id)!,
+              sortOrder,
+            })),
+            ...nextMoments.filter(({ id }) => !orderedIds.has(id)),
+          ];
+        }
+      }
+      return { ...refreshed, moments: nextMoments };
+    });
     if (previousStatus === 'complete' && refreshed.journey.status === 'review') {
       setDemotionNotice('必要資料已移除，旅程已回到待整理');
     }
@@ -401,7 +456,20 @@ function JourneyEditorWorkspace({
     }));
   }, []);
 
+  const publishCreatedMoments = useCallback((created: Moment[]) => {
+    setEditorStory((current) => {
+      const existingIds = new Set(current.moments.map(({ id }) => id));
+      const appended = created
+        .filter(({ id }) => !existingIds.has(id))
+        .map(optimisticCreatedMoment);
+      return appended.length === 0
+        ? current
+        : { ...current, moments: [...current.moments, ...appended] };
+    });
+  }, []);
+
   const updateMomentOrder = useCallback((orderedIds: string[]) => {
+    storyRefreshGenerationRef.current += 1;
     setEditorStory((current) => {
       const momentsById = new Map(current.moments.map((moment) => [moment.id, moment]));
       return {
@@ -476,12 +544,15 @@ function JourneyEditorWorkspace({
           repository={editor}
           onSelect={selectMoment}
           onOrderChange={updateMomentOrder}
-          onReordered={() => refreshStory().then(() => undefined)}
+          onReordered={(orderedIds) => refreshStory({ expectedMomentOrder: orderedIds }).then(() => undefined)}
           headerActions={(
             <PhotoDropzone
               journeyId={story.journey.id}
               repository={editor}
-              onMomentsAdded={() => refreshStory().then(() => undefined)}
+              onMomentsCommitted={publishCreatedMoments}
+              onMomentsAdded={(created) => refreshStory({
+                protectedMomentIds: created.map(({ id }) => id),
+              }).then(() => undefined)}
               onSelectMoment={selectMoment}
             />
           )}
@@ -505,7 +576,9 @@ function JourneyEditorWorkspace({
               repository={editor}
               onMomentChange={updateMomentDraft}
               onDelete={deleteMoment}
-              onSaved={() => refreshStory().then(() => undefined)}
+              onSaved={() => refreshStory({
+                protectedMomentIds: [selectedMoment.id],
+              }).then(() => undefined)}
               onAutosaveChange={handleMomentAutosaveChange}
             />
           ) : <p className="muted">加入或選取時刻後即可編輯</p>}

@@ -16,6 +16,7 @@ interface PhotoDropzoneProps {
   journeyId: string;
   repository: Pick<JourneyEditorRepository, 'addMoments'>;
   normalize?: (file: File) => Promise<NormalizedPhotoInput>;
+  onMomentsCommitted?: (moments: Moment[]) => void;
   onMomentsAdded: (moments: Moment[]) => void | Promise<void>;
   onSelectMoment: (momentId: string) => void;
 }
@@ -29,16 +30,18 @@ export function PhotoDropzone({
   journeyId,
   repository,
   normalize = normalizePhoto,
+  onMomentsCommitted,
   onMomentsAdded,
   onSelectMoment,
 }: PhotoDropzoneProps) {
   const [failures, setFailures] = useState<PhotoFailure[]>([]);
   const [batchError, setBatchError] = useState('');
+  const [refreshFailure, setRefreshFailure] = useState<Moment[] | undefined>(undefined);
   const [processing, setProcessing] = useState(false);
   const [dragActive, setDragActive] = useState(false);
 
   const processFiles = async (files: File[]) => {
-    if (files.length === 0 || processing) return;
+    if (files.length === 0 || processing || refreshFailure) return;
     setProcessing(true);
     setBatchError('');
     setFailures([]);
@@ -66,12 +69,36 @@ export function PhotoDropzone({
       return;
     }
 
+    let created: Moment[];
     try {
-      const created = await repository.addMoments(journeyId, photos);
-      await onMomentsAdded(created);
-      if (created[0]) onSelectMoment(created[0].id);
+      created = await repository.addMoments(journeyId, photos);
     } catch {
       setBatchError('無法加入照片，請稍後再試。');
+      setProcessing(false);
+      return;
+    }
+
+    onMomentsCommitted?.(created);
+    if (created[0]) onSelectMoment(created[0].id);
+    try {
+      await onMomentsAdded(created);
+      setRefreshFailure(undefined);
+    } catch {
+      setRefreshFailure(created);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const retryRefresh = async () => {
+    const created = refreshFailure;
+    if (!created || processing) return;
+    setProcessing(true);
+    try {
+      await onMomentsAdded(created);
+      setRefreshFailure(undefined);
+    } catch {
+      setRefreshFailure(created);
     } finally {
       setProcessing(false);
     }
@@ -109,7 +136,7 @@ export function PhotoDropzone({
             type="file"
             accept="image/*"
             multiple
-            disabled={processing}
+            disabled={processing || refreshFailure !== undefined}
             aria-label="加入照片"
             onChange={handleChange}
           />
@@ -123,6 +150,12 @@ export function PhotoDropzone({
         </ul>
       )}
       {batchError && <p className="field-error" role="alert">{batchError}</p>}
+      {refreshFailure && (
+        <div className="photo-refresh-error" role="alert">
+          <span>照片已加入但重新載入失敗。</span>
+          <button type="button" disabled={processing} onClick={() => void retryRefresh()}>重新載入</button>
+        </div>
+      )}
     </div>
   );
 }

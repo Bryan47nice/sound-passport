@@ -1,6 +1,6 @@
 import { Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { JourneyEditorRepository } from '../../data/ports';
+import { MomentVersionConflictError, type JourneyEditorRepository } from '../../data/ports';
 import type { JourneyMoment, MomentPatch, SongAvailability } from '../../domain/model';
 import { parseYouTubeVideoId } from '../../domain/youtube';
 import { useAutosave } from './useAutosave';
@@ -46,16 +46,72 @@ export function MomentEditor({
   const [draft, setDraft] = useState(moment);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [refreshState, setRefreshState] = useState<'idle' | 'refreshing' | 'error'>('idle');
+  const draftRef = useRef(moment);
+  const acceptedVersionRef = useRef({ momentId: moment.id, updatedAt: moment.updatedAt });
+  const mountedRef = useRef(false);
+  const refreshGenerationRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      refreshGenerationRef.current += 1;
+    };
+  }, []);
+
+  const refreshAfterSave = useCallback(async () => {
+    if (!onSaved) return;
+    const generation = refreshGenerationRef.current + 1;
+    refreshGenerationRef.current = generation;
+    if (mountedRef.current) setRefreshState('refreshing');
+    try {
+      await onSaved();
+      if (mountedRef.current && refreshGenerationRef.current === generation) setRefreshState('idle');
+    } catch {
+      if (mountedRef.current && refreshGenerationRef.current === generation) setRefreshState('error');
+    }
+  }, [onSaved]);
 
   const save = useCallback(async (patch: MomentPatch) => {
-    await repository.updateMoment(moment.id, patch);
-    await onSaved?.();
-  }, [moment.id, onSaved, repository]);
+    const momentId = moment.id;
+    const expectedUpdatedAt = acceptedVersionRef.current.updatedAt;
+    const updated = await repository.updateMoment(
+      momentId,
+      patch,
+      { expectedUpdatedAt },
+    );
+    if (acceptedVersionRef.current.momentId !== momentId) return;
+    acceptedVersionRef.current = { momentId, updatedAt: updated.updatedAt };
+    if (mountedRef.current && draftRef.current.id === momentId) {
+      const nextDraft = { ...draftRef.current, updatedAt: updated.updatedAt };
+      draftRef.current = nextDraft;
+      setDraft(nextDraft);
+      onMomentChange(nextDraft);
+      await refreshAfterSave();
+    }
+  }, [moment.id, onMomentChange, refreshAfterSave, repository]);
   const autosave = useAutosave({
     save,
     delay: 500,
     merge: mergeMomentPatches,
   });
+
+  useEffect(() => {
+    const accepted = acceptedVersionRef.current;
+    if (accepted.momentId !== moment.id) {
+      acceptedVersionRef.current = { momentId: moment.id, updatedAt: moment.updatedAt };
+      draftRef.current = moment;
+      setDraft(moment);
+      refreshGenerationRef.current += 1;
+      setRefreshState('idle');
+      return;
+    }
+    if (autosave.dirty || moment.updatedAt < accepted.updatedAt) return;
+    acceptedVersionRef.current = { momentId: moment.id, updatedAt: moment.updatedAt };
+    draftRef.current = moment;
+    setDraft(moment);
+  }, [autosave.dirty, moment]);
   const registrationRef = useRef<MomentAutosaveRegistration>({
     dirty: autosave.dirty,
     flush: autosave.flush,
@@ -79,6 +135,7 @@ export function MomentEditor({
   }, [onAutosaveChange]);
 
   const queueDraft = (nextDraft: JourneyMoment, patch: MomentPatch, immediate = false) => {
+    draftRef.current = nextDraft;
     setDraft(nextDraft);
     onMomentChange(nextDraft);
     if (immediate) autosave.saveNow(patch);
@@ -89,29 +146,29 @@ export function MomentEditor({
     field: Key,
     value: JourneyMoment[Key],
   ) => {
-    const nextDraft = { ...draft, [field]: value };
+    const nextDraft = { ...draftRef.current, [field]: value };
     queueDraft(nextDraft, { [field]: value });
   };
 
   const updateReason = (reason: string) => {
     const reasonStatus: JourneyMoment['reasonStatus'] = reason.trim() ? 'complete' : 'needs_review';
-    const nextDraft = { ...draft, reason, reasonStatus };
+    const nextDraft = { ...draftRef.current, reason, reasonStatus };
     queueDraft(nextDraft, { reason, reasonStatus });
   };
 
   const updateSong = (field: 'title' | 'artist' | 'sourceUrl', value: string) => {
-    const sourceUrl = field === 'sourceUrl' ? value : draft.song.sourceUrl;
+    const sourceUrl = field === 'sourceUrl' ? value : draftRef.current.song.sourceUrl;
     const availability = linkState(sourceUrl);
     const providerItemId = sourceUrl?.trim() ? parseYouTubeVideoId(sourceUrl.trim()) : undefined;
     const song = {
-      ...draft.song,
+      ...draftRef.current.song,
       [field]: value,
       sourceUrl,
       provider: sourceUrl?.trim() ? 'youtube' as const : 'manual' as const,
       providerItemId,
       availability,
     };
-    const nextDraft = { ...draft, song };
+    const nextDraft = { ...draftRef.current, song };
     queueDraft(nextDraft, {
       song: {
         title: song.title,
@@ -171,7 +228,7 @@ export function MomentEditor({
               value={draft.localDate}
               onChange={(event) => {
                 const localDate = event.target.value;
-                queueDraft({ ...draft, localDate }, { localDate }, true);
+                queueDraft({ ...draftRef.current, localDate }, { localDate }, true);
               }}
             />
           </label>
@@ -181,7 +238,7 @@ export function MomentEditor({
               value={draft.localTime ?? ''}
               onChange={(event) => {
                 const localTime = event.target.value || undefined;
-                queueDraft({ ...draft, localTime }, { localTime }, true);
+                queueDraft({ ...draftRef.current, localTime }, { localTime }, true);
               }}
             />
           </label>
@@ -234,6 +291,15 @@ export function MomentEditor({
           <button type="button" onClick={autosave.retry}>重試儲存</button>
         )}
       </div>
+      {autosave.state === 'error' && autosave.error instanceof MomentVersionConflictError && (
+        <p className="field-error" role="alert">時刻內容已在其他位置更新，本機草稿尚未覆寫。</p>
+      )}
+      {refreshState === 'error' && (
+        <div className="moment-refresh-error" role="alert">
+          <span>時刻已儲存，但重新載入失敗。</span>
+          <button type="button" onClick={() => void refreshAfterSave()}>重新載入</button>
+        </div>
+      )}
       {deleteError && <p className="field-error" role="alert">{deleteError}</p>}
     </div>
   );

@@ -17,10 +17,12 @@ import { validateJourneyForReview } from '../domain/journeyValidation';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
   JourneyVersionConflictError,
+  MomentVersionConflictError,
   PrivateDataStateConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type PrivateDataPrimaryKeys,
+  type UpdateMomentOptions,
   JourneyEditorRepository,
   JourneyRepository,
   PhotoAssetRepository,
@@ -421,13 +423,16 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       });
     },
 
-    async updateMoment(id: string, patch: MomentPatch) {
+    async updateMoment(id: string, patch: MomentPatch, options?: UpdateMomentOptions) {
       return runWrite(async (tx) => {
         const momentStore = tx.objectStore('moments');
         const moment = await momentStore.get(id);
         if (!moment) throw missingRecord('Moment', id);
+        if (options?.expectedUpdatedAt !== undefined && moment.updatedAt !== options.expectedUpdatedAt) {
+          throw new MomentVersionConflictError(id, options.expectedUpdatedAt, moment.updatedAt);
+        }
         const { song: songPatch, ...momentPatch } = patch;
-        const updated: Moment = { ...moment, ...momentPatch, updatedAt: new Date().toISOString() };
+        const updated: Moment = { ...moment, ...momentPatch, updatedAt: nextUpdatedAt(moment.updatedAt) };
 
         if (songPatch) {
           const songStore = tx.objectStore('songs');
@@ -483,10 +488,13 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
         const currentJourneyMoments = await momentStore.index('journeyId').getAll(journeyId);
         assertExactReorderSet(currentJourneyMoments, orderedIds);
         const momentsById = new Map(currentJourneyMoments.map((moment) => [moment.id, moment]));
-        const timestamp = new Date().toISOString();
         for (const [sortOrder, id] of orderedIds.entries()) {
           const moment = momentsById.get(id)!;
-          await momentStore.put({ ...moment, sortOrder, updatedAt: timestamp });
+          await momentStore.put({
+            ...moment,
+            sortOrder,
+            updatedAt: nextUpdatedAt(moment.updatedAt),
+          });
         }
         await advanceJourneyStoryVersion(tx, journeyId);
       });

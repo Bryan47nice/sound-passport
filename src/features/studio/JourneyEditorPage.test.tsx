@@ -12,7 +12,7 @@ import {
   type JourneyAutosaveOutboxRecord,
   type JourneyEditorRepository,
 } from '../../data/ports';
-import type { Journey, JourneyPatch, JourneyStory } from '../../domain/model';
+import type { Journey, JourneyPatch, JourneyStory, Moment } from '../../domain/model';
 import { claimJourneyOutboxOwner } from './journeyOutbox';
 
 const ownerStorageKey = 'sound-passport.journey-autosave-owner-id';
@@ -929,6 +929,195 @@ describe('JourneyEditorPage', () => {
     await waitFor(() => expect(deleteMoment).toHaveBeenCalledWith('moment-2'));
     expect(screen.getByLabelText('歌名')).toHaveValue('Third Song');
     expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual(['moment-1', 'moment-3']);
+  });
+
+  it('keeps the selected position aligned with the committed order when refresh returns stale ordering', async () => {
+    const secondMoment = {
+      ...story.moments[0],
+      id: 'moment-2',
+      songReferenceId: 'song-2',
+      sortOrder: 1,
+      song: { ...story.moments[0].song, id: 'song-2', title: 'Second Song' },
+    };
+    const staleStory = { ...story, moments: [story.moments[0], secondMoment] };
+    const getPrivateJourneyStory = vi.fn(async () => staleStory);
+    const reorderMoments = vi.fn(async () => undefined);
+    renderRoute(editorStub({ getPrivateJourneyStory, reorderMoments }));
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    await waitFor(() => expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2));
+
+    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      secondMoment.id,
+      story.moments[0].id,
+    ]);
+    expect(screen.getByText('第 2 則')).toBeInTheDocument();
+  });
+
+  it('does not let an in-flight reorder refresh roll back a newer optimistic order', async () => {
+    const firstRefresh = deferred<JourneyStory | undefined>();
+    const secondWrite = deferred<void>();
+    const secondMoment = {
+      ...story.moments[0],
+      id: 'moment-2',
+      songReferenceId: 'song-2',
+      sortOrder: 1,
+      song: { ...story.moments[0].song, id: 'song-2', title: 'Second Song' },
+    };
+    const thirdMoment = {
+      ...story.moments[0],
+      id: 'moment-3',
+      songReferenceId: 'song-3',
+      sortOrder: 2,
+      song: { ...story.moments[0].song, id: 'song-3', title: 'Third Song' },
+    };
+    const threeMomentStory = { ...story, moments: [story.moments[0], secondMoment, thirdMoment] };
+    const getPrivateJourneyStory = vi.fn()
+      .mockResolvedValueOnce(threeMomentStory)
+      .mockImplementationOnce(() => firstRefresh.promise)
+      .mockResolvedValue(threeMomentStory);
+    const reorderMoments = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => secondWrite.promise);
+    renderRoute(editorStub({ getPrivateJourneyStory, reorderMoments }));
+    await screen.findByRole('heading', { name: story.journey.title });
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    await waitFor(() => expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole('button', { name: '將第三則上移' }));
+    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      secondMoment.id,
+      thirdMoment.id,
+      story.moments[0].id,
+    ]);
+    await waitFor(() => expect(screen.getByText('第 3 則')).toBeInTheDocument());
+
+    await act(async () => {
+      firstRefresh.resolve(threeMomentStory);
+      await firstRefresh.promise;
+      await flushMicrotasks();
+    });
+    expect(reorderMoments).toHaveBeenCalledTimes(2);
+    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      secondMoment.id,
+      thirdMoment.id,
+      story.moments[0].id,
+    ]);
+    expect(screen.getByText('第 3 則')).toBeInTheDocument();
+
+    await act(async () => {
+      secondWrite.resolve();
+      await secondWrite.promise;
+      await flushMicrotasks();
+    });
+  });
+
+  it('ignores an older moment refresh that resolves after a newer reorder refresh', async () => {
+    const olderRefresh = deferred<JourneyStory | undefined>();
+    const secondMoment = {
+      ...story.moments[0],
+      id: 'moment-2',
+      songReferenceId: 'song-2',
+      sortOrder: 1,
+      song: { ...story.moments[0].song, id: 'song-2', title: 'Second Song' },
+    };
+    const twoMomentStory = { ...story, moments: [story.moments[0], secondMoment] };
+    const getPrivateJourneyStory = vi.fn()
+      .mockResolvedValueOnce(twoMomentStory)
+      .mockImplementationOnce(() => olderRefresh.promise)
+      .mockResolvedValue(twoMomentStory);
+    const committedMoment = {
+      ...story.moments[0],
+      caption: '已提交的新文案',
+      updatedAt: '2024-05-01T00:00:00.001Z',
+    };
+    const updateMoment = vi.fn(async () => committedMoment);
+    const reorderMoments = vi.fn(async () => undefined);
+    renderRoute(editorStub({ getPrivateJourneyStory, updateMoment, reorderMoments }));
+    await screen.findByRole('heading', { name: '東京夜行' });
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText('時刻文案'), { target: { value: committedMoment.caption } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+    });
+    expect(updateMoment).toHaveBeenCalledTimes(1);
+    expect(getPrivateJourneyStory).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '將第二則上移' }));
+    await act(flushMicrotasks);
+    expect(reorderMoments).toHaveBeenCalledTimes(1);
+    expect(getPrivateJourneyStory).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      olderRefresh.resolve(twoMomentStory);
+      await olderRefresh.promise;
+      await flushMicrotasks();
+    });
+
+    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      secondMoment.id,
+      story.moments[0].id,
+    ]);
+    expect(screen.getByText('第 2 則')).toBeInTheDocument();
+    expect(screen.getByLabelText('時刻文案')).toHaveValue(committedMoment.caption);
+  });
+
+  it('keeps the first committed upload visible and selected when its story refresh fails', async () => {
+    const created: Moment = {
+      id: 'moment-uploaded',
+      journeyId: story.journey.id,
+      photoAssetId: 'photo-uploaded',
+      photoAlt: '新時刻.jpg',
+      songReferenceId: 'song-uploaded',
+      localDate: story.journey.startDate,
+      cityLabel: story.journey.cityLabels[0],
+      placeLabel: '',
+      caption: '',
+      reason: '',
+      reasonStatus: 'needs_review',
+      sortOrder: 1,
+      createdAt: '2026-07-13T00:00:00.000Z',
+      updatedAt: '2026-07-13T00:00:00.000Z',
+    };
+    const getPrivateJourneyStory = vi.fn()
+      .mockResolvedValueOnce(story)
+      .mockRejectedValueOnce(new Error('refresh failed'));
+    const addMoments = vi.fn(async () => [created]);
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({
+      width: 100,
+      height: 80,
+      close: vi.fn(),
+    }));
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      drawImage: vi.fn(),
+      getImageData: vi.fn(() => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) })),
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => {
+      callback(new Blob(['normalized'], { type: 'image/webp' }));
+    });
+    renderRoute(editorStub({ getPrivateJourneyStory, addMoments }));
+    await screen.findByRole('heading', { name: '東京夜行' });
+
+    fireEvent.change(screen.getByLabelText('加入照片'), {
+      target: { files: [new File(['photo'], '新時刻.jpg', { type: 'image/jpeg' })] },
+    });
+
+    expect(await screen.findByText('照片已加入但重新載入失敗。')).toBeInTheDocument();
+    expect(addMoments).toHaveBeenCalledTimes(1);
+    const momentList = within(screen.getByRole('listbox', { name: '時刻排序' }));
+    expect(momentList.getAllByRole('option').map((item) => item.dataset.id)).toEqual([
+      story.moments[0].id,
+      created.id,
+    ]);
+    expect(screen.getByText('第 2 則')).toBeInTheDocument();
+    expect(screen.getByLabelText('歌名')).toHaveValue('');
   });
 
   it('defines the exact wide grid and stacks preview above the form on narrow desktop', () => {

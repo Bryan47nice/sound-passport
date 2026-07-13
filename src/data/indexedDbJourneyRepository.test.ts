@@ -527,6 +527,68 @@ describe('indexedDbJourneyRepository', () => {
     db.close();
   });
 
+  it('rejects a stale expected moment version before writing either the moment or its song', async () => {
+    const { db, repository } = await openRepository('update-moment-version-conflict');
+    const journey = await repository.createJourney(journeyInput());
+    const [moment] = await repository.addMoments(journey.id, [photoInput('versioned.jpg')]);
+    const firstUpdate = await repository.updateMoment(
+      moment.id,
+      {
+        caption: 'First committed caption',
+        song: { title: 'First title', artist: 'First artist', sourceUrl: '' },
+      },
+      { expectedUpdatedAt: moment.updatedAt },
+    );
+    const beforeConflict = await repository.exportSnapshot();
+
+    await expect(repository.updateMoment(
+      moment.id,
+      {
+        caption: 'Stale caption must not persist',
+        song: { title: 'Stale title', artist: 'Stale artist', sourceUrl: '' },
+      },
+      { expectedUpdatedAt: moment.updatedAt },
+    )).rejects.toMatchObject({
+      name: 'MomentVersionConflictError',
+      momentId: moment.id,
+      expectedUpdatedAt: moment.updatedAt,
+      actualUpdatedAt: firstUpdate.updatedAt,
+    });
+
+    expect(await repository.exportSnapshot()).toEqual(beforeConflict);
+    db.close();
+  });
+
+  it('advances moment versions monotonically for same-millisecond updates and reorder writes', async () => {
+    const fixedNow = new Date('2099-04-05T06:07:08.000Z');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(fixedNow.getTime());
+    try {
+      const { db, repository } = await openRepository('monotonic-moment-version');
+      const journey = await repository.createJourney(journeyInput());
+      const [moment] = await repository.addMoments(journey.id, [photoInput('monotonic.jpg')]);
+
+      const firstUpdate = await repository.updateMoment(
+        moment.id,
+        { caption: 'First' },
+        { expectedUpdatedAt: moment.updatedAt },
+      );
+      const secondUpdate = await repository.updateMoment(
+        moment.id,
+        { caption: 'Second' },
+        { expectedUpdatedAt: firstUpdate.updatedAt },
+      );
+      await repository.reorderMoments(journey.id, [moment.id]);
+      const reordered = (await repository.getPrivateJourneyStory(journey.id))!.moments[0];
+
+      expect(firstUpdate.updatedAt).toBe(fixedNow.toISOString());
+      expect(secondUpdate.updatedAt).toBe(new Date(fixedNow.getTime() + 1).toISOString());
+      expect(reordered.updatedAt).toBe(new Date(fixedNow.getTime() + 2).toISOString());
+      db.close();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('advances the story version and revalidates a complete journey while reordering', async () => {
     const { db, repository } = await openRepository('reorder-story-version');
     const created = await repository.createJourney(journeyInput());
@@ -570,6 +632,30 @@ describe('indexedDbJourneyRepository', () => {
 
     expect(await repository.exportSnapshot()).toEqual(beforeAttempt);
     db.close();
+  });
+
+  it('rolls back a failed moment batch without leaving orphan songs or photos', async () => {
+    const { db, repository } = await openRepository('add-moments-mid-batch-rollback');
+    const journey = await repository.createJourney(journeyInput());
+    const beforeAttempt = await repository.exportSnapshot();
+    const firstPhotoId = '00000000-0000-4000-8000-000000000001';
+    const randomUuid = vi.spyOn(crypto, 'randomUUID')
+      .mockReturnValueOnce(firstPhotoId)
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000002')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000003')
+      .mockReturnValueOnce(firstPhotoId);
+
+    try {
+      await expect(repository.addMoments(journey.id, [
+        photoInput('first.jpg'),
+        photoInput('second.jpg'),
+      ])).rejects.toBeDefined();
+
+      expect(await repository.exportSnapshot()).toEqual(beforeAttempt);
+    } finally {
+      randomUuid.mockRestore();
+      db.close();
+    }
   });
 
   it('rejects incomplete or foreign reorder sets and writes contiguous sort orders', async () => {

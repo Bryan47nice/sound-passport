@@ -16,7 +16,15 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
-import { type KeyboardEvent, type MouseEvent, type ReactNode, useLayoutEffect, useRef, useState } from 'react';
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import type { JourneyEditorRepository } from '../../data/ports';
 import type { JourneyMoment } from '../../domain/model';
 
@@ -36,8 +44,18 @@ interface SortableMomentOptionProps {
   index: number;
   count: number;
   selected: boolean;
+  tabbable: boolean;
   onSelect: () => void;
+  onNavigate: (key: OptionNavigationKey) => void;
+  onNodeChange: (node: HTMLLIElement | null) => void;
   onMove: (direction: -1 | 1) => void;
+}
+
+type OptionNavigationKey = 'ArrowUp' | 'ArrowDown' | 'Home' | 'End';
+
+interface ReorderFailure {
+  kind: 'persistence' | 'refresh';
+  orderedIds: string[];
 }
 
 const chineseDigits = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
@@ -59,7 +77,10 @@ function SortableMomentOption({
   index,
   count,
   selected,
+  tabbable,
   onSelect,
+  onNavigate,
+  onNodeChange,
   onMove,
 }: SortableMomentOptionProps) {
   const position = chinesePosition(index);
@@ -75,9 +96,15 @@ function SortableMomentOption({
 
   const handleOptionKeyDown = (event: KeyboardEvent<HTMLLIElement>) => {
     if (event.target !== event.currentTarget) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    onSelect();
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onSelect();
+      return;
+    }
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      onNavigate(event.key);
+    }
   };
   const stopAndMove = (event: MouseEvent<HTMLButtonElement>, direction: -1 | 1) => {
     event.stopPropagation();
@@ -86,9 +113,12 @@ function SortableMomentOption({
 
   return (
     <li
-      ref={setNodeRef}
+      ref={(node) => {
+        setNodeRef(node);
+        onNodeChange(node);
+      }}
       role="option"
-      tabIndex={0}
+      tabIndex={tabbable ? 0 : -1}
       data-id={moment.id}
       aria-selected={selected}
       className={`${selected ? 'is-current' : ''}${isDragging ? ' is-dragging' : ''}`}
@@ -147,45 +177,149 @@ export function MomentList({
   headerActions,
 }: MomentListProps) {
   const [orderedMoments, setOrderedMoments] = useState(moments);
-  const [reorderError, setReorderError] = useState('');
+  const [reorderFailure, setReorderFailure] = useState<ReorderFailure>();
+  const orderedMomentsRef = useRef(moments);
   const persistenceTailRef = useRef<Promise<void>>(Promise.resolve());
+  const latestGenerationRef = useRef(0);
+  const protectedGenerationRef = useRef<number | undefined>(undefined);
+  const confirmedGenerationRef = useRef<number | undefined>(undefined);
+  const optionNodesRef = useRef(new Map<string, HTMLLIElement>());
+  const mountedRef = useRef(false);
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  useLayoutEffect(() => setOrderedMoments(moments), [moments]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
-  const commitOrder = (nextMoments: JourneyMoment[]) => {
-    const orderedIds = nextMoments.map((moment) => moment.id);
+  useLayoutEffect(() => {
+    let nextMoments = moments;
+    if (protectedGenerationRef.current !== undefined) {
+      const currentIds = orderedMomentsRef.current.map(({ id }) => id);
+      const incomingIds = moments.map(({ id }) => id);
+      const confirmed = confirmedGenerationRef.current === protectedGenerationRef.current;
+      const carriesProtectedOrder =
+        incomingIds.length === currentIds.length &&
+        incomingIds.every((id, index) => id === currentIds[index]);
+      if (confirmed && carriesProtectedOrder) {
+        protectedGenerationRef.current = undefined;
+        confirmedGenerationRef.current = undefined;
+      } else {
+        const momentsById = new Map(moments.map((moment) => [moment.id, moment]));
+        const protectedIds = new Set(orderedMomentsRef.current.map(({ id }) => id));
+        nextMoments = [
+          ...orderedMomentsRef.current.flatMap(({ id }) => {
+            const next = momentsById.get(id);
+            return next ? [next] : [];
+          }),
+          ...moments.filter(({ id }) => !protectedIds.has(id)),
+        ];
+      }
+    }
+    orderedMomentsRef.current = nextMoments;
     setOrderedMoments(nextMoments);
-    setReorderError('');
-    onOrderChange?.(orderedIds);
+  }, [moments]);
+
+  const refreshOrder = async (generation: number, orderedIds: string[]) => {
+    if (!onReordered) {
+      if (generation === latestGenerationRef.current) confirmedGenerationRef.current = generation;
+      return;
+    }
+    try {
+      await onReordered(orderedIds);
+    } catch {
+      if (mountedRef.current && generation === latestGenerationRef.current) {
+        setReorderFailure({ kind: 'refresh', orderedIds: [...orderedIds] });
+      }
+      return;
+    }
+    if (mountedRef.current && generation === latestGenerationRef.current) {
+      confirmedGenerationRef.current = generation;
+      setReorderFailure(undefined);
+    }
+  };
+
+  const enqueuePersistence = (orderedIds: string[]) => {
+    const generation = latestGenerationRef.current + 1;
+    latestGenerationRef.current = generation;
+    protectedGenerationRef.current = generation;
+    confirmedGenerationRef.current = undefined;
+    setReorderFailure(undefined);
 
     const persist = async () => {
-      await repository.reorderMoments(journeyId, orderedIds);
-      await onReordered?.(orderedIds);
+      try {
+        await repository.reorderMoments(journeyId, orderedIds);
+      } catch {
+        if (mountedRef.current && generation === latestGenerationRef.current) {
+          setReorderFailure({ kind: 'persistence', orderedIds: [...orderedIds] });
+        }
+        return;
+      }
+      if (generation === latestGenerationRef.current) await refreshOrder(generation, orderedIds);
     };
     const queued = persistenceTailRef.current.then(persist, persist);
     persistenceTailRef.current = queued.then(() => undefined, () => undefined);
-    void queued.catch(() => setReorderError('無法儲存時刻順序，請再試一次。'));
   };
 
-  const move = (index: number, direction: -1 | 1) => {
+  const commitOrder = (nextMoments: JourneyMoment[]) => {
+    const orderedIds = nextMoments.map((moment) => moment.id);
+    orderedMomentsRef.current = nextMoments;
+    setOrderedMoments(nextMoments);
+    enqueuePersistence(orderedIds);
+    onOrderChange?.(orderedIds);
+  };
+
+  const move = (momentId: string, direction: -1 | 1) => {
+    const currentMoments = orderedMomentsRef.current;
+    const index = currentMoments.findIndex(({ id }) => id === momentId);
     const target = index + direction;
-    if (target < 0 || target >= orderedMoments.length) return;
-    commitOrder(arrayMove(orderedMoments, index, target));
+    if (index < 0 || target < 0 || target >= currentMoments.length) return;
+    commitOrder(arrayMove(currentMoments, index, target));
   };
 
   const handleDragEnd = ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return;
-    const activeIndex = orderedMoments.findIndex((moment) => moment.id === active.id);
-    const overIndex = orderedMoments.findIndex((moment) => moment.id === over.id);
+    const currentMoments = orderedMomentsRef.current;
+    const activeIndex = currentMoments.findIndex((moment) => moment.id === active.id);
+    const overIndex = currentMoments.findIndex((moment) => moment.id === over.id);
     if (activeIndex < 0 || overIndex < 0) return;
-    commitOrder(arrayMove(orderedMoments, activeIndex, overIndex));
+    commitOrder(arrayMove(currentMoments, activeIndex, overIndex));
+  };
+
+  const navigateOption = (momentId: string, key: OptionNavigationKey) => {
+    const currentMoments = orderedMomentsRef.current;
+    const currentIndex = currentMoments.findIndex(({ id }) => id === momentId);
+    if (currentIndex < 0) return;
+    let targetIndex = currentIndex;
+    if (key === 'ArrowUp') targetIndex = Math.max(0, currentIndex - 1);
+    if (key === 'ArrowDown') targetIndex = Math.min(currentMoments.length - 1, currentIndex + 1);
+    if (key === 'Home') targetIndex = 0;
+    if (key === 'End') targetIndex = currentMoments.length - 1;
+    const targetId = currentMoments[targetIndex]?.id;
+    if (!targetId) return;
+    optionNodesRef.current.get(targetId)?.focus();
+    onSelect(targetId);
+  };
+
+  const retryPersistence = () => {
+    if (reorderFailure?.kind !== 'persistence') return;
+    enqueuePersistence(reorderFailure.orderedIds);
+  };
+
+  const retryRefresh = () => {
+    if (reorderFailure?.kind !== 'refresh') return;
+    const generation = latestGenerationRef.current;
+    const orderedIds = reorderFailure.orderedIds;
+    setReorderFailure(undefined);
+    void refreshOrder(generation, orderedIds);
   };
 
   const renderedIds = orderedMoments.map((moment) => moment.id);
+  const selectedExists = orderedMoments.some(({ id }) => id === selectedMomentId);
+  const tabStopId = selectedExists ? selectedMomentId : orderedMoments[0]?.id;
 
   return (
     <section className="journey-moment-list" aria-label="時刻清單">
@@ -207,15 +341,35 @@ export function MomentList({
                   index={index}
                   count={orderedMoments.length}
                   selected={moment.id === selectedMomentId}
+                  tabbable={moment.id === tabStopId}
                   onSelect={() => onSelect(moment.id)}
-                  onMove={(direction) => move(index, direction)}
+                  onNavigate={(key) => navigateOption(moment.id, key)}
+                  onNodeChange={(node) => {
+                    if (node) optionNodesRef.current.set(moment.id, node);
+                    else optionNodesRef.current.delete(moment.id);
+                  }}
+                  onMove={(direction) => move(moment.id, direction)}
                 />
               ))}
             </ol>
           </SortableContext>
         </DndContext>
       )}
-      {reorderError && <p className="field-error" role="alert">{reorderError}</p>}
+      {reorderFailure && (
+        <div className="moment-reorder-error field-error" role="alert">
+          <span>
+            {reorderFailure.kind === 'persistence'
+              ? '無法儲存時刻順序，請再試一次。'
+              : '順序已儲存，但重新載入失敗。'}
+          </span>
+          <button
+            type="button"
+            onClick={reorderFailure.kind === 'persistence' ? retryPersistence : retryRefresh}
+          >
+            {reorderFailure.kind === 'persistence' ? '重試儲存' : '重新載入'}
+          </button>
+        </div>
+      )}
     </section>
   );
 }

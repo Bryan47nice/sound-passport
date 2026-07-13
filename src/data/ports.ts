@@ -33,6 +33,21 @@ export class JourneyVersionConflictError extends Error {
   }
 }
 
+export interface UpdateMomentOptions {
+  expectedUpdatedAt?: string;
+}
+
+export class MomentVersionConflictError extends Error {
+  constructor(
+    readonly momentId: string,
+    readonly expectedUpdatedAt: string,
+    readonly actualUpdatedAt: string,
+  ) {
+    super(`Moment ${momentId} changed after version ${expectedUpdatedAt}.`);
+    this.name = 'MomentVersionConflictError';
+  }
+}
+
 export interface JourneyEditorRepository {
   listPrivateJourneys(): Promise<Journey[]>;
   createJourney(input: NewJourney): Promise<Journey>;
@@ -40,7 +55,7 @@ export interface JourneyEditorRepository {
   deleteJourney(id: string): Promise<void>;
   getPrivateJourneyStory(id: string): Promise<JourneyStory | undefined>;
   addMoments(journeyId: string, photos: NormalizedPhotoInput[]): Promise<Moment[]>;
-  updateMoment(id: string, patch: MomentPatch): Promise<Moment>;
+  updateMoment(id: string, patch: MomentPatch, options?: UpdateMomentOptions): Promise<Moment>;
   deleteMoment(id: string): Promise<void>;
   reorderMoments(journeyId: string, orderedIds: string[]): Promise<void>;
   setJourneyStatus(id: string, status: JourneyStatus): Promise<Journey>;

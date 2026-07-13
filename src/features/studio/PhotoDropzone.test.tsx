@@ -128,4 +128,40 @@ describe('PhotoDropzone', () => {
     expect(addMoments).not.toHaveBeenCalled();
     expect(onSelectMoment).not.toHaveBeenCalled();
   });
+
+  it('keeps a committed batch selected and retries only its failed refresh', async () => {
+    const file = new File(['first'], '已加入.jpg', { type: 'image/jpeg' });
+    const created = [moment('moment-created', file.name, 0)];
+    const addMoments = vi.fn(async () => created);
+    const onMomentsCommitted = vi.fn();
+    const onMomentsAdded = vi.fn()
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValueOnce(undefined);
+    const onSelectMoment = vi.fn();
+    render(
+      <PhotoDropzone
+        journeyId="journey-1"
+        repository={{ addMoments }}
+        normalize={vi.fn(async () => normalized(file.name))}
+        onMomentsCommitted={onMomentsCommitted}
+        onMomentsAdded={onMomentsAdded}
+        onSelectMoment={onSelectMoment}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('加入照片'), { target: { files: [file] } });
+
+    expect(await screen.findByText('照片已加入但重新載入失敗。')).toBeInTheDocument();
+    expect(addMoments).toHaveBeenCalledTimes(1);
+    expect(onMomentsCommitted).toHaveBeenCalledWith(created);
+    expect(onSelectMoment).toHaveBeenCalledWith(created[0].id);
+    expect(screen.getByLabelText('加入照片')).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '重新載入' }));
+    await waitFor(() => expect(onMomentsAdded).toHaveBeenCalledTimes(2));
+
+    expect(addMoments).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('照片已加入但重新載入失敗。')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('加入照片')).toBeEnabled();
+  });
 });

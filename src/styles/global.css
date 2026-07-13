@@ -161,6 +161,12 @@ button { font: inherit; }
 .photo-dropzone[aria-busy="true"] label { cursor: wait; opacity: .64; }
 .photo-upload-failures { display: grid; gap: 4px; margin: 9px 0 0; padding: 0; color: var(--coral); list-style: none; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
 .photo-upload-control > .field-error { margin-top: 9px; }
+.photo-refresh-error, .moment-refresh-error, .moment-reorder-error { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 8px; border: 1px solid #e7b8ad; border-radius: 4px; background: #fff4f1; color: var(--coral); font-size: 12px; font-weight: 700; }
+.photo-refresh-error, .moment-refresh-error { margin-top: 9px; }
+.moment-reorder-error { margin-top: 10px; }
+.photo-refresh-error span, .moment-refresh-error span, .moment-reorder-error span { min-width: 0; overflow-wrap: anywhere; }
+.photo-refresh-error button, .moment-refresh-error button, .moment-reorder-error button { flex: 0 0 auto; min-height: 28px; padding: 0 8px; border: 1px solid #d99a8c; border-radius: 4px; background: var(--surface); color: var(--ink); cursor: pointer; font: inherit; font-weight: 800; }
+.photo-refresh-error button:disabled, .moment-refresh-error button:disabled, .moment-reorder-error button:disabled { cursor: wait; opacity: .6; }
 .journey-moment-list ol { max-height: min(66vh, 720px); margin: 14px 0 0; padding: 0; overflow-y: auto; list-style: none; }
 .journey-moment-list li { display: grid; grid-template-columns: 28px 24px minmax(0, 1fr) 24px; gap: 6px; min-height: 64px; align-items: center; padding: 7px 4px; border-bottom: 1px solid var(--line); outline: 0; cursor: pointer; }
 .journey-moment-list li.is-current { border-left: 3px solid var(--coral); background: var(--paper); }
