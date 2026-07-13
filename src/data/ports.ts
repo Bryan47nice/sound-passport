@@ -1,7 +1,42 @@
-import type { CountrySummary, Journey, JourneyStory } from '../domain/model';
+import type {
+  CountrySummary,
+  Journey,
+  JourneyPatch,
+  JourneyStatus,
+  JourneyStory,
+  Moment,
+  MomentPatch,
+  NewJourney,
+  NormalizedPhotoInput,
+  PhotoAsset,
+  PrivateJourneySnapshot,
+} from '../domain/model';
 
 export interface JourneyRepository {
   listCountrySummaries(): Promise<CountrySummary[]>;
   listJourneysByCountry(countryCode: string): Promise<Journey[]>;
   getJourneyStory(journeyId: string): Promise<JourneyStory | undefined>;
+}
+
+export interface JourneyEditorRepository {
+  listPrivateJourneys(): Promise<Journey[]>;
+  createJourney(input: NewJourney): Promise<Journey>;
+  updateJourney(id: string, patch: JourneyPatch): Promise<Journey>;
+  deleteJourney(id: string): Promise<void>;
+  getPrivateJourneyStory(id: string): Promise<JourneyStory | undefined>;
+  addMoments(journeyId: string, photos: NormalizedPhotoInput[]): Promise<Moment[]>;
+  updateMoment(id: string, patch: MomentPatch): Promise<Moment>;
+  deleteMoment(id: string): Promise<void>;
+  reorderMoments(journeyId: string, orderedIds: string[]): Promise<void>;
+  setJourneyStatus(id: string, status: JourneyStatus): Promise<Journey>;
+}
+
+export interface PhotoAssetRepository {
+  getPhotoAsset(id: string): Promise<PhotoAsset | undefined>;
+}
+
+export interface PrivateDataPort {
+  exportSnapshot(): Promise<PrivateJourneySnapshot>;
+  importSnapshot(snapshot: PrivateJourneySnapshot): Promise<void>;
+  clearPrivateData(): Promise<void>;
 }
