@@ -18,10 +18,25 @@ export interface JourneyRepository {
   getJourneyStory(journeyId: string): Promise<JourneyStory | undefined>;
 }
 
+export interface UpdateJourneyOptions {
+  expectedUpdatedAt?: string;
+}
+
+export class JourneyVersionConflictError extends Error {
+  constructor(
+    readonly journeyId: string,
+    readonly expectedUpdatedAt: string,
+    readonly actualUpdatedAt: string,
+  ) {
+    super(`Journey ${journeyId} changed after version ${expectedUpdatedAt}.`);
+    this.name = 'JourneyVersionConflictError';
+  }
+}
+
 export interface JourneyEditorRepository {
   listPrivateJourneys(): Promise<Journey[]>;
   createJourney(input: NewJourney): Promise<Journey>;
-  updateJourney(id: string, patch: JourneyPatch): Promise<Journey>;
+  updateJourney(id: string, patch: JourneyPatch, options?: UpdateJourneyOptions): Promise<Journey>;
   deleteJourney(id: string): Promise<void>;
   getPrivateJourneyStory(id: string): Promise<JourneyStory | undefined>;
   addMoments(journeyId: string, photos: NormalizedPhotoInput[]): Promise<Moment[]>;

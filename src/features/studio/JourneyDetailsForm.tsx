@@ -1,13 +1,14 @@
 import { Plus, X } from 'lucide-react';
 import { type KeyboardEvent, useState } from 'react';
 import { listCountries } from '../../domain/countryCatalog';
-import type { Journey, JourneyPatch } from '../../domain/model';
+import type { Journey } from '../../domain/model';
+import type { JourneyUserPatch } from './journeyPatch';
 
 interface JourneyDetailsFormProps {
   draft: Journey;
   dateError: string;
-  onTextChange: (patch: JourneyPatch) => void;
-  onImmediateChange: (patch: JourneyPatch) => void;
+  onTextChange: (patch: JourneyUserPatch) => void;
+  onImmediateChange: (patch: JourneyUserPatch) => void;
   onDateChange: (field: 'startDate' | 'endDate', value: string) => void;
 }
 
@@ -59,13 +60,20 @@ export function JourneyDetailsForm({
       </label>
       <div className="journey-date-fields">
         <label>開始日期
-          <input type="date" value={draft.startDate} onChange={(event) => onDateChange('startDate', event.target.value)} />
+          <input
+            type="date"
+            value={draft.startDate}
+            aria-describedby={dateError ? 'journey-date-error' : undefined}
+            aria-invalid={dateError ? true : undefined}
+            onChange={(event) => onDateChange('startDate', event.target.value)}
+          />
         </label>
         <label>結束日期
           <input
             type="date"
             value={draft.endDate}
             aria-describedby={dateError ? 'journey-date-error' : undefined}
+            aria-invalid={dateError ? true : undefined}
             onChange={(event) => onDateChange('endDate', event.target.value)}
           />
         </label>
@@ -93,7 +101,7 @@ export function JourneyDetailsForm({
           ))}
         </ul>
       )}
-      <label>旅程總文（選填）
+      <label className="journey-summary-field">旅程總文（選填）
         <textarea rows={7} value={draft.summary} onChange={(event) => onTextChange({ summary: event.target.value })} />
       </label>
     </form>

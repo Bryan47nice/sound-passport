@@ -165,6 +165,48 @@ describe('indexedDbJourneyRepository', () => {
     reopenedDb.close();
   });
 
+  it('rejects a stale expected journey version and rolls back every field in the conflicting patch', async () => {
+    const { db, repository } = await openRepository('update-version-conflict');
+    const created = await repository.createJourney(journeyInput());
+    const firstUpdate = await repository.updateJourney(
+      created.id,
+      { title: 'First writer' },
+      { expectedUpdatedAt: created.updatedAt },
+    );
+    const beforeConflict = await repository.exportSnapshot();
+
+    await expect(repository.updateJourney(
+      created.id,
+      { title: 'Stale writer', summary: 'This must not be persisted.' },
+      { expectedUpdatedAt: created.updatedAt },
+    )).rejects.toMatchObject({
+      name: 'JourneyVersionConflictError',
+      journeyId: created.id,
+      expectedUpdatedAt: created.updatedAt,
+      actualUpdatedAt: firstUpdate.updatedAt,
+    });
+
+    expect(await repository.exportSnapshot()).toEqual(beforeConflict);
+    db.close();
+  });
+
+  it('advances updatedAt monotonically when multiple writes happen in the same millisecond', async () => {
+    const fixedNow = new Date('2099-04-05T06:07:08.000Z');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(fixedNow.getTime());
+    try {
+      const { db, repository } = await openRepository('monotonic-update-version');
+      const created = await repository.createJourney(journeyInput());
+      const firstUpdate = await repository.updateJourney(created.id, { title: 'First' });
+      const secondUpdate = await repository.updateJourney(created.id, { title: 'Second' });
+
+      expect(firstUpdate.updatedAt).toBe(fixedNow.toISOString());
+      expect(secondUpdate.updatedAt).toBe(new Date(fixedNow.getTime() + 1).toISOString());
+      db.close();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('adds moments, songs, and photo assets in photo selection order', async () => {
     const { db, repository } = await openRepository('add-moments');
     const journey = await repository.createJourney(journeyInput());

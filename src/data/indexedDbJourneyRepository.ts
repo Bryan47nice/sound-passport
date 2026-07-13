@@ -15,6 +15,7 @@ import type {
 } from '../domain/model';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
+  JourneyVersionConflictError,
   PrivateDataStateConflictError,
   type PrivateDataPrimaryKeys,
   JourneyEditorRepository,
@@ -51,6 +52,12 @@ function missingRecord(kind: string, id: string) {
 
 function relationshipError(detail: string) {
   return new Error(`Snapshot relationship is invalid: ${detail}.`);
+}
+
+function nextUpdatedAt(previousUpdatedAt: string) {
+  const previousTime = Date.parse(previousUpdatedAt);
+  const minimumTime = Number.isFinite(previousTime) ? previousTime + 1 : Date.now();
+  return new Date(Math.max(Date.now(), minimumTime)).toISOString();
 }
 
 function compareByCreatedAtAndId(
@@ -182,15 +189,22 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     return journeys;
   }
 
-  async function updateJourney(id: string, patch: JourneyPatch) {
+  async function updateJourney(
+    id: string,
+    patch: JourneyPatch,
+    options?: { expectedUpdatedAt?: string },
+  ) {
     return runWrite(async (tx) => {
       const store = tx.objectStore('journeys');
       const journey = await store.get(id);
       if (!journey) throw missingRecord('Journey', id);
+      if (options?.expectedUpdatedAt !== undefined && journey.updatedAt !== options.expectedUpdatedAt) {
+        throw new JourneyVersionConflictError(id, options.expectedUpdatedAt, journey.updatedAt);
+      }
       if (patch.coverPhotoAssetId && !(await tx.objectStore('photos').get(patch.coverPhotoAssetId))) {
         throw relationshipError(`journey ${id} references missing photo ${patch.coverPhotoAssetId}`);
       }
-      const updated: Journey = { ...journey, ...patch, updatedAt: new Date().toISOString() };
+      const updated: Journey = { ...journey, ...patch, updatedAt: nextUpdatedAt(journey.updatedAt) };
       await store.put(updated);
       return updated;
     });
