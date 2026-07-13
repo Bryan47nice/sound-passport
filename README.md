@@ -1,17 +1,6 @@
 # Sound Passport
 
-## Map visual baselines
-
-Map visual snapshots cover only the MapLibre canvas. They use the Chromium project with SwiftShader and shared baseline names, so the committed files do not include a host-platform suffix. Regenerate the baselines once after an intentional canvas rendering change, then rerun the same suite without updates:
-
-```powershell
-npm.cmd run test:e2e -- --update-snapshots
-npm.cmd run test:e2e
-```
-
-The desktop and mobile baseline paths are `e2e/atlas-playback.spec.ts-snapshots/atlas-map-initial-desktop.png`, `atlas-map-remount-desktop.png`, `atlas-map-initial-mobile.png`, and `atlas-map-remount-mobile.png`.
-
-Sound Passport 是一個「預設私人」的旅行音樂日誌，協助旅行者保存某個時刻的照片、地點、歌曲與感受，之後再從世界地圖進入該趟旅程，以可播放的故事重新回味。
+Sound Passport 是一個「預設私人」的旅行音樂日誌。桌機整理工作台可建立旅程、批次加入照片、記錄歌曲與感受，再從世界地圖進入已完成旅程回放；私人內容只保存在目前瀏覽器與使用者主動下載的備份檔。
 
 ## 本機執行
 
@@ -27,38 +16,49 @@ npm.cmd run test:e2e
 
 `npm.cmd exec playwright install chromium` 只需在首次執行 E2E 前安裝。`npm.cmd run test:e2e` 會由 Playwright 啟動並關閉 in-process Vite test server，不會重複 build 或留下長駐 server。
 
-## 目前版本
+## 私人旅程工作台
 
-目前完成唯讀的「世界地圖 → 國家 → 旅程 → 播放器」流程，資料全部來自 repository 內的示範 fixtures，照片使用遠端示範圖片。這些資料不是使用者資料，也不會寫回任何後端。
+- Atlas 仍是首頁，只顯示內建示範旅程與狀態為「已完成」的私人旅程。
+- `/studio` 提供建立、編輯、排序、預覽、完成、匯出、匯入與清除私人旅程的桌機流程。
+- 文字欄位停止輸入 500ms 後自動儲存；日期、選單、照片與排序立即保存。
+- 手機尺寸的 Studio 只顯示改用電腦的指引；Atlas、國家頁、旅程頁與播放器仍可完整回放。
+- 此版本沒有登入、Firebase、應用程式後端、跨裝置同步、公開分享、YouTube 搜尋或播放清單匯出。
 
-目前版本尚未提供：
+## 圖片處理
 
-- 身份驗證或使用者帳號
-- Firebase 連線或同步
-- 照片與旅程上傳
-- 真實個人資料儲存
-- 公開分享
-- YouTube 搜尋
-- 播放清單匯出
+- 接受 JPEG、PNG、WebP，以及目前瀏覽器能成功解碼的其他圖片。
+- 每個輸入檔案上限為 25 MiB；超過限制、空檔、非圖片或解碼失敗的檔案不會建立時刻。
+- 圖片完全在瀏覽器本機處理，保留方向與長寬比，長邊最多 2560px。
+- 不需要透明度的圖片會正規化為 WebP quality 0.9；需要透明度的 PNG 保留透明度。
+- 本階段不提供 HEIC／HEIF 轉檔。若瀏覽器無法解碼，請先轉成 JPEG 或 PNG。
+- IndexedDB 保存的是 Sound Passport 顯示版本，不承諾保留相機原始檔或原始解析度。
 
-## 地圖資料來源
+## 備份與還原
+
+「匯出私人備份」會下載單一 `.soundpassport` ZIP 容器，包含旅程文字、歌曲資料與正規化照片。匯入前會驗證 schema、資料關聯、照片大小與 SHA-256，並以單一 IndexedDB transaction 寫入；損壞備份不會留下部分資料。
+
+`.soundpassport` 含有私人照片與文字，應存放在可信任的位置。清除瀏覽器網站資料會移除 IndexedDB 內容；需要保留旅程時，請先匯出備份。
+
+## 資料與 Git 隱私
+
+- 真實旅程、照片、檔名與筆記只存在目前 origin 的 IndexedDB，以及使用者主動下載的 `.soundpassport` 檔。
+- 應用程式不會把私人內容上傳到後端，也不會將私人資料寫入 repository。
+- 公開 GitHub 只包含程式碼、文件、固定示範資料與非私人的合成測試 fixture。
+- E2E 的直式與橫式 PNG 在測試記憶體內產生，不提交個人照片、備份、IndexedDB dump、trace、下載或測試結果。
+
+## 地圖資料與視覺基準
 
 世界地圖使用 `world-atlas` 套件內的 Natural Earth 110m 國家邊界 TopoJSON，於本機轉為 GeoJSON 後由 MapLibre 繪製。Natural Earth 資料為 public domain；地圖不依賴遠端 style、tile 或使用者地理資料。
 
-## 產品方向
+MapLibre canvas 的 desktop/mobile 視覺 snapshots 位於 `e2e/atlas-playback.spec.ts-snapshots/`。只有刻意變更地圖渲染時才更新基準，更新後必須再以一般模式重跑：
 
-- 發完 Instagram 限時動態後，以手機優先的流程快速記錄
-- 採用平台中立的歌曲資料，第一階段完整支援 YouTube
-- 可將已完成旅程的歌曲依順序匯出為 YouTube 播放清單
-- 以世界地圖作為旅行記憶的主要入口
-- 依序從國家進入旅程，再播放完整故事
-- 所有紀錄預設私人，只有使用者主動發布的內容才能公開分享
+```powershell
+npm.cmd run test:e2e -- --update-snapshots
+npm.cmd run test:e2e
+```
 
 ## 設計規格
 
+- [私人旅程整理工作台設計](docs/superpowers/specs/2026-07-13-sound-passport-journey-workbench-design.md)
 - [繁體中文產品設計規格](docs/superpowers/specs/2026-07-11-sound-passport-design-zh-TW.md)
 - [English product design](docs/superpowers/specs/2026-07-11-sound-passport-design.md)
-
-## 資料與隱私
-
-目前沒有 Firebase、Authentication、Security Rules、App Check 或任何部署憑證。未來若接上後端，使用者旅程、照片、位置與歌曲筆記必須維持預設私人，伺服器端憑證與其他敏感資訊不得提交至 Git。

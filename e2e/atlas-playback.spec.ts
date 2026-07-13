@@ -1,5 +1,6 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { deflateSync, inflateSync } from 'node:zlib';
+import { verifyRouteLayout } from './helpers/layoutAssertions';
 
 const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -20,42 +21,6 @@ function collectPageErrors(page: Page) {
       stage = nextStage;
     },
   };
-}
-
-async function expectNoHorizontalOverflow(page: Page) {
-  const layout = await page.evaluate(() => {
-    const viewportWidth = document.documentElement.clientWidth;
-    const tolerance = 1;
-    const selectors = [
-      '.app-header', '.page', '.world-map', '.country-index', '.journey-list',
-      '.moment-list', '.player-stage', '.player-visual', '.player-copy',
-      'a', 'button', 'img', 'iframe', 'h1', 'h2', 'h3', 'time',
-    ];
-    const elements = [...new Set(selectors.flatMap((selector) => (
-      [...document.querySelectorAll<HTMLElement>(selector)]
-    )))];
-    const label = (element: HTMLElement) => {
-      const text = element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName;
-      const classes = element.className && typeof element.className === 'string' ? `.${element.className}` : '';
-      return `${element.tagName.toLowerCase()}${classes} (${text.slice(0, 80)})`;
-    };
-    const outside = elements.flatMap((element) => {
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      if (style.visibility === 'hidden' || style.display === 'none' || rect.width === 0 || rect.height === 0) return [];
-      if (rect.left >= -tolerance && rect.right <= viewportWidth + tolerance) return [];
-      return [`${label(element)}: horizontal bounds ${rect.left.toFixed(1)}..${rect.right.toFixed(1)} exceed viewport 0..${viewportWidth}`];
-    });
-
-    return {
-      outside,
-      scrollWidth: document.documentElement.scrollWidth,
-      viewportWidth,
-    };
-  });
-
-  expect(layout.scrollWidth, `document scrollWidth ${layout.scrollWidth} exceeds viewport ${layout.viewportWidth}`).toBeLessThanOrEqual(layout.viewportWidth);
-  expect(layout.outside, layout.outside.join('\n')).toEqual([]);
 }
 
 async function expectLoadedFixtureImages(page: Page) {
@@ -270,40 +235,6 @@ async function expectEastAsiaMarkerPlacement(page: Page) {
   const overlapWidth = Math.max(0, Math.min(japanBox.x + japanBox.width, koreaBox.x + koreaBox.width) - Math.max(japanBox.x, koreaBox.x));
   const overlapHeight = Math.max(0, Math.min(japanBox.y + japanBox.height, koreaBox.y + koreaBox.height) - Math.max(japanBox.y, koreaBox.y));
   expect(overlapWidth * overlapHeight).toBe(0);
-}
-
-async function expectNoObviousOverlap(page: Page) {
-  const overlaps = await page.evaluate(() => {
-    const candidates = [...document.querySelectorAll<HTMLElement>('a, button, h1, h2, h3, p, time, img, iframe')]
-      .filter((element) => {
-        const rect = element.getBoundingClientRect();
-        const style = getComputedStyle(element);
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-      });
-
-    const labels = (element: HTMLElement) => element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName;
-    const issues: string[] = [];
-    for (let left = 0; left < candidates.length; left += 1) {
-      for (let right = left + 1; right < candidates.length; right += 1) {
-        const first = candidates[left];
-        const second = candidates[right];
-        if (first.contains(second) || second.contains(first)) continue;
-        const a = first.getBoundingClientRect();
-        const b = second.getBoundingClientRect();
-        const overlapWidth = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
-        const overlapHeight = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-        if (overlapWidth * overlapHeight > 36) issues.push(`${labels(first)} overlaps ${labels(second)}`);
-      }
-    }
-    return issues;
-  });
-
-  expect(overlaps).toEqual([]);
-}
-
-async function verifyRouteLayout(page: Page) {
-  await expectNoHorizontalOverflow(page);
-  await expectNoObviousOverlap(page);
 }
 
 test('decodes RGB and RGBA screenshots across all PNG filters', () => {

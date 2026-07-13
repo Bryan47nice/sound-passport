@@ -1,12 +1,17 @@
 import { defineConfig } from '@playwright/test';
 
+const runtime = globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> };
+};
+const baseURL = runtime.process?.env?.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:4175';
+
 export default defineConfig({
   globalSetup: './e2e/viteServer.ts',
   testDir: './e2e',
   outputDir: './test-results',
   snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{arg}{ext}',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL,
     launchOptions: {
       args: ['--use-angle=swiftshader'],
     },
