@@ -124,8 +124,10 @@ export async function expectNoObviousOverlap(page: Page) {
       top: 0,
     };
     type Bounds = typeof viewport;
+    type CandidateKind = 'control' | 'media' | 'text';
     type Candidate = {
       bounds: Bounds;
+      kind: CandidateKind;
       label: string;
       owner: Element;
     };
@@ -194,6 +196,7 @@ export async function expectNoObviousOverlap(page: Page) {
         if (bounds) {
           candidates.push({
             bounds,
+            kind: 'text',
             label: `text (${textNode.data.slice(start, end).replace(/\s+/g, ' ').slice(0, 60)})`,
             owner,
           });
@@ -202,7 +205,7 @@ export async function expectNoObviousOverlap(page: Page) {
       range.detach();
     }
 
-    const controlAndMediaSelector = [
+    const controlSelector = [
       'a',
       'button',
       'input:not([type="hidden"])',
@@ -213,6 +216,8 @@ export async function expectNoObviousOverlap(page: Page) {
       '[role="link"]',
       '[role="option"]',
       '[role="tab"]',
+    ].join(',');
+    const mediaSelector = [
       'audio',
       'canvas',
       'iframe',
@@ -220,11 +225,24 @@ export async function expectNoObviousOverlap(page: Page) {
       'svg',
       'video',
     ].join(',');
+    const controlAndMediaSelector = `${controlSelector},${mediaSelector}`;
     for (const element of document.querySelectorAll<Element>(controlAndMediaSelector)) {
       if (!isVisible(element)) continue;
       const bounds = clipToVisibleBounds(element.getBoundingClientRect(), element);
-      if (bounds) candidates.push({ bounds, label: elementLabel(element), owner: element });
+      if (bounds) {
+        candidates.push({
+          bounds,
+          kind: element.matches(controlSelector) ? 'control' : 'media',
+          label: elementLabel(element),
+          owner: element,
+        });
+      }
     }
+
+    const isControlWithOwnRepresentation = (control: Candidate, representation: Candidate) => (
+      control.kind === 'control'
+      && control.owner.contains(representation.owner)
+    );
 
     const isIntentionalOverlay = (first: Candidate, second: Candidate) => {
       const matchingPair = (mediaSelector: string, overlaySelector: string, containerSelector: string) => {
@@ -264,7 +282,10 @@ export async function expectNoObviousOverlap(page: Page) {
         const first = candidates[left];
         const second = candidates[right];
         if (second.bounds.left >= first.bounds.right - pixelTolerance) break;
-        if (first.owner.contains(second.owner) || second.owner.contains(first.owner)) continue;
+        if (
+          isControlWithOwnRepresentation(first, second)
+          || isControlWithOwnRepresentation(second, first)
+        ) continue;
         if (isIntentionalOverlay(first, second)) continue;
         const overlapWidth = Math.min(first.bounds.right, second.bounds.right)
           - Math.max(first.bounds.left, second.bounds.left);
