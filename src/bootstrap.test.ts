@@ -36,6 +36,8 @@ function createPrivateRepository(): IndexedDbJourneyRepository {
     importSnapshot: vi.fn(),
     clearPrivateData: vi.fn(),
     get: vi.fn(),
+    listByJourney: vi.fn(),
+    adopt: vi.fn(),
     put: vi.fn(),
     compareAndDelete: vi.fn(),
   } as IndexedDbJourneyRepository;

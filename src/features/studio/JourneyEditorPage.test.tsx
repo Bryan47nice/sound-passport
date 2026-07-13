@@ -2,17 +2,23 @@
 import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../app/App';
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import {
+  JourneyAutosaveRecoveryConflictError,
   JourneyVersionConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
   type JourneyEditorRepository,
 } from '../../data/ports';
 import type { Journey, JourneyPatch, JourneyStory } from '../../domain/model';
+
+const ownerStorageKey = 'sound-passport.journey-autosave-owner-id';
+const ownerA = '11111111-1111-4111-8111-111111111111';
+const ownerB = '22222222-2222-4222-8222-222222222222';
+const ownerC = '33333333-3333-4333-8333-333333333333';
 
 const story: JourneyStory = {
   journey: {
@@ -98,21 +104,61 @@ function editorStub(overrides: Partial<JourneyEditorRepository> = {}): JourneyEd
 }
 
 type InspectableOutbox = JourneyAutosaveOutboxPort & {
-  peek: (journeyId: string) => JourneyAutosaveOutboxRecord | undefined;
+  peek: (journeyId: string, ownerId?: string) => JourneyAutosaveOutboxRecord | undefined;
 };
 
-function outboxStub(initial?: JourneyAutosaveOutboxRecord): InspectableOutbox {
+function outboxStub(initial: JourneyAutosaveOutboxRecord[] = []): InspectableOutbox {
   const records = new Map<string, JourneyAutosaveOutboxRecord>();
-  if (initial) records.set(initial.journeyId, initial);
+  const key = (journeyId: string, ownerId: string) => `${journeyId}\u0000${ownerId}`;
+  initial.forEach((record) => records.set(key(record.journeyId, record.ownerId), record));
   return {
-    get: vi.fn(async (journeyId) => records.get(journeyId)),
-    put: vi.fn(async (record) => { records.set(record.journeyId, record); }),
-    compareAndDelete: vi.fn(async (journeyId, generation) => {
-      if (records.get(journeyId)?.generation !== generation) return false;
-      records.delete(journeyId);
+    get: vi.fn(async (journeyId, ownerId) => records.get(key(journeyId, ownerId))),
+    listByJourney: vi.fn(async (journeyId) => (
+      [...records.values()]
+        .filter((record) => record.journeyId === journeyId)
+        .sort((left, right) => left.ownerId.localeCompare(right.ownerId))
+    )),
+    adopt: vi.fn(async (journeyId, fromOwnerId, toOwnerId) => {
+      const exact = records.get(key(journeyId, toOwnerId));
+      if (exact) return exact;
+      const candidates = [...records.values()].filter((record) => record.journeyId === journeyId);
+      if (candidates.length === 0) return undefined;
+      if (candidates.length !== 1 || candidates[0].ownerId !== fromOwnerId) {
+        throw new JourneyAutosaveRecoveryConflictError(
+          journeyId,
+          candidates.map((record) => record.ownerId),
+        );
+      }
+      const adopted = { ...candidates[0], ownerId: toOwnerId };
+      records.delete(key(journeyId, fromOwnerId));
+      records.set(key(journeyId, toOwnerId), adopted);
+      return adopted;
+    }),
+    put: vi.fn(async (record) => { records.set(key(record.journeyId, record.ownerId), record); }),
+    compareAndDelete: vi.fn(async (journeyId, ownerId, generation) => {
+      const recordKey = key(journeyId, ownerId);
+      if (records.get(recordKey)?.generation !== generation) return false;
+      records.delete(recordKey);
       return true;
     }),
-    peek: (journeyId) => records.get(journeyId),
+    peek: (journeyId, ownerId = ownerA) => records.get(key(journeyId, ownerId)),
+  };
+}
+
+function recoveryRecord(
+  ownerId: string,
+  title: string,
+  generation: string,
+): JourneyAutosaveOutboxRecord {
+  return {
+    journeyId: story.journey.id,
+    ownerId,
+    generation,
+    envelope: {
+      patch: { title },
+      base: { title: story.journey.title },
+    },
+    updatedAt: '2026-07-13T00:00:00.000Z',
   };
 }
 
@@ -156,12 +202,17 @@ function RouteSwitcher() {
 }
 
 describe('JourneyEditorPage', () => {
+  beforeEach(() => {
+    window.sessionStorage.setItem(ownerStorageKey, ownerA);
+  });
+
   afterEach(async () => {
     cleanup();
     await flushMicrotasks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    window.sessionStorage.clear();
   });
 
   it('loads the private editor story on direct reload and renders the three-region work surface', async () => {
@@ -513,6 +564,50 @@ describe('JourneyEditorPage', () => {
 
     expect(screen.getByLabelText('旅程總文（選填）')).toHaveValue('本機較新的總文');
     expect(screen.getByRole('heading', { name: '本機新標題' })).toBeInTheDocument();
+  });
+
+  it('recovers the exact current owner record and leaves another owner untouched', async () => {
+    const current = recoveryRecord(ownerA, 'Current owner pending title', 'generation-a');
+    const independent = recoveryRecord(ownerB, 'Other owner pending title', 'generation-b');
+    const outbox = outboxStub([current, independent]);
+
+    renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
+
+    expect(await screen.findByLabelText('旅程標題')).toHaveValue('Current owner pending title');
+    expect(outbox.adopt).not.toHaveBeenCalled();
+    expect(outbox.peek(story.journey.id, ownerB)).toEqual(independent);
+  });
+
+  it('adopts one legacy outbox record for the current reload owner', async () => {
+    const legacy = recoveryRecord('legacy-v3', 'Migrated pending title', 'legacy-generation');
+    const outbox = outboxStub([legacy]);
+
+    renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
+
+    expect(await screen.findByLabelText('旅程標題')).toHaveValue('Migrated pending title');
+    expect(outbox.adopt).toHaveBeenCalledWith(story.journey.id, 'legacy-v3', ownerA);
+    expect(outbox.peek(story.journey.id, 'legacy-v3')).toBeUndefined();
+    expect(outbox.peek(story.journey.id, ownerA)).toMatchObject({
+      journeyId: story.journey.id,
+      ownerId: ownerA,
+      envelope: legacy.envelope,
+    });
+  });
+
+  it('surfaces multiple owner recovery records without merging or discarding them', async () => {
+    window.sessionStorage.setItem(ownerStorageKey, ownerC);
+    const first = recoveryRecord(ownerA, 'Owner A pending title', 'generation-a');
+    const second = recoveryRecord(ownerB, 'Owner B pending title', 'generation-b');
+    const outbox = outboxStub([first, second]);
+
+    renderRoute(editorStub(), '/studio/journeys/private-tokyo', outbox);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('偵測到多份尚未儲存的編輯內容');
+    expect(screen.getByRole('button', { name: '重新檢查' })).toBeInTheDocument();
+    expect(outbox.peek(story.journey.id, ownerA)).toEqual(first);
+    expect(outbox.peek(story.journey.id, ownerB)).toEqual(second);
+    expect(outbox.adopt).not.toHaveBeenCalled();
   });
 
   it('recovers the latest outbox envelope after a rejected bare-unmount flush', async () => {

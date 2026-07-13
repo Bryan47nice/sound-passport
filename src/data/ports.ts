@@ -66,15 +66,32 @@ export interface JourneyAutosaveFieldPatchEnvelope {
 
 export interface JourneyAutosaveOutboxRecord {
   journeyId: string;
+  ownerId: string;
   generation: string;
   envelope: JourneyAutosaveFieldPatchEnvelope;
   updatedAt: string;
 }
 
+export class JourneyAutosaveRecoveryConflictError extends Error {
+  constructor(
+    readonly journeyId: string,
+    readonly ownerIds: readonly string[],
+  ) {
+    super(`Journey ${journeyId} has multiple independent autosave recovery records.`);
+    this.name = 'JourneyAutosaveRecoveryConflictError';
+  }
+}
+
 export interface JourneyAutosaveOutboxPort {
-  get(journeyId: string): Promise<JourneyAutosaveOutboxRecord | undefined>;
+  get(journeyId: string, ownerId: string): Promise<JourneyAutosaveOutboxRecord | undefined>;
+  listByJourney(journeyId: string): Promise<JourneyAutosaveOutboxRecord[]>;
+  adopt(
+    journeyId: string,
+    fromOwnerId: string,
+    toOwnerId: string,
+  ): Promise<JourneyAutosaveOutboxRecord | undefined>;
   put(record: JourneyAutosaveOutboxRecord): Promise<void>;
-  compareAndDelete(journeyId: string, generation: string): Promise<boolean>;
+  compareAndDelete(journeyId: string, ownerId: string, generation: string): Promise<boolean>;
 }
 
 export interface PhotoAssetRepository {

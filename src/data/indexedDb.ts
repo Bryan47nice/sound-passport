@@ -3,7 +3,8 @@ import type { Journey, JourneyStatus, Moment, PhotoAsset, SongReference } from '
 import type { JourneyAutosaveOutboxRecord } from './ports';
 
 export const DB_NAME = 'sound-passport';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
+export const LEGACY_OUTBOX_OWNER_ID = 'legacy-v3';
 
 export interface SoundPassportDb extends DBSchema {
   journeys: {
@@ -31,8 +32,11 @@ export interface SoundPassportDb extends DBSchema {
     value: PhotoAsset;
   };
   journeyAutosaveOutbox: {
-    key: string;
+    key: [string, string];
     value: JourneyAutosaveOutboxRecord;
+    indexes: {
+      journeyId: string;
+    };
   };
 }
 
@@ -84,12 +88,39 @@ function migrateToVersion3(db: IDBPDatabase<SoundPassportDb>) {
   db.createObjectStore('journeyAutosaveOutbox', { keyPath: 'journeyId' });
 }
 
+function migrateToVersion4(
+  db: IDBPDatabase<SoundPassportDb>,
+  tx: IDBPTransaction<SoundPassportDb, SoundPassportStore[], 'versionchange'>,
+) {
+  const legacyStore = tx.objectStore('journeyAutosaveOutbox');
+  const migrate = async () => {
+    const legacyRecords = await legacyStore.getAll();
+    db.deleteObjectStore('journeyAutosaveOutbox');
+    const ownerStore = db.createObjectStore('journeyAutosaveOutbox', {
+      keyPath: ['journeyId', 'ownerId'],
+    });
+    ownerStore.createIndex('journeyId', 'journeyId');
+    for (const record of legacyRecords) {
+      await ownerStore.put({ ...record, ownerId: LEGACY_OUTBOX_OWNER_ID });
+    }
+  };
+
+  void migrate().catch(() => {
+    try {
+      tx.abort();
+    } catch {
+      // The upgrade transaction may already have aborted because of the failed request.
+    }
+  });
+}
+
 export function openSoundPassportDb(name = DB_NAME) {
   return openDB<SoundPassportDb>(name, DB_VERSION, {
     upgrade(db, oldVersion, _newVersion, tx) {
       if (oldVersion < 1) createVersion1Stores(db);
       if (oldVersion < 2) migrateToVersion2(tx);
       if (oldVersion < 3) migrateToVersion3(db);
+      if (oldVersion < 4) migrateToVersion4(db, tx);
     },
   });
 }

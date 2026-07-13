@@ -414,6 +414,101 @@ describe('useAutosave', () => {
     expect(forceSave).toHaveBeenCalledWith('Force this value', { revision: 1 });
   });
 
+  const forceFailureCases = [
+    ['generic failure', new Error('repository unavailable')],
+    [
+      'conflict failure',
+      Object.assign(new Error('field conflict'), { name: 'JourneyVersionConflictError' }),
+    ],
+  ] as const;
+
+  const postForcePaths = [
+    {
+      name: 'ordinary retry',
+      expectedValue: 'Force candidate',
+      continue: async (autosave: AutosaveApi) => {
+        act(() => autosave.retry());
+        await act(flushMicrotasks);
+      },
+    },
+    {
+      name: 'later immediate edit',
+      expectedValue: 'Later immediate value',
+      continue: async (autosave: AutosaveApi) => {
+        act(() => { autosave.saveNow('Later immediate value'); });
+        await act(flushMicrotasks);
+      },
+    },
+    {
+      name: 'later debounced edit',
+      expectedValue: 'Later debounced value',
+      continue: async (autosave: AutosaveApi) => {
+        act(() => { autosave.enqueue('Later debounced value'); });
+        await act(() => vi.advanceTimersByTimeAsync(500));
+        await act(flushMicrotasks);
+      },
+    },
+    {
+      name: 'navigation flush',
+      expectedValue: 'Force candidate',
+      continue: async (autosave: AutosaveApi) => {
+        let flushResult!: Promise<void>;
+        act(() => { flushResult = autosave.flush(); });
+        await act(async () => { await flushResult; });
+      },
+    },
+    {
+      name: 'unmount flush',
+      expectedValue: 'Force candidate',
+      continue: async (_autosave: AutosaveApi, unmount: () => void) => {
+        unmount();
+        await act(flushMicrotasks);
+      },
+    },
+  ];
+
+  it.each(forceFailureCases)(
+    'consumes force after a %s across every later save path',
+    async (_failureName, forceFailure) => {
+      vi.useFakeTimers();
+
+      for (const path of postForcePaths) {
+        const recovery: AutosaveRecoveryPersistence<string> = {
+          put: vi.fn(async () => undefined),
+          compareAndDelete: vi.fn(async () => true),
+        };
+        const save = vi.fn<Save>()
+          .mockRejectedValueOnce(new Error('initial conflict'))
+          .mockResolvedValueOnce(undefined);
+        const forceSave = vi.fn<Save>().mockRejectedValueOnce(forceFailure);
+        let autosave!: AutosaveApi;
+        const view = render(
+          <AutosaveHarness
+            save={save}
+            forceSave={forceSave}
+            recovery={recovery}
+            capture={(api) => { autosave = api; }}
+          />,
+        );
+
+        act(() => { autosave.saveNow('Force candidate'); });
+        await act(flushMicrotasks);
+        act(() => autosave.forceRetry());
+        await act(flushMicrotasks);
+        expect(forceSave, path.name).toHaveBeenCalledTimes(1);
+
+        await path.continue(autosave, view.unmount);
+
+        expect(save, path.name).toHaveBeenCalledTimes(2);
+        expect(save, path.name).toHaveBeenLastCalledWith(path.expectedValue, { revision: expect.any(Number) });
+        expect(forceSave, path.name).toHaveBeenCalledTimes(1);
+        view.unmount();
+        await act(flushMicrotasks);
+        vi.clearAllTimers();
+      }
+    },
+  );
+
   it('keeps a newer recovery generation when an older save completes', async () => {
     vi.useFakeTimers();
     const first = deferred();

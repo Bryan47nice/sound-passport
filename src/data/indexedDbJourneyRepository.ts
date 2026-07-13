@@ -16,6 +16,7 @@ import type {
 import { validateJourneyForReview } from '../domain/journeyValidation';
 import { parseYouTubeVideoId } from '../domain/youtube';
 import {
+  JourneyAutosaveRecoveryConflictError,
   JourneyVersionConflictError,
   PrivateDataStateConflictError,
   type JourneyAutosaveOutboxPort,
@@ -31,6 +32,12 @@ import type { SoundPassportDb } from './indexedDb';
 const stores = ['journeys', 'moments', 'songs', 'photos'] as const;
 const privateStores = [...stores, 'journeyAutosaveOutbox'] as const;
 type WriteTransaction = IDBPTransaction<SoundPassportDb, typeof stores, 'readwrite'>;
+type PrivateWriteTransaction = IDBPTransaction<SoundPassportDb, typeof privateStores, 'readwrite'>;
+type OutboxWriteTransaction = IDBPTransaction<
+  SoundPassportDb,
+  ['journeys', 'journeyAutosaveOutbox'],
+  'readwrite'
+>;
 
 export interface IndexedDbJourneyRepository
   extends JourneyRepository,
@@ -179,10 +186,30 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     }
   }
 
-  async function runOutboxWrite<T>(work: (
-    tx: IDBPTransaction<SoundPassportDb, ['journeyAutosaveOutbox'], 'readwrite'>,
-  ) => Promise<T>) {
-    const tx = db.transaction('journeyAutosaveOutbox', 'readwrite');
+  async function runOutboxWrite<T>(work: (tx: OutboxWriteTransaction) => Promise<T>) {
+    const tx = db.transaction(['journeys', 'journeyAutosaveOutbox'], 'readwrite');
+    try {
+      const result = await work(tx);
+      await tx.done;
+      return result;
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+        // A failed IndexedDB request may have already aborted the transaction.
+      }
+      try {
+        await tx.done;
+      } catch {
+        // Preserve the operation error, which carries more detail than AbortError.
+      }
+      if (isQuotaExceededError(error)) throw new StorageCapacityError(error);
+      throw error;
+    }
+  }
+
+  async function runPrivateWrite<T>(work: (tx: PrivateWriteTransaction) => Promise<T>) {
+    const tx = db.transaction(privateStores, 'readwrite');
     try {
       const result = await work(tx);
       await tx.done;
@@ -304,9 +331,12 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
     updateJourney,
 
     async deleteJourney(id: string) {
-      await runWrite(async (tx) => {
+      await runPrivateWrite(async (tx) => {
         const journeyStore = tx.objectStore('journeys');
         const journey = await journeyStore.get(id);
+        const outboxStore = tx.objectStore('journeyAutosaveOutbox');
+        const outboxKeys = await outboxStore.index('journeyId').getAllKeys(id);
+        for (const key of outboxKeys) await outboxStore.delete(key);
         if (!journey) return;
         const momentStore = tx.objectStore('moments');
         const journeyMoments = await momentStore.index('journeyId').getAll(id);
@@ -461,24 +491,58 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
       return updateJourney(id, { status });
     },
 
-    async get(journeyId: string) {
+    async get(journeyId: string, ownerId: string) {
       const tx = db.transaction('journeyAutosaveOutbox', 'readonly');
-      const record = await tx.store.get(journeyId);
+      const record = await tx.store.get([journeyId, ownerId]);
       await tx.done;
       return record;
     },
 
-    async put(record: JourneyAutosaveOutboxRecord) {
-      await runOutboxWrite(async (tx) => {
-        await tx.store.put(record);
+    async listByJourney(journeyId: string) {
+      const tx = db.transaction('journeyAutosaveOutbox', 'readonly');
+      const records = await tx.store.index('journeyId').getAll(journeyId);
+      await tx.done;
+      return records.sort((left, right) => left.ownerId.localeCompare(right.ownerId));
+    },
+
+    async adopt(journeyId: string, fromOwnerId: string, toOwnerId: string) {
+      return runOutboxWrite(async (tx) => {
+        const store = tx.objectStore('journeyAutosaveOutbox');
+        const exact = await store.get([journeyId, toOwnerId]);
+        if (exact) return exact;
+
+        const records = await store.index('journeyId').getAll(journeyId);
+        if (records.length === 0) return undefined;
+        if (records.length !== 1 || records[0].ownerId !== fromOwnerId) {
+          throw new JourneyAutosaveRecoveryConflictError(
+            journeyId,
+            records.map((record) => record.ownerId),
+          );
+        }
+
+        const adopted = { ...records[0], ownerId: toOwnerId };
+        await store.delete([journeyId, fromOwnerId]);
+        await store.put(adopted);
+        return adopted;
       });
     },
 
-    async compareAndDelete(journeyId: string, generation: string) {
+    async put(record: JourneyAutosaveOutboxRecord) {
+      await runOutboxWrite(async (tx) => {
+        if (!(await tx.objectStore('journeys').get(record.journeyId))) {
+          throw missingRecord('Journey', record.journeyId);
+        }
+        await tx.objectStore('journeyAutosaveOutbox').put(record);
+      });
+    },
+
+    async compareAndDelete(journeyId: string, ownerId: string, generation: string) {
       return runOutboxWrite(async (tx) => {
-        const stored = await tx.store.get(journeyId);
+        const key: [string, string] = [journeyId, ownerId];
+        const store = tx.objectStore('journeyAutosaveOutbox');
+        const stored = await store.get(key);
         if (!stored || stored.generation !== generation) return false;
-        await tx.store.delete(journeyId);
+        await store.delete(key);
         return true;
       });
     },

@@ -14,6 +14,7 @@ import {
   useOptionalJourneyEditorRepository,
 } from '../../data/RepositoryContext';
 import {
+  JourneyAutosaveRecoveryConflictError,
   JourneyVersionConflictError,
   type JourneyAutosaveOutboxPort,
   type JourneyAutosaveOutboxRecord,
@@ -34,7 +35,12 @@ import {
   type JourneyUserPatchKey,
   type JourneyUserPatch,
 } from './journeyPatch';
-import { clearJourneyOutbox, readJourneyOutbox, writeJourneyOutbox } from './journeyOutbox';
+import {
+  clearJourneyOutbox,
+  getJourneyOutboxOwnerId,
+  readJourneyOutbox,
+  writeJourneyOutbox,
+} from './journeyOutbox';
 import { useAutosave } from './useAutosave';
 import { useDirtyNavigationGuard } from './useDirtyNavigationGuard';
 import { useMobileStudio } from './useMobileStudio';
@@ -48,6 +54,7 @@ type LoadState =
       recoveredOutbox?: JourneyAutosaveOutboxRecord;
     }
   | { kind: 'not-found'; journeyId: string }
+  | { kind: 'recovery-conflict'; journeyId: string }
   | { kind: 'error'; journeyId: string };
 
 type JourneyEditorPageProps = { onBootstrapRetry?: () => void };
@@ -97,12 +104,14 @@ function JourneyEditorWorkspace({
   editor,
   isMobile,
   outbox,
+  outboxOwnerId,
   recoveredOutbox,
   story,
 }: {
   editor: JourneyEditorRepository;
   isMobile: boolean;
   outbox: JourneyAutosaveOutboxPort;
+  outboxOwnerId: string;
   recoveredOutbox?: JourneyAutosaveOutboxRecord;
   story: JourneyStory;
 }) {
@@ -220,14 +229,15 @@ function JourneyEditorWorkspace({
     { generation }: { generation: string },
   ) => writeJourneyOutbox(outbox, {
     journeyId: story.journey.id,
+    ownerId: outboxOwnerId,
     generation,
     envelope,
     updatedAt: new Date().toISOString(),
-  }), [outbox, story.journey.id]);
+  }), [outbox, outboxOwnerId, story.journey.id]);
 
   const clearRecovery = useCallback((generation: string) => (
-    clearJourneyOutbox(outbox, story.journey.id, generation)
-  ), [outbox, story.journey.id]);
+    clearJourneyOutbox(outbox, story.journey.id, outboxOwnerId, generation)
+  ), [outbox, outboxOwnerId, story.journey.id]);
 
   const autosave = useAutosave({
     save,
@@ -432,6 +442,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   const editor = useOptionalJourneyEditorRepository();
   const outbox = useOptionalJourneyAutosaveOutbox();
   const isMobile = useMobileStudio();
+  const [outboxOwnerId] = useState(getJourneyOutboxOwnerId);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [loadState, setLoadState] = useState<LoadState>(() => ({ kind: 'loading', journeyId }));
 
@@ -441,7 +452,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
     setLoadState({ kind: 'loading', journeyId });
     void Promise.all([
       editor.getPrivateJourneyStory(journeyId),
-      readJourneyOutbox(outbox, journeyId),
+      readJourneyOutbox(outbox, journeyId, outboxOwnerId),
     ])
       .then(([nextStory, recoveredOutbox]) => {
         if (!active) return;
@@ -449,11 +460,14 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
           ? { kind: 'ready', journeyId, story: nextStory, recoveredOutbox }
           : { kind: 'not-found', journeyId });
       })
-      .catch(() => {
-        if (active) setLoadState({ kind: 'error', journeyId });
-    });
+      .catch((error: unknown) => {
+        if (!active) return;
+        setLoadState(error instanceof JourneyAutosaveRecoveryConflictError
+          ? { kind: 'recovery-conflict', journeyId }
+          : { kind: 'error', journeyId });
+      });
     return () => { active = false; };
-  }, [editor, journeyId, loadAttempt, outbox]);
+  }, [editor, journeyId, loadAttempt, outbox, outboxOwnerId]);
 
   const currentLoadState: LoadState = loadState.journeyId === journeyId
     ? loadState
@@ -478,6 +492,21 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
   if (currentLoadState.kind === 'not-found') {
     return <section className="page studio-editor-state"><h1>找不到這趟私人旅程</h1></section>;
   }
+  if (currentLoadState.kind === 'recovery-conflict') {
+    return (
+      <section className="page studio-editor-state" role="alert">
+        <h1>偵測到多份尚未儲存的編輯內容</h1>
+        <p>請先回到原本的編輯分頁完成儲存，再重新檢查。</p>
+        <button
+          className="secondary-command studio-state-action"
+          type="button"
+          onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+        >
+          <RefreshCw size={17} aria-hidden="true" />重新檢查
+        </button>
+      </section>
+    );
+  }
   if (currentLoadState.kind === 'error') {
     return (
       <section className="page studio-editor-state" role="alert">
@@ -495,6 +524,7 @@ export function JourneyEditorPage({ onBootstrapRetry = () => window.location.rel
       editor={editor}
       isMobile={isMobile}
       outbox={outbox}
+      outboxOwnerId={outboxOwnerId}
       recoveredOutbox={currentLoadState.recoveredOutbox}
       story={currentLoadState.story}
     />

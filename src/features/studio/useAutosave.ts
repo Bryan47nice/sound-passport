@@ -249,7 +249,9 @@ export function useAutosave<T>({
         errorAnnouncement: '',
       }));
 
-      const requestedOperation = inFlight.mode === 'force' ? forceSaveRef.current : saveRef.current;
+      const operationMode = inFlight.mode;
+      if (operationMode === 'force') inFlight.mode = 'normal';
+      const requestedOperation = operationMode === 'force' ? forceSaveRef.current : saveRef.current;
       const operation = requestedOperation ?? saveRef.current;
       let saveResult: Promise<void>;
       try {

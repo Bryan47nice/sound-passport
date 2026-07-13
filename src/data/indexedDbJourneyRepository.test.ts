@@ -52,9 +52,11 @@ function outboxRecord(
   journeyId: string,
   generation: string,
   title: string,
+  ownerId = ownerA,
 ): JourneyAutosaveOutboxRecord {
   return {
     journeyId,
+    ownerId,
     generation,
     envelope: {
       patch: { title },
@@ -62,6 +64,19 @@ function outboxRecord(
     },
     updatedAt: '2026-07-13T00:00:00.000Z',
   };
+}
+
+const ownerA = '11111111-1111-4111-8111-111111111111';
+const ownerB = '22222222-2222-4222-8222-222222222222';
+const ownerC = '33333333-3333-4333-8333-333333333333';
+
+function ownerOutboxRecord(
+  journeyId: string,
+  ownerId: string,
+  generation: string,
+  title: string,
+): JourneyAutosaveOutboxRecord {
+  return outboxRecord(journeyId, generation, title, ownerId);
 }
 
 function primaryKeys(snapshot: PrivateJourneySnapshot) {
@@ -164,40 +179,45 @@ afterEach(async () => {
 describe('indexedDbJourneyRepository', () => {
   it('atomically overwrites one journey outbox record with its latest generation', async () => {
     const { db, repository } = await openRepository('outbox-overwrite');
-    const first = outboxRecord('journey-1', 'generation-1', 'First pending title');
-    const latest = outboxRecord('journey-1', 'generation-2', 'Latest pending title');
+    const journey = await repository.createJourney(journeyInput());
+    const first = outboxRecord(journey.id, 'generation-1', 'First pending title');
+    const latest = outboxRecord(journey.id, 'generation-2', 'Latest pending title');
     const transactionSpy = vi.spyOn(db, 'transaction');
 
     await repository.put(first);
     await repository.put(latest);
 
-    expect(await repository.get('journey-1')).toEqual(latest);
+    expect(await repository.get(journey.id, ownerA)).toEqual(latest);
     expect(transactionSpy.mock.calls.filter(([stores, mode]) => (
-      stores === 'journeyAutosaveOutbox' && mode === 'readwrite'
+      Array.isArray(stores) &&
+      stores.join(',') === 'journeys,journeyAutosaveOutbox' &&
+      mode === 'readwrite'
     ))).toHaveLength(2);
   });
 
   it('deletes an outbox record only when its generation exactly matches', async () => {
     const { repository } = await openRepository('outbox-compare-delete');
-    const latest = outboxRecord('journey-1', 'generation-2', 'Latest pending title');
+    const journey = await repository.createJourney(journeyInput());
+    const latest = outboxRecord(journey.id, 'generation-2', 'Latest pending title');
     await repository.put(latest);
 
-    await expect(repository.compareAndDelete('journey-1', 'generation-1')).resolves.toBe(false);
-    await expect(repository.get('journey-1')).resolves.toEqual(latest);
-    await expect(repository.compareAndDelete('journey-1', 'generation-2')).resolves.toBe(true);
-    await expect(repository.get('journey-1')).resolves.toBeUndefined();
+    await expect(repository.compareAndDelete(journey.id, ownerA, 'generation-1')).resolves.toBe(false);
+    await expect(repository.get(journey.id, ownerA)).resolves.toEqual(latest);
+    await expect(repository.compareAndDelete(journey.id, ownerA, 'generation-2')).resolves.toBe(true);
+    await expect(repository.get(journey.id, ownerA)).resolves.toBeUndefined();
   });
 
   it('maps an outbox quota failure and leaves the prior generation intact', async () => {
     const { repository } = await openRepository('outbox-quota');
-    const first = outboxRecord('journey-1', 'generation-1', 'Recoverable title');
+    const journey = await repository.createJourney(journeyInput());
+    const first = outboxRecord(journey.id, 'generation-1', 'Recoverable title');
     await repository.put(first);
     const quotaError = new DOMException('quota reached', 'QuotaExceededError');
     vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementationOnce(() => { throw quotaError; });
 
-    await expect(repository.put(outboxRecord('journey-1', 'generation-2', 'Lost title')))
+    await expect(repository.put(outboxRecord(journey.id, 'generation-2', 'Lost title')))
       .rejects.toMatchObject({ name: 'StorageCapacityError', cause: quotaError });
-    await expect(repository.get('journey-1')).resolves.toEqual(first);
+    await expect(repository.get(journey.id, ownerA)).resolves.toEqual(first);
   });
 
   it('clears the private outbox but never includes it in export snapshots', async () => {
@@ -208,15 +228,139 @@ describe('indexedDbJourneyRepository', () => {
     const exported = await repository.exportSnapshot();
     expect(Object.keys(exported).sort()).toEqual(['journeys', 'moments', 'photos', 'songs']);
     expect(exported.journeys).toHaveLength(1);
-    await expect(repository.get(journey.id)).resolves.toBeDefined();
+    await expect(repository.get(journey.id, ownerA)).resolves.toBeDefined();
 
     await repository.clearPrivateData();
 
-    await expect(repository.get(journey.id)).resolves.toBeUndefined();
+    await expect(repository.get(journey.id, ownerA)).resolves.toBeUndefined();
     await expect(repository.exportSnapshot()).resolves.toEqual({
       journeys: [], moments: [], songs: [], photos: [],
     });
   });
+
+  it('keeps exact owner outboxes independent and compare-deletes only that owner generation', async () => {
+    const { repository } = await openRepository('owner-scoped-outbox');
+    const journey = await repository.createJourney(journeyInput());
+    const outbox = repository;
+    const firstOwner = ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Owner A title');
+    const secondOwner = ownerOutboxRecord(journey.id, ownerB, 'generation-b', 'Owner B title');
+
+    await outbox.put(firstOwner);
+    await outbox.put(secondOwner);
+
+    await expect(outbox.get(journey.id, ownerA)).resolves.toEqual(firstOwner);
+    await expect(outbox.get(journey.id, ownerB)).resolves.toEqual(secondOwner);
+    await expect(outbox.listByJourney(journey.id)).resolves.toEqual([firstOwner, secondOwner]);
+    await expect(outbox.compareAndDelete(journey.id, ownerA, 'stale-generation')).resolves.toBe(false);
+    await expect(outbox.compareAndDelete(journey.id, ownerA, firstOwner.generation)).resolves.toBe(true);
+    await expect(outbox.get(journey.id, ownerA)).resolves.toBeUndefined();
+    await expect(outbox.get(journey.id, ownerB)).resolves.toEqual(secondOwner);
+  });
+
+  it('atomically adopts one outstanding owner record but preserves multiple records as a conflict', async () => {
+    const { repository } = await openRepository('owner-adoption');
+    const journey = await repository.createJourney(journeyInput());
+    const outbox = repository;
+    const outstanding = ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Outstanding title');
+    await outbox.put(outstanding);
+
+    await expect(outbox.adopt(journey.id, ownerA, ownerB)).resolves.toEqual({
+      ...outstanding,
+      ownerId: ownerB,
+    });
+    await expect(outbox.get(journey.id, ownerA)).resolves.toBeUndefined();
+    await expect(outbox.get(journey.id, ownerB)).resolves.toEqual({ ...outstanding, ownerId: ownerB });
+
+    const independent = ownerOutboxRecord(journey.id, ownerC, 'generation-c', 'Independent title');
+    await outbox.put(independent);
+    await expect(outbox.adopt(journey.id, ownerB, ownerA)).rejects.toMatchObject({
+      name: 'JourneyAutosaveRecoveryConflictError',
+    });
+    await expect(outbox.listByJourney(journey.id)).resolves.toEqual([
+      { ...outstanding, ownerId: ownerB },
+      independent,
+    ]);
+  });
+
+  it('rejects an outbox write whose parent journey does not exist', async () => {
+    const { repository } = await openRepository('outbox-missing-parent');
+    const outbox = repository;
+    const orphan = ownerOutboxRecord('missing-journey', ownerA, 'generation-a', 'Orphan title');
+
+    await expect(outbox.put(orphan)).rejects.toThrow(/Journey missing-journey was not found/);
+    await expect(outbox.listByJourney('missing-journey')).resolves.toEqual([]);
+  });
+
+  it('deletes every owner outbox in the same journey cascade transaction', async () => {
+    const { db, repository } = await openRepository('outbox-delete-cascade');
+    const journey = await repository.createJourney(journeyInput());
+    const outbox = repository;
+    await outbox.put(ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Owner A title'));
+    await outbox.put(ownerOutboxRecord(journey.id, ownerB, 'generation-b', 'Owner B title'));
+    const transactionSpy = vi.spyOn(db, 'transaction');
+
+    await repository.deleteJourney(journey.id);
+
+    await expect(outbox.listByJourney(journey.id)).resolves.toEqual([]);
+    expect(transactionSpy.mock.calls.some(([stores, mode]) => (
+      Array.isArray(stores) &&
+      stores.includes('journeys') &&
+      stores.includes('journeyAutosaveOutbox') &&
+      mode === 'readwrite'
+    ))).toBe(true);
+  });
+
+  it.each(['put-first', 'delete-first'] as const)(
+    'leaves no orphan for a deterministic put-vs-delete race: %s',
+    async (order) => {
+      const { repository } = await openRepository(`put-delete-${order}`);
+      const journey = await repository.createJourney(journeyInput());
+      const outbox = repository;
+      const pending = ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Pending title');
+
+      let put!: Promise<void>;
+      let deletion!: Promise<void>;
+      if (order === 'put-first') {
+        put = outbox.put(pending);
+        deletion = repository.deleteJourney(journey.id);
+      } else {
+        deletion = repository.deleteJourney(journey.id);
+        put = outbox.put(pending);
+      }
+      const [putResult, deletionResult] = await Promise.allSettled([put, deletion]);
+
+      expect(deletionResult.status).toBe('fulfilled');
+      expect(putResult.status).toBe(order === 'put-first' ? 'fulfilled' : 'rejected');
+      await expect(repository.getPrivateJourneyStory(journey.id)).resolves.toBeUndefined();
+      await expect(outbox.listByJourney(journey.id)).resolves.toEqual([]);
+    },
+  );
+
+  it.each(['put-first', 'clear-first'] as const)(
+    'leaves no orphan for a deterministic put-vs-clear race: %s',
+    async (order) => {
+      const { repository } = await openRepository(`put-clear-${order}`);
+      const journey = await repository.createJourney(journeyInput());
+      const outbox = repository;
+      const pending = ownerOutboxRecord(journey.id, ownerA, 'generation-a', 'Pending title');
+
+      let put!: Promise<void>;
+      let clear!: Promise<void>;
+      if (order === 'put-first') {
+        put = outbox.put(pending);
+        clear = repository.clearPrivateData();
+      } else {
+        clear = repository.clearPrivateData();
+        put = outbox.put(pending);
+      }
+      const [putResult, clearResult] = await Promise.allSettled([put, clear]);
+
+      expect(clearResult.status).toBe('fulfilled');
+      expect(putResult.status).toBe(order === 'put-first' ? 'fulfilled' : 'rejected');
+      await expect(repository.getPrivateJourneyStory(journey.id)).resolves.toBeUndefined();
+      await expect(outbox.listByJourney(journey.id)).resolves.toEqual([]);
+    },
+  );
 
   it('persists a new private draft after the database is reopened', async () => {
     const name = databaseName('reopen');
@@ -737,9 +881,53 @@ describe('indexedDbJourneyRepository', () => {
     const db = trackDatabase(await openSoundPassportDb(name));
     const repository = createIndexedDbJourneyRepository({ db });
 
-    expect(DB_VERSION).toBe(3);
+    expect(DB_VERSION).toBe(4);
     expect(db.objectStoreNames.contains('journeyAutosaveOutbox')).toBe(true);
     await expect(repository.listPrivateJourneys()).resolves.toEqual([existingJourney]);
-    await expect(repository.get(existingJourney.id)).resolves.toBeUndefined();
+    await expect(repository.listByJourney(existingJourney.id)).resolves.toEqual([]);
+  });
+
+  it('migrates a version 3 journey-keyed outbox into the v4 legacy owner without dropping its patch', async () => {
+    const name = databaseName('owner-outbox-migration');
+    const existingJourney = {
+      ...journeyInput(),
+      id: 'existing-v3-journey',
+      status: 'draft' as const,
+      source: 'private' as const,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+    };
+    const { ownerId: _legacyOwnerId, ...legacyRecord } = outboxRecord(
+      existingJourney.id,
+      'legacy-generation',
+      'Legacy private pending title',
+    );
+    const version3Db = trackDatabase(await openDB(name, 3, {
+      upgrade(db, _oldVersion, _newVersion, tx) {
+        const journeys = db.createObjectStore('journeys', { keyPath: 'id' });
+        journeys.createIndex('countryCode', 'countryCode');
+        journeys.createIndex('status', 'status');
+        const moments = db.createObjectStore('moments', { keyPath: 'id' });
+        moments.createIndex('journeyId', 'journeyId');
+        moments.createIndex('journeyIdSortOrder', ['journeyId', 'sortOrder']);
+        db.createObjectStore('songs', { keyPath: 'id' });
+        db.createObjectStore('photos', { keyPath: 'id' });
+        db.createObjectStore('journeyAutosaveOutbox', { keyPath: 'journeyId' });
+        journeys.put(existingJourney);
+        tx.objectStore('journeyAutosaveOutbox').put(legacyRecord);
+      },
+    }));
+    version3Db.close();
+
+    const db = trackDatabase(await openSoundPassportDb(name));
+    const outboxStore = db.transaction('journeyAutosaveOutbox').store;
+    const repository = createIndexedDbJourneyRepository({ db });
+    const migrated = { ...legacyRecord, ownerId: 'legacy-v3' };
+
+    expect(db.version).toBe(4);
+    expect(outboxStore.keyPath).toEqual(['journeyId', 'ownerId']);
+    expect(Array.from(outboxStore.indexNames)).toContain('journeyId');
+    await expect(repository.get(existingJourney.id, 'legacy-v3')).resolves.toEqual(migrated);
+    await expect(repository.listByJourney(existingJourney.id)).resolves.toEqual([migrated]);
   });
 });
