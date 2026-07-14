@@ -62,6 +62,8 @@ export function checkJava({
 
 export function javaPathEnvironment(environment, executable, platform = process.platform) {
   const path = platform === 'win32' ? win32 : posix;
+  if (path.dirname(executable) === '.') return { ...environment };
+
   const existingPath = environment.PATH ?? environment.Path ?? '';
   const pathDelimiter = platform === 'win32' ? ';' : ':';
   const javaBinDirectory = path.dirname(executable);

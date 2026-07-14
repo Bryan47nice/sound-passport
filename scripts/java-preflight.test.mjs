@@ -39,6 +39,14 @@ describe('checkJava', () => {
     expect(result).toEqual({ executable: 'java', majorVersion: 22 });
   });
 
+  it('preserves PATH without prepending the current directory for PATH fallback', () => {
+    expect(javaPathEnvironment(
+      { PATH: '/usr/local/bin:/usr/bin' },
+      'java',
+      'linux',
+    )).toEqual({ PATH: '/usr/local/bin:/usr/bin' });
+  });
+
   it('adds the validated JAVA_HOME bin directory to the Firebase child PATH only', () => {
     expect(javaPathEnvironment(
       { PATH: 'C:\\existing-tools' },
