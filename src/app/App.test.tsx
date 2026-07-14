@@ -20,6 +20,9 @@ describe('App', () => {
       </RepositoryProvider>,
     );
     expect(screen.getByRole('banner')).toHaveTextContent('Sound Passport');
+    const brand = screen.getByRole('link', { name: 'Sound Passport' });
+    expect(brand).toHaveAttribute('href', '/');
+    expect(brand.querySelector('.brand-passport-mark')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '世界地圖' })).toHaveAttribute('href', '/');
     expect(screen.getByRole('link', { name: '整理' })).toHaveAttribute('href', '/studio');
     expect(screen.getByRole('main')).toBeInTheDocument();

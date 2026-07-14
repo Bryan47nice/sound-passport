@@ -66,7 +66,13 @@ export interface IndexedDbJourneyRepository
     JourneyAutosaveOutboxPort,
     MomentAutosaveOutboxPort,
     PhotoAssetRepository,
-    PrivateDataPort {}
+    PrivateDataPort {
+  createJourneyCopy(
+    input: NewJourney,
+    moments: JourneyStory['moments'],
+    photos: NormalizedPhotoInput[],
+  ): Promise<Journey>;
+}
 
 export interface IndexedDbJourneyRepositoryOptions {
   db: IDBPDatabase<SoundPassportDb>;
@@ -447,6 +453,67 @@ export function createIndexedDbJourneyRepository({ db }: IndexedDbJourneyReposit
           source: 'private',
         };
         await tx.objectStore('journeys').add(journey);
+        return journey;
+      });
+    },
+
+    async createJourneyCopy(input, sourceMoments, photos) {
+      if (sourceMoments.length !== photos.length) {
+        throw relationshipError('fixture moment and photo counts do not match');
+      }
+
+      return runWrite(async (tx) => {
+        const existingPhotos = await tx.objectStore('photos').getAll();
+        assertPhotoEnvelope([...existingPhotos, ...photos]);
+
+        const timestamp = new Date().toISOString();
+        const journey: Journey = {
+          ...input,
+          countryCoordinates: [...input.countryCoordinates] as [number, number],
+          cityLabels: [...input.cityLabels],
+          id: crypto.randomUUID(),
+          status: 'draft',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          source: 'private',
+        };
+        await tx.objectStore('journeys').add(journey);
+
+        for (const [index, sourceMoment] of sourceMoments.entries()) {
+          const photoId = crypto.randomUUID();
+          const songId = crypto.randomUUID();
+          const photo: PhotoAsset = {
+            ...photos[index],
+            id: photoId,
+            createdAt: timestamp,
+          };
+          const song: SongReference = {
+            ...sourceMoment.song,
+            id: songId,
+          };
+          const moment: Moment = {
+            id: crypto.randomUUID(),
+            journeyId: journey.id,
+            photoAssetId: photoId,
+            photoAlt: sourceMoment.photoAlt,
+            songReferenceId: songId,
+            localDate: sourceMoment.localDate,
+            localTime: sourceMoment.localTime,
+            cityLabel: sourceMoment.cityLabel,
+            placeLabel: sourceMoment.placeLabel,
+            caption: sourceMoment.caption,
+            reason: sourceMoment.reason,
+            reasonStatus: sourceMoment.reasonStatus,
+            sortOrder: index,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+
+          await tx.objectStore('photos').add(photo);
+          await tx.objectStore('songs').add(song);
+          await tx.objectStore('moments').add(moment);
+        }
+
         return journey;
       });
     },

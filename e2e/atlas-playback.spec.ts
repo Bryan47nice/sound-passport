@@ -1,6 +1,7 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { verifyRouteLayout } from './helpers/layoutAssertions';
+import { makePng } from './helpers/testImages';
 
 const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -245,6 +246,56 @@ test('decodes RGB and RGBA screenshots across all PNG filters', () => {
       expect(metrics.nearBlackPixelRatio).toBeCloseTo(colorType === 6 ? 2 / 6 : 1 / 6, 6);
     }
   }
+});
+
+test('copies a fixture journey into an editable private draft', async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Journey editing is intentionally desktop-only.');
+  const diagnostics = collectPageErrors(page);
+  const fixturePhoto = makePng(320, 180, [33, 91, 104]);
+  await page.route('https://images.unsplash.com/**', (route) => route.fulfill({
+    body: fixturePhoto,
+    contentType: 'image/png',
+    headers: { 'access-control-allow-origin': '*' },
+  }));
+
+  diagnostics.setStage('fixture detail');
+  await page.goto('/journeys/seoul-2025');
+  await expect(page.locator('.brand-passport-mark')).toBeVisible();
+  await expect(page.getByText('示範旅程', { exact: true })).toBeVisible();
+  await verifyRouteLayout(page);
+
+  diagnostics.setStage('fixture copy');
+  await page.getByRole('button', { name: '複製成我的旅程' }).click();
+  await expect(page).toHaveURL(/\/studio\/journeys\/[^/]+$/);
+  await expect(page.getByRole('heading', { level: 1, name: '首爾，十月的夜（副本）' })).toBeVisible();
+
+  const journeyRegion = page.getByRole('region', { name: '旅程資料' });
+  await expect(journeyRegion.getByLabel('旅程標題')).toHaveValue('首爾，十月的夜（副本）');
+  await expect(journeyRegion.getByLabel('旅程總文（選填）')).toHaveValue('沿著漢江與街道收集夜裡的節奏。');
+  const rows = page.getByRole('region', { name: '時刻清單' }).getByRole('listitem');
+  await expect(rows).toHaveCount(1);
+
+  const momentRegion = page.getByRole('region', { name: '時刻資料' });
+  await expect(momentRegion.getByLabel('城市', { exact: true })).toHaveValue('首爾');
+  await expect(momentRegion.getByLabel('地點', { exact: true })).toHaveValue('漢江公園');
+  await expect(momentRegion.getByLabel('時刻文案')).toHaveValue('風吹過河面。');
+  await expect(momentRegion.getByLabel('歌名', { exact: true })).toHaveValue('Han River Night');
+  await expect(momentRegion.getByLabel('歌手', { exact: true })).toHaveValue('Sound Passport Demo');
+  await expect(momentRegion.getByLabel('選歌原因')).toHaveValue('風吹過河面時，城市的聲音退到了後面。');
+  await expect(page.locator('.journey-editor-preview-image')).toHaveJSProperty('naturalWidth', 320);
+  await expect(page.locator('.journey-editor-preview-image')).toHaveJSProperty('naturalHeight', 180);
+  await verifyRouteLayout(page);
+  expect(diagnostics.errors, diagnostics.errors.join('\n')).toEqual([]);
+});
+
+test('keeps fixture copying desktop-only on mobile', async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== 'mobile', 'This scenario runs only in the mobile project.');
+
+  await page.goto('/journeys/seoul-2025');
+
+  await expect(page.getByText('示範旅程', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '複製成我的旅程' })).toHaveCount(0);
+  await verifyRouteLayout(page);
 });
 
 test('revisits a journey from the map without autoplay', async ({ page }, testInfo: TestInfo) => {

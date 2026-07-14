@@ -3,6 +3,7 @@ import { Blob as NodeBlob } from 'node:buffer';
 import { openDB, type IDBPDatabase } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NewJourney, NormalizedPhotoInput, PrivateJourneySnapshot } from '../domain/model';
+import { fixtureJourneyRepository } from './fixtureJourneyRepository';
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
 import { DB_VERSION, openSoundPassportDb, type SoundPassportDb } from './indexedDb';
 import { createIndexedDbJourneyRepository } from './indexedDbJourneyRepository';
@@ -217,6 +218,98 @@ afterEach(async () => {
 });
 
 describe('indexedDbJourneyRepository', () => {
+  it('atomically copies multiple fixture moments, songs, and photos into a private draft', async () => {
+    const { repository } = await openRepository('atomic-journey-copy');
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('tokyo-2024');
+    const photos = fixtureStory!.moments.map((moment) => photoInput(`${moment.id}.jpg`));
+
+    const journey = await repository.createJourneyCopy(
+      journeyInput({
+        title: `${fixtureStory!.journey.title}（副本）`,
+        countryCode: fixtureStory!.journey.countryCode,
+        countryName: fixtureStory!.journey.countryName,
+        countryCoordinates: fixtureStory!.journey.countryCoordinates,
+        cityLabels: fixtureStory!.journey.cityLabels,
+        startDate: fixtureStory!.journey.startDate,
+        endDate: fixtureStory!.journey.endDate,
+        summary: fixtureStory!.journey.summary,
+      }),
+      fixtureStory!.moments,
+      photos,
+    );
+
+    const copiedStory = await repository.getPrivateJourneyStory(journey.id);
+    const snapshot = await repository.exportSnapshot();
+    expect(copiedStory?.journey).toMatchObject({
+      title: '東京，雨停之後（副本）',
+      source: 'private',
+      status: 'draft',
+    });
+    expect(copiedStory?.moments.map((moment) => ({
+      cityLabel: moment.cityLabel,
+      localDate: moment.localDate,
+      photoAlt: moment.photoAlt,
+      photoUrl: moment.photoUrl,
+      sortOrder: moment.sortOrder,
+      song: {
+        artist: moment.song.artist,
+        availability: moment.song.availability,
+        provider: moment.song.provider,
+        providerItemId: moment.song.providerItemId,
+        sourceUrl: moment.song.sourceUrl,
+        title: moment.song.title,
+      },
+    }))).toEqual(fixtureStory!.moments.map((moment, index) => ({
+      cityLabel: moment.cityLabel,
+      localDate: moment.localDate,
+      photoAlt: moment.photoAlt,
+      photoUrl: undefined,
+      sortOrder: index,
+      song: {
+        artist: moment.song.artist,
+        availability: moment.song.availability,
+        provider: moment.song.provider,
+        providerItemId: moment.song.providerItemId,
+        sourceUrl: moment.song.sourceUrl,
+        title: moment.song.title,
+      },
+    })));
+    expect(snapshot.photos).toHaveLength(fixtureStory!.moments.length);
+    expect(snapshot.songs).toHaveLength(fixtureStory!.moments.length);
+  });
+
+  it('rolls back the whole fixture copy when a late record write fails', async () => {
+    const { repository } = await openRepository('atomic-journey-copy-rollback');
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('tokyo-2024');
+    const ids = [
+      '10000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000002',
+      '30000000-0000-4000-8000-000000000003',
+      '40000000-0000-4000-8000-000000000004',
+      '20000000-0000-4000-8000-000000000002',
+    ] as const;
+    let idIndex = 0;
+    const randomUuid = vi.spyOn(crypto, 'randomUUID').mockImplementation(
+      () => ids[idIndex++] as ReturnType<typeof crypto.randomUUID>,
+    );
+
+    try {
+      await expect(repository.createJourneyCopy(
+        journeyInput(),
+        fixtureStory!.moments.slice(0, 2),
+        [photoInput('first.jpg'), photoInput('second.jpg')],
+      )).rejects.toBeDefined();
+      expect(await repository.exportSnapshot()).toEqual({
+        journeys: [],
+        moments: [],
+        songs: [],
+        photos: [],
+      });
+    } finally {
+      randomUuid.mockRestore();
+    }
+  });
+
   it('keeps moment recovery owner-scoped and removes it only for the exact generation', async () => {
     const { repository } = await openRepository('moment-outbox-compare-delete');
     const journey = await repository.createJourney(journeyInput());

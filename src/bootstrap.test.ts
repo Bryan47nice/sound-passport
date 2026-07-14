@@ -25,6 +25,7 @@ function createPrivateRepository(): IndexedDbJourneyRepository {
     getJourneyStory: vi.fn(async () => undefined),
     listPrivateJourneys: vi.fn(),
     createJourney: vi.fn(),
+    createJourneyCopy: vi.fn(),
     updateJourney: vi.fn(),
     deleteJourney: vi.fn(),
     getPrivateJourneyStory: vi.fn(),

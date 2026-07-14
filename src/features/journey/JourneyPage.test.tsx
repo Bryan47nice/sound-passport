@@ -8,7 +8,7 @@ import { createIndexedDbJourneyRepository } from '../../data/indexedDbJourneyRep
 import { RepositoryProvider } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import type { JourneyEditorRepository, JourneyRepository } from '../../data/ports';
-import type { JourneyStory } from '../../domain/model';
+import type { JourneyStory, NormalizedPhotoInput } from '../../domain/model';
 import { cleanupDb, uniqueDbName } from '../../test/indexedDb';
 import { seedPrivateReviewJourney } from '../../test/privateJourney';
 import { JourneyPage } from './JourneyPage';
@@ -49,7 +49,10 @@ function PopAway() {
 }
 
 describe('JourneyPage', () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   it('shows curated moments and a deliberate play command', async () => {
     render(
@@ -72,10 +75,180 @@ describe('JourneyPage', () => {
     expect(moments[1]).toHaveTextContent('代代木公園');
     expect(moments[2]).toHaveTextContent('羽田機場');
     expect(screen.getByText('旅後待補')).toBeInTheDocument();
+    expect(screen.getByText('示範旅程')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /播放這趟旅程/ })).toHaveAttribute('href', '/journeys/tokyo-2024/play');
     expect(screen.queryByRole('link', { name: '編輯旅程' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '複製成我的旅程' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '刪除旅程' })).not.toBeInTheDocument();
     expect(document.querySelector('iframe')).not.toBeInTheDocument();
+  });
+
+  it('copies a fixture journey into a private draft with its moments, songs, and local photos', async () => {
+    const user = userEvent.setup();
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('seoul-2025') as JourneyStory;
+    const createdJourney = {
+      ...fixtureStory.journey,
+      id: 'private-seoul-copy',
+      title: '首爾，十月的夜（副本）',
+      status: 'draft' as const,
+      source: 'private' as const,
+    };
+    const preparedPhoto: NormalizedPhotoInput = {
+      blob: new Blob(['photo'], { type: 'image/jpeg' }),
+      byteSize: 5,
+      contentType: 'image/jpeg',
+      height: 120,
+      originalFileName: 'seoul-2025-01.jpg',
+      width: 160,
+    };
+    const createJourneyCopy = vi.fn(async () => createdJourney);
+    const prepareFixturePhoto = vi.fn(async () => preparedPhoto);
+
+    render(
+      <RepositoryProvider services={{
+        query: fixtureJourneyRepository,
+        editor: editorStub({ createJourneyCopy }),
+      }}>
+        <MemoryRouter initialEntries={['/journeys/seoul-2025']}>
+          <Routes>
+            <Route
+              path="/journeys/:journeyId"
+              element={<JourneyPage prepareFixturePhoto={prepareFixturePhoto} />}
+            />
+            <Route path="/studio/journeys/:journeyId" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '複製成我的旅程' }));
+
+    expect(prepareFixturePhoto).toHaveBeenCalledWith(
+      fixtureStory.moments[0].photoUrl,
+      'seoul-2025-01',
+    );
+    expect(createJourneyCopy).toHaveBeenCalledWith(
+      {
+        title: '首爾，十月的夜（副本）',
+        countryCode: fixtureStory.journey.countryCode,
+        countryName: fixtureStory.journey.countryName,
+        countryCoordinates: fixtureStory.journey.countryCoordinates,
+        cityLabels: fixtureStory.journey.cityLabels,
+        startDate: fixtureStory.journey.startDate,
+        endDate: fixtureStory.journey.endDate,
+        summary: fixtureStory.journey.summary,
+      },
+      fixtureStory.moments,
+      [preparedPhoto],
+    );
+    expect(await screen.findByLabelText('目前路徑')).toHaveTextContent('/studio/journeys/private-seoul-copy');
+  });
+
+  it('keeps the fixture page recoverable when an atomic private copy fails', async () => {
+    const user = userEvent.setup();
+    const preparedPhoto: NormalizedPhotoInput = {
+      blob: new Blob(['photo'], { type: 'image/jpeg' }),
+      byteSize: 5,
+      contentType: 'image/jpeg',
+      height: 120,
+      originalFileName: 'seoul-2025-01.jpg',
+      width: 160,
+    };
+    const createJourneyCopy = vi.fn(async () => { throw new Error('transaction aborted'); });
+
+    render(
+      <RepositoryProvider services={{
+        query: fixtureJourneyRepository,
+        editor: editorStub({ createJourneyCopy }),
+      }}>
+        <MemoryRouter initialEntries={['/journeys/seoul-2025']}>
+          <Routes>
+            <Route
+              path="/journeys/:journeyId"
+              element={<JourneyPage prepareFixturePhoto={vi.fn(async () => preparedPhoto)} />}
+            />
+          </Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '複製成我的旅程' }));
+
+    expect(createJourneyCopy).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole('alert')).toHaveTextContent('無法複製示範旅程，請稍後再試。');
+    expect(screen.getByRole('button', { name: '複製成我的旅程' })).toBeEnabled();
+  });
+
+  it('does not write a private copy when fixture photo loading fails and allows retrying', async () => {
+    const user = userEvent.setup();
+    const fixtureStory = await fixtureJourneyRepository.getJourneyStory('seoul-2025') as JourneyStory;
+    const preparedPhoto: NormalizedPhotoInput = {
+      blob: new Blob(['photo'], { type: 'image/jpeg' }),
+      byteSize: 5,
+      contentType: 'image/jpeg',
+      height: 120,
+      originalFileName: 'seoul-2025-01.jpg',
+      width: 160,
+    };
+    const createJourneyCopy = vi.fn(async () => ({
+      ...fixtureStory.journey,
+      id: 'private-seoul-retry',
+      source: 'private' as const,
+      status: 'draft' as const,
+    }));
+    const prepareFixturePhoto = vi.fn()
+      .mockRejectedValueOnce(new Error('CORS blocked'))
+      .mockResolvedValueOnce(preparedPhoto);
+
+    render(
+      <RepositoryProvider services={{
+        query: fixtureJourneyRepository,
+        editor: editorStub({ createJourneyCopy }),
+      }}>
+        <MemoryRouter initialEntries={['/journeys/seoul-2025']}>
+          <Routes>
+            <Route
+              path="/journeys/:journeyId"
+              element={<JourneyPage prepareFixturePhoto={prepareFixturePhoto} />}
+            />
+            <Route path="/studio/journeys/:journeyId" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '複製成我的旅程' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('無法複製示範旅程，請稍後再試。');
+    expect(createJourneyCopy).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '複製成我的旅程' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: '複製成我的旅程' }));
+
+    expect(createJourneyCopy).toHaveBeenCalledTimes(1);
+    expect(await screen.findByLabelText('目前路徑')).toHaveTextContent('/studio/journeys/private-seoul-retry');
+  });
+
+  it('labels a fixture on mobile without offering a copy that cannot be edited there', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+
+    render(
+      <RepositoryProvider services={{
+        query: fixtureJourneyRepository,
+        editor: editorStub({ createJourneyCopy: vi.fn() }),
+      }}>
+        <MemoryRouter initialEntries={['/journeys/seoul-2025']}>
+          <Routes><Route path="/journeys/:journeyId" element={<JourneyPage />} /></Routes>
+        </MemoryRouter>
+      </RepositoryProvider>,
+    );
+
+    expect(await screen.findByText('示範旅程')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '複製成我的旅程' })).not.toBeInTheDocument();
   });
 
   it('shows a completed private journey summary and moment captions from the combined live query', async () => {
@@ -105,6 +278,8 @@ describe('JourneyPage', () => {
         'href',
         `/studio/journeys/${reviewStory.journey.id}`,
       );
+      expect(screen.queryByText('示範旅程')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '複製成我的旅程' })).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: '刪除旅程' })).toBeInTheDocument();
     } finally {
       cleanup();

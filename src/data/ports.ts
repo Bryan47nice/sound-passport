@@ -80,6 +80,11 @@ export class MomentOrderConflictError extends Error {
 export interface JourneyEditorRepository {
   listPrivateJourneys(): Promise<Journey[]>;
   createJourney(input: NewJourney): Promise<Journey>;
+  createJourneyCopy?(
+    input: NewJourney,
+    moments: JourneyStory['moments'],
+    photos: NormalizedPhotoInput[],
+  ): Promise<Journey>;
   updateJourney(id: string, patch: JourneyPatch, options?: UpdateJourneyOptions): Promise<Journey>;
   deleteJourney(id: string): Promise<void>;
   getPrivateJourneyStory(id: string): Promise<JourneyStory | undefined>;

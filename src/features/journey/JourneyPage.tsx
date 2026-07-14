@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from 'lucide-react';
+import { CopyPlus, Pencil, Trash2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { GuardedLink, useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
@@ -8,22 +8,42 @@ import {
   useOptionalJourneyEditorRepository,
   useRepositoryRevision,
 } from '../../data/RepositoryContext';
+import { storageWriteFailureMessage } from '../../data/storageErrors';
 import { formatLocalDateTime } from '../../domain/dateTime';
-import type { JourneyStory } from '../../domain/model';
+import type { JourneyStory, NormalizedPhotoInput } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
+import { normalizePhoto } from '../../media/photoNormalizer';
 import { AccessibleDialog } from '../studio/AccessibleDialog';
+import { useMobileStudio } from '../studio/useMobileStudio';
 
 type JourneyLoadState =
   | { kind: 'loading'; journeyId: string }
   | { kind: 'ready'; journeyId: string; story: JourneyStory | undefined }
   | { kind: 'error'; journeyId: string };
 
-export function JourneyPage() {
+type FixturePhotoPreparer = (photoUrl: string, fileStem: string) => Promise<NormalizedPhotoInput>;
+
+interface JourneyPageProps {
+  prepareFixturePhoto?: FixturePhotoPreparer;
+}
+
+async function prepareRemoteFixturePhoto(photoUrl: string, fileStem: string) {
+  const response = await fetch(photoUrl);
+  if (!response.ok) throw new Error(`Fixture photo request failed with ${response.status}.`);
+
+  const blob = await response.blob();
+  const contentType = blob.type || response.headers.get('content-type')?.split(';')[0] || '';
+  const extension = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
+  return normalizePhoto(new File([blob], `${fileStem}.${extension}`, { type: contentType }));
+}
+
+export function JourneyPage({ prepareFixturePhoto = prepareRemoteFixturePhoto }: JourneyPageProps = {}) {
   const { journeyId = '' } = useParams();
   const navigate = useGuardedNavigate();
   const routeCommand = useRouteCommandGuard();
   const repository = useJourneyRepository();
   const editor = useOptionalJourneyEditorRepository();
+  const isMobile = useMobileStudio();
   const repositoryRevision = useRepositoryRevision();
   const invalidateQueries = useInvalidateRepositoryQueries();
   const [loadState, setLoadState] = useState<JourneyLoadState>(() => ({
@@ -33,7 +53,10 @@ export function JourneyPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyError, setCopyError] = useState('');
   const deletePendingRef = useRef(false);
+  const copyPendingRef = useRef(false);
   const deleteDescriptionId = useId();
 
   useEffect(() => {
@@ -71,6 +94,46 @@ export function JourneyPage() {
   if (!story) return <section className="page empty-state"><h1>找不到這趟旅程</h1></section>;
 
   const canManage = story.journey.source === 'private' && editor !== undefined;
+  const createJourneyCopy = editor?.createJourneyCopy;
+  const canCopy = story.journey.source === 'fixture' && createJourneyCopy !== undefined && !isMobile;
+  const copyFixtureJourney = async () => {
+    if (!canCopy || !createJourneyCopy || copyPendingRef.current) return;
+
+    const command = routeCommand.capture();
+    copyPendingRef.current = true;
+    setCopyBusy(true);
+    setCopyError('');
+
+    try {
+      const preparedPhotos = await Promise.all(story.moments.map((moment, index) => {
+        if (!moment.photoUrl) throw new Error(`Fixture moment ${moment.id} has no photo URL.`);
+        return prepareFixturePhoto(
+          moment.photoUrl,
+          `${story.journey.id}-${String(index + 1).padStart(2, '0')}`,
+        );
+      }));
+      const createdJourney = await createJourneyCopy({
+        title: `${story.journey.title}（副本）`,
+        countryCode: story.journey.countryCode,
+        countryName: story.journey.countryName,
+        countryCoordinates: [...story.journey.countryCoordinates] as [number, number],
+        cityLabels: [...story.journey.cityLabels],
+        startDate: story.journey.startDate,
+        endDate: story.journey.endDate,
+        summary: story.journey.summary,
+      }, story.moments, preparedPhotos);
+
+      invalidateQueries();
+      if (routeCommand.isCurrent(command)) navigate(`/studio/journeys/${createdJourney.id}`);
+    } catch (error) {
+      if (routeCommand.isCurrent(command)) {
+        setCopyError(storageWriteFailureMessage(error, '無法複製示範旅程，請稍後再試。'));
+      }
+    } finally {
+      copyPendingRef.current = false;
+      setCopyBusy(false);
+    }
+  };
   const deleteJourney = async () => {
     if (!canManage || deletePendingRef.current) return;
     const command = routeCommand.capture();
@@ -93,11 +156,24 @@ export function JourneyPage() {
 
   return (
     <section className="page">
-      <p className="eyebrow">{story.journey.countryName} · {story.journey.startDate}</p>
+      <div className="journey-detail-kicker">
+        <p className="eyebrow">{story.journey.countryName} · {story.journey.startDate}</p>
+        {story.journey.source === 'fixture' && <span className="journey-kind-badge">示範旅程</span>}
+      </div>
       <h1 className="page-title">{story.journey.title}</h1>
       <p className="journey-detail-summary">{story.journey.summary || '尚未填寫旅程總文。'}</p>
       <div className="journey-detail-actions">
         <GuardedLink className="primary-command" to={`/journeys/${story.journey.id}/play`}>播放這趟旅程</GuardedLink>
+        {canCopy && (
+          <button
+            className="secondary-command"
+            type="button"
+            disabled={copyBusy}
+            onClick={() => void copyFixtureJourney()}
+          >
+            <CopyPlus size={17} aria-hidden="true" />{copyBusy ? '複製中…' : '複製成我的旅程'}
+          </button>
+        )}
         {canManage && (
           <>
             <GuardedLink className="secondary-command" to={`/studio/journeys/${story.journey.id}`}>
@@ -113,6 +189,7 @@ export function JourneyPage() {
           </>
         )}
       </div>
+      {copyError && <p className="journey-copy-error field-error" role="alert">{copyError}</p>}
       <ol className="moment-list">
         {story.moments.map((moment) => (
           <li className="moment-row" key={moment.id}>
