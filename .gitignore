@@ -8,6 +8,8 @@ work/
 # Local environment and credentials
 .env
 .env.*
+.env.local
+.env.*.local
 !.env.example
 *.local
 *.soundpassport

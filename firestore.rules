@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['createdAt', 'schemaVersion'])
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.schemaVersion == 1;
+      allow update, delete: if false;
+
+      match /{privateDocument=**} {
+        allow read, write: if false;
+      }
+    }
+  }
+}
