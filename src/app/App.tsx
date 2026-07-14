@@ -1,4 +1,5 @@
 import { Route, Routes } from 'react-router';
+import { RequireAuth } from '../auth/RequireAuth';
 import { AtlasPage } from '../features/atlas/AtlasPage';
 import { CountryPage } from '../features/country/CountryPage';
 import { JourneyPage } from '../features/journey/JourneyPage';
@@ -12,14 +13,17 @@ import { GuardedLink, NavigationGuardProvider, useGuardedRouteLocation } from '.
 
 function AppRoutes() {
   const routeLocation = useGuardedRouteLocation();
+
   return (
     <AppShell>
       <Routes location={routeLocation}>
         <Route index element={<AtlasPage />} />
-        <Route path="studio" element={<StudioPage />} />
-        <Route path="studio/journeys/new" element={<JourneyCreatePage />} />
-        <Route path="studio/journeys/:journeyId/preview" element={<JourneyPreviewPage />} />
-        <Route path="studio/journeys/:journeyId" element={<JourneyEditorPage />} />
+        <Route element={<RequireAuth />}>
+          <Route path="studio" element={<StudioPage />} />
+          <Route path="studio/journeys/new" element={<JourneyCreatePage />} />
+          <Route path="studio/journeys/:journeyId/preview" element={<JourneyPreviewPage />} />
+          <Route path="studio/journeys/:journeyId" element={<JourneyEditorPage />} />
+        </Route>
         <Route path="countries/:countryCode" element={<CountryPage />} />
         <Route path="journeys/:journeyId/play" element={<JourneyPlayerPage />} />
         <Route path="journeys/:journeyId" element={<JourneyPage />} />

@@ -1,64 +1,92 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RepositoryProvider } from '../data/RepositoryContext';
+import { AuthProvider } from '../auth/AuthContext';
+import type { AuthPort, AuthUser } from '../auth/ports';
 import { fixtureJourneyRepository } from '../data/fixtureJourneyRepository';
+import { RepositoryProvider, type RepositoryServices } from '../data/RepositoryContext';
 import type { JourneyEditorRepository } from '../data/ports';
 import { App } from './App';
 
 vi.mock('../features/atlas/WorldMap', () => ({
-  WorldMap: () => <div aria-label="旅行世界地圖" />,
+  WorldMap: () => <div aria-label="world-map" />,
 }));
+
+type TestAuthPort = AuthPort & {
+  signInWithGoogle: ReturnType<typeof vi.fn>;
+  signOut: ReturnType<typeof vi.fn>;
+};
+
+function createAuthPort(user: AuthUser | null): TestAuthPort {
+  return {
+    observe: vi.fn((listener) => {
+      listener(user);
+      return vi.fn();
+    }),
+    signInWithGoogle: vi.fn(async () => undefined),
+    signOut: vi.fn(async () => undefined),
+  };
+}
+
+function CurrentPath() {
+  return <output data-testid="current-path">{useLocation().pathname}</output>;
+}
+
+function renderApp({
+  authPort = createAuthPort(null),
+  initialEntries,
+  services = { query: fixtureJourneyRepository },
+}: {
+  authPort?: TestAuthPort;
+  initialEntries?: string[];
+  services?: RepositoryServices;
+} = {}) {
+  return render(
+    <AuthProvider port={authPort}>
+      <RepositoryProvider services={services}>
+        <MemoryRouter initialEntries={initialEntries}>
+          <CurrentPath />
+          <App />
+        </MemoryRouter>
+      </RepositoryProvider>
+    </AuthProvider>,
+  );
+}
 
 describe('App', () => {
   afterEach(cleanup);
 
-  it('renders the Sound Passport shell', async () => {
-    render(
-      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
-        <MemoryRouter><App /></MemoryRouter>
-      </RepositoryProvider>,
-    );
+  it('renders the shell and a Google sign-in command for signed-out users', async () => {
+    renderApp();
+
     expect(screen.getByRole('banner')).toHaveTextContent('Sound Passport');
-    const brand = screen.getByRole('link', { name: 'Sound Passport' });
-    expect(brand).toHaveAttribute('href', '/');
-    expect(brand.querySelector('.brand-passport-mark')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '世界地圖' })).toHaveAttribute('href', '/');
-    expect(screen.getByRole('link', { name: '整理' })).toHaveAttribute('href', '/studio');
+    expect(screen.getByRole('link', { name: 'Sound Passport' })).toHaveAttribute('href', '/');
+    expect(screen.getByRole('button', { name: '使用 Google 登入' })).toBeInTheDocument();
     expect(screen.getByRole('main')).toBeInTheDocument();
-    expect(await screen.findByLabelText('旅行世界地圖')).toBeInTheDocument();
+    expect(await screen.findByLabelText('world-map')).toBeInTheDocument();
   });
 
-  it('renders the Studio route unavailable state instead of the not-found page', async () => {
-    render(
-      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
-        <MemoryRouter initialEntries={['/studio']}><App /></MemoryRouter>
-      </RepositoryProvider>,
-    );
+  it.each([
+    '/studio',
+    '/studio/journeys/new',
+    '/studio/journeys/journey-a/preview',
+    '/studio/journeys/journey-a',
+  ])('keeps a signed-out Studio request at %s and shows the sign-in wall', (path) => {
+    renderApp({ initialEntries: [path] });
 
-    expect(await screen.findByRole('heading', { name: '本機儲存空間暫時無法使用' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '找不到這個頁面' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('current-path')).toHaveTextContent(path);
+    expect(screen.getByRole('heading', { name: '請先登入以使用創作工坊' })).toBeInTheDocument();
   });
 
-  it('renders the editor route unavailable state instead of the Task 6 transition', () => {
-    render(
-      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
-        <MemoryRouter initialEntries={['/studio/journeys/new-journey']}><App /></MemoryRouter>
-      </RepositoryProvider>,
-    );
-
-    expect(screen.getByRole('heading', { name: '本機儲存空間暫時無法使用' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '旅程編輯功能即將開放' })).not.toBeInTheDocument();
-  });
-
-  it('routes a private journey preview through the editor repository', async () => {
+  it('renders a signed-in private preview through the existing Studio route', async () => {
     const fixtureStory = await fixtureJourneyRepository.getJourneyStory('seoul-2025');
     const privateStory = {
       ...fixtureStory!,
       journey: {
         ...fixtureStory!.journey,
         id: 'private-preview',
-        title: '私人預覽旅程',
+        title: 'Private Preview',
         source: 'private' as const,
         status: 'draft' as const,
       },
@@ -76,23 +104,31 @@ describe('App', () => {
       setJourneyStatus: vi.fn(),
     };
 
-    render(
-      <RepositoryProvider services={{ query: fixtureJourneyRepository, editor }}>
-        <MemoryRouter initialEntries={['/studio/journeys/private-preview/preview']}><App /></MemoryRouter>
-      </RepositoryProvider>,
-    );
+    renderApp({
+      authPort: createAuthPort({ uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null }),
+      initialEntries: ['/studio/journeys/private-preview/preview'],
+      services: { query: fixtureJourneyRepository, editor },
+    });
 
-    expect(await screen.findByRole('heading', { name: '私人預覽旅程' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Private Preview' })).toBeInTheDocument();
     expect(editor.getPrivateJourneyStory).toHaveBeenCalledWith('private-preview');
-    expect(screen.queryByRole('heading', { name: '找不到這個頁面' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '請先登入以使用創作工坊' })).not.toBeInTheDocument();
   });
 
-  it('shows a not-found page for an unknown route', () => {
-    render(
-      <RepositoryProvider services={{ query: fixtureJourneyRepository }}>
-        <MemoryRouter initialEntries={['/not-found']}><App /></MemoryRouter>
-      </RepositoryProvider>,
-    );
+  it('shows an accessible account menu and delegates its sign-out command', async () => {
+    const user = userEvent.setup();
+    const authPort = createAuthPort({ uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null });
+    renderApp({ authPort });
+
+    await user.click(screen.getByLabelText('帳戶選單'));
+    expect(screen.getByText('使用者 A')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '登出' }));
+
+    expect(authPort.signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the existing not-found route', () => {
+    renderApp({ initialEntries: ['/not-found'] });
 
     expect(screen.getByRole('heading', { name: '找不到這個頁面' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '回到世界地圖' })).toHaveAttribute('href', '/');
