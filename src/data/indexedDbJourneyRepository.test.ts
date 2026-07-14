@@ -1,4 +1,3 @@
-// @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
 import { Blob as NodeBlob } from 'node:buffer';
 import { openDB, type IDBPDatabase } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';

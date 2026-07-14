@@ -1,4 +1,3 @@
-// @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
 import { Blob as NodeBlob } from 'node:buffer';
 import type { JourneyEditorRepository } from '../data/ports';
 import type { NewJourney, NormalizedPhotoInput } from '../domain/model';

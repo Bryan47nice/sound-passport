@@ -6,7 +6,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, serverTimestamp, setDoc, Timestamp } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, serverTimestamp, setDoc, Timestamp, updateDoc } from 'firebase/firestore';
 import { getBytes, ref, uploadBytes } from 'firebase/storage';
 
 const projectId = 'demo-sound-passport';
@@ -62,6 +62,33 @@ describe('private Firebase paths', () => {
     await assertFails(setDoc(doc(userA.firestore(), 'users/user-a/journeys/journey-1'), {
       title: '\u4e0d\u61c9\u5beb\u5165?',
     }));
+  });
+
+  it('rejects invalid profile schemas and all profile mutations after creation', async () => {
+    const userA = environment.authenticatedContext('user-a');
+    const profileA = doc(userA.firestore(), 'users/user-a');
+
+    await assertFails(setDoc(profileA, {
+      createdAt: serverTimestamp(),
+      schemaVersion: 1,
+      extraField: 'not allowed',
+    }));
+    await assertFails(setDoc(profileA, { createdAt: serverTimestamp() }));
+    await assertFails(setDoc(profileA, {
+      createdAt: serverTimestamp(),
+      schemaVersion: 2,
+    }));
+    await assertFails(setDoc(profileA, {
+      createdAt: Timestamp.fromMillis(0),
+      schemaVersion: 1,
+    }));
+
+    await assertSucceeds(setDoc(profileA, {
+      createdAt: serverTimestamp(),
+      schemaVersion: 1,
+    }));
+    await assertFails(updateDoc(profileA, { schemaVersion: 1 }));
+    await assertFails(deleteDoc(profileA));
   });
 
   it('allows only the owner to read a seeded photo and rejects every client upload', async () => {

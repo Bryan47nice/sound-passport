@@ -1,4 +1,3 @@
-// @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
 import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router';

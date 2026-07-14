@@ -1,4 +1,3 @@
-// @ts-expect-error Node built-in declarations are intentionally excluded from the browser tsconfig.
 import { Blob as NodeBlob } from 'node:buffer';
 import { openDB } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,7 +29,7 @@ class SnapshotPort implements PrivateDataPort {
 }
 
 function nodeBlob(bytes: Uint8Array, contentType: string) {
-  return new NodeBlob([bytes], { type: contentType }) as unknown as Blob;
+  return new NodeBlob([new Uint8Array(bytes)], { type: contentType }) as unknown as Blob;
 }
 
 function journeyInput(title: string): NewJourney {

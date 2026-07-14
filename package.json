@@ -13,9 +13,11 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:e2e": "playwright test",
-    "emulators": "firebase emulators:start --project demo-sound-passport",
+    "test:java-preflight": "vitest run scripts/java-preflight.test.mjs",
+    "java:preflight": "node scripts/java-preflight.mjs",
+    "emulators": "node scripts/firebase-with-java.mjs emulators:start --project demo-sound-passport",
     "test:rules:vitest": "vitest run --config vitest.rules.config.ts",
-    "test:rules": "firebase emulators:exec --project demo-sound-passport --only firestore,storage \"npm run test:rules:vitest\""
+    "test:rules": "node scripts/firebase-with-java.mjs emulators:exec --project demo-sound-passport --only firestore,storage \"npm run test:rules:vitest\""
   },
   "keywords": [],
   "author": "",
