@@ -22,7 +22,7 @@ async function resolveAuthPort() {
     : createUnavailableAuthPort();
 }
 
-void resolveAuthPort().then((authPort) => {
+function renderApp(authPort: Awaited<ReturnType<typeof resolveAuthPort>>) {
   root.render(
     <React.StrictMode>
       <AuthProvider port={authPort}>
@@ -32,4 +32,24 @@ void resolveAuthPort().then((authPort) => {
       </AuthProvider>
     </React.StrictMode>,
   );
-});
+}
+
+function renderBootstrapFailure(error: unknown) {
+  console.error('Unable to bootstrap Sound Passport.', error);
+  root.render(
+    <main className="page auth-required">
+      <h1 className="page-title">無法啟動 Sound Passport</h1>
+      <p className="muted">請重新整理頁面後再試一次。</p>
+    </main>,
+  );
+}
+
+async function bootstrap() {
+  try {
+    renderApp(await resolveAuthPort());
+  } catch (error) {
+    renderBootstrapFailure(error);
+  }
+}
+
+void bootstrap();

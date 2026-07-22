@@ -18,7 +18,13 @@ declare global {
 
 function readStoredUser(): AuthUser | null {
   const value = sessionStorage.getItem(STORAGE_KEY);
-  return value ? JSON.parse(value) as AuthUser : null;
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as AuthUser;
+  } catch {
+    sessionStorage.removeItem(STORAGE_KEY);
+    return null;
+  }
 }
 
 export function createE2eAuthPort(): AuthPort {

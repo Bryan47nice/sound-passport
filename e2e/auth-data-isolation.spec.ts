@@ -50,11 +50,30 @@ test('keeps each signed-in account in its own local repository', async ({ page }
 
   await setE2eUser(page, userB);
   await page.goto('/studio');
+  const accountMenu = page.locator('.account-menu');
+  await expect(accountMenu).toBeVisible();
+  await accountMenu.locator('summary').click();
+  await expect(accountMenu.getByText('E2E 旅人 B', { exact: true })).toBeVisible();
+  await expect(page.getByText('這裡還沒有草稿旅程。', { exact: true })).toBeVisible();
   await expect(page.getByText('A 的東京旅程', { exact: true })).toHaveCount(0);
 
   await setE2eUser(page, userA);
   await page.goto('/studio');
+  await expect(accountMenu).toBeVisible();
+  await accountMenu.locator('summary').click();
+  await expect(accountMenu.getByText('E2E 旅人 A', { exact: true })).toBeVisible();
   await expect(page.getByText('A 的東京旅程', { exact: true })).toBeVisible();
+});
+
+test('recovers from a corrupted E2E session without leaving a blank app', async ({ page }) => {
+  await page.evaluate(() => {
+    sessionStorage.setItem('sound-passport-e2e-auth', '{not-json');
+  });
+  await page.reload();
+  await page.goto('/studio');
+
+  await expect(page.getByRole('heading', { name: '登入以整理私人旅程' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('sound-passport-e2e-auth'))).toBeNull();
 });
 
 test('requires sign-in before opening private studio routes', async ({ page }) => {

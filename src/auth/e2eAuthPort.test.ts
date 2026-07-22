@@ -45,4 +45,16 @@ describe('createE2eAuthPort', () => {
     window.__SOUND_PASSPORT_E2E_AUTH__?.setUser(userA);
     expect(listener).toHaveBeenCalledTimes(3);
   });
+
+  it('clears an invalid stored session and reports a signed-out user', async () => {
+    sessionStorage.setItem('sound-passport-e2e-auth', '{not-json');
+
+    const port = createE2eAuthPort();
+    const listener = vi.fn();
+    port.observe(listener, vi.fn());
+    await Promise.resolve();
+
+    expect(sessionStorage.getItem('sound-passport-e2e-auth')).toBeNull();
+    expect(listener).toHaveBeenCalledWith(null);
+  });
 });
