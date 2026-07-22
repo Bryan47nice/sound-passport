@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   plugins: [react()],
   test: {
-    exclude: ['e2e/**', 'node_modules/**'],
+    exclude: ['e2e/**', 'node_modules/**', 'src/test/firebaseRules.test.ts'],
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
     css: true,

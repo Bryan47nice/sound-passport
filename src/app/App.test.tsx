@@ -80,7 +80,7 @@ describe('App', () => {
     renderApp({ initialEntries: [path] });
 
     expect(screen.getByTestId('current-path')).toHaveTextContent(path);
-    expect(screen.getByRole('heading', { name: '請先登入以使用創作工坊' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '登入以整理私人旅程' })).toBeInTheDocument();
   });
 
   it('uses only the signed-in private repository on the root route', async () => {
@@ -180,7 +180,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: 'Private Preview' })).toBeInTheDocument();
     expect(editor.getPrivateJourneyStory).toHaveBeenCalledWith('private-preview');
-    expect(screen.queryByRole('heading', { name: '請先登入以使用創作工坊' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '登入以整理私人旅程' })).not.toBeInTheDocument();
   });
 
   it('shows an accessible account menu and delegates its sign-out command', async () => {

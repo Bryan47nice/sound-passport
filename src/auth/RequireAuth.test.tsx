@@ -36,7 +36,7 @@ describe('RequireAuth', () => {
   it('keeps the protected route mounted and shows a sign-in wall for signed-out users', () => {
     renderRoute(null);
 
-    expect(screen.getByRole('heading', { name: '請先登入以使用創作工坊' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '登入以整理私人旅程' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '使用 Google 登入' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '創作工坊' })).not.toBeInTheDocument();
   });
@@ -45,6 +45,6 @@ describe('RequireAuth', () => {
     renderRoute({ uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null });
 
     expect(screen.getByRole('heading', { name: '創作工坊' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '請先登入以使用創作工坊' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '登入以整理私人旅程' })).not.toBeInTheDocument();
   });
 });
