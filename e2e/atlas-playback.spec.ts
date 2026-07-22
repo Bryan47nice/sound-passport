@@ -1,5 +1,7 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { deflateSync, inflateSync } from 'node:zlib';
+import { verifyRouteLayout } from './helpers/layoutAssertions';
+import { makePng } from './helpers/testImages';
 
 const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -20,42 +22,6 @@ function collectPageErrors(page: Page) {
       stage = nextStage;
     },
   };
-}
-
-async function expectNoHorizontalOverflow(page: Page) {
-  const layout = await page.evaluate(() => {
-    const viewportWidth = document.documentElement.clientWidth;
-    const tolerance = 1;
-    const selectors = [
-      '.app-header', '.page', '.world-map', '.country-index', '.journey-list',
-      '.moment-list', '.player-stage', '.player-visual', '.player-copy',
-      'a', 'button', 'img', 'iframe', 'h1', 'h2', 'h3', 'time',
-    ];
-    const elements = [...new Set(selectors.flatMap((selector) => (
-      [...document.querySelectorAll<HTMLElement>(selector)]
-    )))];
-    const label = (element: HTMLElement) => {
-      const text = element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName;
-      const classes = element.className && typeof element.className === 'string' ? `.${element.className}` : '';
-      return `${element.tagName.toLowerCase()}${classes} (${text.slice(0, 80)})`;
-    };
-    const outside = elements.flatMap((element) => {
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      if (style.visibility === 'hidden' || style.display === 'none' || rect.width === 0 || rect.height === 0) return [];
-      if (rect.left >= -tolerance && rect.right <= viewportWidth + tolerance) return [];
-      return [`${label(element)}: horizontal bounds ${rect.left.toFixed(1)}..${rect.right.toFixed(1)} exceed viewport 0..${viewportWidth}`];
-    });
-
-    return {
-      outside,
-      scrollWidth: document.documentElement.scrollWidth,
-      viewportWidth,
-    };
-  });
-
-  expect(layout.scrollWidth, `document scrollWidth ${layout.scrollWidth} exceeds viewport ${layout.viewportWidth}`).toBeLessThanOrEqual(layout.viewportWidth);
-  expect(layout.outside, layout.outside.join('\n')).toEqual([]);
 }
 
 async function expectLoadedFixtureImages(page: Page) {
@@ -272,40 +238,6 @@ async function expectEastAsiaMarkerPlacement(page: Page) {
   expect(overlapWidth * overlapHeight).toBe(0);
 }
 
-async function expectNoObviousOverlap(page: Page) {
-  const overlaps = await page.evaluate(() => {
-    const candidates = [...document.querySelectorAll<HTMLElement>('a, button, h1, h2, h3, p, time, img, iframe')]
-      .filter((element) => {
-        const rect = element.getBoundingClientRect();
-        const style = getComputedStyle(element);
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-      });
-
-    const labels = (element: HTMLElement) => element.getAttribute('aria-label') || element.textContent?.trim() || element.tagName;
-    const issues: string[] = [];
-    for (let left = 0; left < candidates.length; left += 1) {
-      for (let right = left + 1; right < candidates.length; right += 1) {
-        const first = candidates[left];
-        const second = candidates[right];
-        if (first.contains(second) || second.contains(first)) continue;
-        const a = first.getBoundingClientRect();
-        const b = second.getBoundingClientRect();
-        const overlapWidth = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
-        const overlapHeight = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-        if (overlapWidth * overlapHeight > 36) issues.push(`${labels(first)} overlaps ${labels(second)}`);
-      }
-    }
-    return issues;
-  });
-
-  expect(overlaps).toEqual([]);
-}
-
-async function verifyRouteLayout(page: Page) {
-  await expectNoHorizontalOverflow(page);
-  await expectNoObviousOverlap(page);
-}
-
 test('decodes RGB and RGBA screenshots across all PNG filters', () => {
   for (const colorType of [2, 6] as const) {
     for (let filter = 0; filter <= 4; filter += 1) {
@@ -314,6 +246,56 @@ test('decodes RGB and RGBA screenshots across all PNG filters', () => {
       expect(metrics.nearBlackPixelRatio).toBeCloseTo(colorType === 6 ? 2 / 6 : 1 / 6, 6);
     }
   }
+});
+
+test('copies a fixture journey into an editable private draft', async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Journey editing is intentionally desktop-only.');
+  const diagnostics = collectPageErrors(page);
+  const fixturePhoto = makePng(320, 180, [33, 91, 104]);
+  await page.route('https://images.unsplash.com/**', (route) => route.fulfill({
+    body: fixturePhoto,
+    contentType: 'image/png',
+    headers: { 'access-control-allow-origin': '*' },
+  }));
+
+  diagnostics.setStage('fixture detail');
+  await page.goto('/journeys/seoul-2025');
+  await expect(page.locator('.brand-passport-mark')).toBeVisible();
+  await expect(page.getByText('示範旅程', { exact: true })).toBeVisible();
+  await verifyRouteLayout(page);
+
+  diagnostics.setStage('fixture copy');
+  await page.getByRole('button', { name: '複製成我的旅程' }).click();
+  await expect(page).toHaveURL(/\/studio\/journeys\/[^/]+$/);
+  await expect(page.getByRole('heading', { level: 1, name: '首爾，十月的夜（副本）' })).toBeVisible();
+
+  const journeyRegion = page.getByRole('region', { name: '旅程資料' });
+  await expect(journeyRegion.getByLabel('旅程標題')).toHaveValue('首爾，十月的夜（副本）');
+  await expect(journeyRegion.getByLabel('旅程總文（選填）')).toHaveValue('沿著漢江與街道收集夜裡的節奏。');
+  const rows = page.getByRole('region', { name: '時刻清單' }).getByRole('listitem');
+  await expect(rows).toHaveCount(1);
+
+  const momentRegion = page.getByRole('region', { name: '時刻資料' });
+  await expect(momentRegion.getByLabel('城市', { exact: true })).toHaveValue('首爾');
+  await expect(momentRegion.getByLabel('地點', { exact: true })).toHaveValue('漢江公園');
+  await expect(momentRegion.getByLabel('時刻文案')).toHaveValue('風吹過河面。');
+  await expect(momentRegion.getByLabel('歌名', { exact: true })).toHaveValue('Han River Night');
+  await expect(momentRegion.getByLabel('歌手', { exact: true })).toHaveValue('Sound Passport Demo');
+  await expect(momentRegion.getByLabel('選歌原因')).toHaveValue('風吹過河面時，城市的聲音退到了後面。');
+  await expect(page.locator('.journey-editor-preview-image')).toHaveJSProperty('naturalWidth', 320);
+  await expect(page.locator('.journey-editor-preview-image')).toHaveJSProperty('naturalHeight', 180);
+  await verifyRouteLayout(page);
+  expect(diagnostics.errors, diagnostics.errors.join('\n')).toEqual([]);
+});
+
+test('keeps fixture copying desktop-only on mobile', async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== 'mobile', 'This scenario runs only in the mobile project.');
+
+  await page.goto('/journeys/seoul-2025');
+
+  await expect(page.getByText('示範旅程', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '複製成我的旅程' })).toHaveCount(0);
+  await verifyRouteLayout(page);
 });
 
 test('revisits a journey from the map without autoplay', async ({ page }, testInfo: TestInfo) => {
