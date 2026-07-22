@@ -26,10 +26,7 @@ const emulatorState = globalThis as typeof globalThis & {
 
 export function resolveFirebaseOptions(env: FirebaseEnv): FirebaseOptions | undefined {
   const emulatorFlag = env.VITE_USE_FIREBASE_EMULATORS;
-  if (emulatorFlag !== undefined
-    && emulatorFlag !== ''
-    && emulatorFlag !== 'true'
-    && emulatorFlag !== 'false') {
+  if (emulatorFlag !== 'true' && emulatorFlag !== 'false') {
     return undefined;
   }
 

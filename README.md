@@ -10,7 +10,7 @@ npm.cmd run emulators
 npm.cmd run dev
 ```
 
-只有刻意連線到正式 Firebase 時才能使用 `VITE_USE_FIREBASE_EMULATORS=false`。正式環境請在 Firebase Console 建立 Firebase Web App，並在 Authentication 的登入提供者中只啟用 Google；將該 Web App 的完整公開設定填入環境變數，並在 Firebase Console 的 authorized domains 加入需要使用登入功能的網域。一般 emulator local-dev 不得改為 `false`。
+`VITE_USE_FIREBASE_EMULATORS` 必須明確設定為 `true` 或 `false`，不得省略或留空；拼錯或其他值會讓 Firebase runtime 保持 unavailable。只有刻意連線到正式 Firebase 時才能使用 `VITE_USE_FIREBASE_EMULATORS=false`。正式環境請在 Firebase Console 建立 Firebase Web App，並在 Authentication 的登入提供者中只啟用 Google；將該 Web App 的完整公開設定填入環境變數，並在 Firebase Console 的 authorized domains 加入需要使用登入功能的網域。一般 emulator local-dev 不得改為 `false`。
 
 `.env.local` 已刻意忽略，不應提交。Firebase Web config 屬於公開用戶端設定；service-account JSON 則絕不能放入此前端 repository，也不得提交或提供給瀏覽器。
 

@@ -48,6 +48,24 @@ vi.mock('firebase/storage', () => ({
 
 import { createFirebaseRuntime, resolveFirebaseOptions } from './runtime';
 
+const productionConfig = {
+  VITE_FIREBASE_API_KEY: 'public-api-key',
+  VITE_FIREBASE_AUTH_DOMAIN: 'sound-passport.firebaseapp.com',
+  VITE_FIREBASE_PROJECT_ID: 'sound-passport',
+  VITE_FIREBASE_STORAGE_BUCKET: 'sound-passport.firebasestorage.app',
+  VITE_FIREBASE_APP_ID: 'web-app-id',
+};
+
+function expectFirebaseApisUntouched() {
+  expect(firebase.initializeApp).not.toHaveBeenCalled();
+  expect(firebase.getAuth).not.toHaveBeenCalled();
+  expect(firebase.getFirestore).not.toHaveBeenCalled();
+  expect(firebase.getStorage).not.toHaveBeenCalled();
+  expect(firebase.connectAuthEmulator).not.toHaveBeenCalled();
+  expect(firebase.connectFirestoreEmulator).not.toHaveBeenCalled();
+  expect(firebase.connectStorageEmulator).not.toHaveBeenCalled();
+}
+
 beforeEach(() => {
   firebase.apps.length = 0;
   vi.clearAllMocks();
@@ -70,11 +88,8 @@ describe('resolveFirebaseOptions', () => {
 
   it('maps a complete production web configuration', () => {
     expect(resolveFirebaseOptions({
-      VITE_FIREBASE_API_KEY: 'public-api-key',
-      VITE_FIREBASE_AUTH_DOMAIN: 'sound-passport.firebaseapp.com',
-      VITE_FIREBASE_PROJECT_ID: 'sound-passport',
-      VITE_FIREBASE_STORAGE_BUCKET: 'sound-passport.firebasestorage.app',
-      VITE_FIREBASE_APP_ID: 'web-app-id',
+      ...productionConfig,
+      VITE_USE_FIREBASE_EMULATORS: 'false',
     })).toEqual({
       apiKey: 'public-api-key',
       authDomain: 'sound-passport.firebaseapp.com',
@@ -82,6 +97,20 @@ describe('resolveFirebaseOptions', () => {
       storageBucket: 'sound-passport.firebasestorage.app',
       appId: 'web-app-id',
     });
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['empty', ''],
+  ])('fails closed before Firebase initialization when the emulator flag is %s', (_label, flag) => {
+    const env = {
+      ...productionConfig,
+      ...(flag === undefined ? {} : { VITE_USE_FIREBASE_EMULATORS: flag }),
+    };
+
+    expect(resolveFirebaseOptions(env)).toBeUndefined();
+    expect(createFirebaseRuntime(env)).toBeUndefined();
+    expectFirebaseApisUntouched();
   });
 
   it('fails closed before Firebase initialization when the emulator flag is malformed', () => {
@@ -96,17 +125,11 @@ describe('resolveFirebaseOptions', () => {
 
     expect(resolveFirebaseOptions(env)).toBeUndefined();
     expect(createFirebaseRuntime(env)).toBeUndefined();
-    expect(firebase.initializeApp).not.toHaveBeenCalled();
-    expect(firebase.getAuth).not.toHaveBeenCalled();
-    expect(firebase.getFirestore).not.toHaveBeenCalled();
-    expect(firebase.getStorage).not.toHaveBeenCalled();
-    expect(firebase.connectAuthEmulator).not.toHaveBeenCalled();
-    expect(firebase.connectFirestoreEmulator).not.toHaveBeenCalled();
-    expect(firebase.connectStorageEmulator).not.toHaveBeenCalled();
+    expectFirebaseApisUntouched();
   });
 
   it('connects each emulator only once across runtime calls', () => {
-    const env = { VITE_USE_FIREBASE_EMULATORS: 'true' };
+    const env = { ...productionConfig, VITE_USE_FIREBASE_EMULATORS: 'true' };
 
     expect(createFirebaseRuntime(env)).toEqual({
       auth: firebase.auth,
