@@ -34,7 +34,11 @@ function createAuthPort(user: AuthUser) {
     signInWithGoogle: vi.fn(async () => undefined),
     signOut: vi.fn(async () => { listener?.(null); }),
   };
-  return { port, signOut: port.signOut as ReturnType<typeof vi.fn> };
+  return {
+    port,
+    signOut: port.signOut as ReturnType<typeof vi.fn>,
+    emit: (nextUser: AuthUser | null) => listener?.(nextUser),
+  };
 }
 
 function DirtyGuard({ flush }: { flush: () => Promise<void> }) {
@@ -120,5 +124,21 @@ describe('AppShell guarded sign-out', () => {
 
     expect(await screen.findByText('目前的變更無法儲存，因此尚未登出。請稍後再試一次。')).toBeVisible();
     expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it('clears a dirty-flush error after the next successful auth observer event', async () => {
+    const { emit } = renderSignedInShell(vi.fn(() => Promise.reject(new Error('write failed'))));
+    await openAccountMenu();
+    await userEvent.click(screen.getByRole('button', { name: '登出' }));
+    expect(await screen.findByText('目前的變更無法儲存，因此尚未登出。請稍後再試一次。')).toBeVisible();
+
+    act(() => emit({
+      uid: 'user-a',
+      displayName: '使用者 A',
+      email: 'a@example.com',
+      photoURL: null,
+    }));
+
+    expect(screen.queryByText('目前的變更無法儲存，因此尚未登出。請稍後再試一次。')).not.toBeInTheDocument();
   });
 });

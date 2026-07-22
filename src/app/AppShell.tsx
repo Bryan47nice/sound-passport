@@ -17,6 +17,10 @@ export function AppShell({ children }: PropsWithChildren) {
     return () => { mountedRef.current = false; };
   }, []);
 
+  useEffect(() => {
+    setGuardError('');
+  }, [state]);
+
   const handleSignOut = async () => {
     if (signOutPendingRef.current) return;
     signOutPendingRef.current = true;
