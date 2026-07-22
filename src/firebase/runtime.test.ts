@@ -84,6 +84,27 @@ describe('resolveFirebaseOptions', () => {
     });
   });
 
+  it('fails closed before Firebase initialization when the emulator flag is malformed', () => {
+    const env = {
+      VITE_FIREBASE_API_KEY: 'public-api-key',
+      VITE_FIREBASE_AUTH_DOMAIN: 'sound-passport.firebaseapp.com',
+      VITE_FIREBASE_PROJECT_ID: 'sound-passport',
+      VITE_FIREBASE_STORAGE_BUCKET: 'sound-passport.firebasestorage.app',
+      VITE_FIREBASE_APP_ID: 'web-app-id',
+      VITE_USE_FIREBASE_EMULATORS: 'tru',
+    };
+
+    expect(resolveFirebaseOptions(env)).toBeUndefined();
+    expect(createFirebaseRuntime(env)).toBeUndefined();
+    expect(firebase.initializeApp).not.toHaveBeenCalled();
+    expect(firebase.getAuth).not.toHaveBeenCalled();
+    expect(firebase.getFirestore).not.toHaveBeenCalled();
+    expect(firebase.getStorage).not.toHaveBeenCalled();
+    expect(firebase.connectAuthEmulator).not.toHaveBeenCalled();
+    expect(firebase.connectFirestoreEmulator).not.toHaveBeenCalled();
+    expect(firebase.connectStorageEmulator).not.toHaveBeenCalled();
+  });
+
   it('connects each emulator only once across runtime calls', () => {
     const env = { VITE_USE_FIREBASE_EMULATORS: 'true' };
 

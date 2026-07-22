@@ -25,7 +25,15 @@ const emulatorState = globalThis as typeof globalThis & {
 };
 
 export function resolveFirebaseOptions(env: FirebaseEnv): FirebaseOptions | undefined {
-  if (env.VITE_USE_FIREBASE_EMULATORS === 'true') {
+  const emulatorFlag = env.VITE_USE_FIREBASE_EMULATORS;
+  if (emulatorFlag !== undefined
+    && emulatorFlag !== ''
+    && emulatorFlag !== 'true'
+    && emulatorFlag !== 'false') {
+    return undefined;
+  }
+
+  if (emulatorFlag === 'true') {
     return {
       apiKey: 'demo-api-key',
       authDomain: 'demo-sound-passport.firebaseapp.com',
