@@ -1,7 +1,11 @@
 import { CircleAlert, Globe2, LogIn, LogOut, X } from 'lucide-react';
 import { type PropsWithChildren, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { GuardedLink, useGuardedAsyncCommand } from './navigationGuard';
+import {
+  GuardedCommandInterruptedError,
+  GuardedLink,
+  useGuardedAsyncCommand,
+} from './navigationGuard';
 
 export function AppShell({ children }: PropsWithChildren) {
   const { state, busy, commandError, clearCommandError, signInWithGoogle, signOut } = useAuth();
@@ -30,9 +34,11 @@ export function AppShell({ children }: PropsWithChildren) {
     clearCommandError();
     try {
       await runGuardedCommand(signOut);
-    } catch {
+    } catch (error) {
       if (mountedRef.current) {
-        setGuardError('目前的變更無法儲存，因此尚未登出。請稍後再試一次。');
+        setGuardError(error instanceof GuardedCommandInterruptedError
+          ? '登出已取消。'
+          : '目前的變更無法儲存，因此尚未登出。請稍後再試一次。');
       }
     } finally {
       signOutPendingRef.current = false;

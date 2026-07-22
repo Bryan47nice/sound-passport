@@ -141,4 +141,18 @@ describe('AppShell guarded sign-out', () => {
 
     expect(screen.queryByText('目前的變更無法儲存，因此尚未登出。請稍後再試一次。')).not.toBeInTheDocument();
   });
+
+  it('shows a neutral cancellation when navigation interrupts sign-out flush', async () => {
+    const pending = deferred();
+    const { signOut } = renderSignedInShell(vi.fn(() => pending.promise));
+    await openAccountMenu();
+
+    await userEvent.click(screen.getByRole('button', { name: '登出' }));
+    await userEvent.click(screen.getByRole('link', { name: '世界地圖' }));
+    await act(async () => { pending.resolve(); await pending.promise; });
+
+    expect(signOut).not.toHaveBeenCalled();
+    expect(await screen.findByText('登出已取消。')).toBeVisible();
+    expect(screen.queryByText('目前的變更無法儲存，因此尚未登出。請稍後再試一次。')).not.toBeInTheDocument();
+  });
 });
