@@ -38,7 +38,7 @@ npm.cmd run test:e2e
 - `/studio` 提供建立、編輯、排序、預覽、完成、匯出、匯入與清除私人旅程的桌機流程。
 - 文字欄位停止輸入 500ms 後自動儲存；日期、選單、照片與排序立即保存。
 - 手機尺寸的 Studio 只顯示改用電腦的指引；Atlas、國家頁、旅程頁與播放器仍可完整回放。
-- 此版本沒有登入、Firebase、應用程式後端、跨裝置同步、公開分享、YouTube 搜尋或播放清單匯出。
+- 此版本已有 Google/Firebase Authentication，但尚未提供旅程 metadata 或照片的應用程式後端與雲端同步；資料仍依 `uid` 儲存在本機 IndexedDB，待後續 Goal 進行 migration/sync。也不提供公開分享、YouTube 搜尋或播放清單匯出。
 
 ## 圖片處理
 
