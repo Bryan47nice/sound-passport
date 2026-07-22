@@ -44,13 +44,20 @@ describe('AuthProvider', () => {
     expect(result.current.state).toMatchObject({ kind: 'signed-in', user: { uid: 'user-a' } });
   });
 
-  it('falls back to signed-out when the auth observer reports an error', () => {
+  it('preserves the current state and exposes an observer error until the next successful event', () => {
     const driver = createControllableAuthPort();
     const { result } = renderHook(useAuth, { wrapper: provider(driver.port) });
+    const user = { uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null };
 
+    act(() => driver.emit(user));
     act(() => driver.emitError(new Error('observer failed')));
 
+    expect(result.current.state).toEqual({ kind: 'signed-in', user });
+    expect(result.current.commandError).toBe('無法確認登入狀態。請檢查網路連線後再試一次。');
+
+    act(() => driver.emit(null));
     expect(result.current.state).toEqual({ kind: 'signed-out' });
+    expect(result.current.commandError).toBe('');
   });
 
   it('runs Google sign-in and exposes a localized popup-blocked error', async () => {
@@ -72,6 +79,20 @@ describe('AuthProvider', () => {
     await act(async () => { await result.current.signInWithGoogle(); });
 
     expect(result.current.commandError).toBe('你已關閉登入視窗，請再試一次。');
+  });
+
+  it('exposes a sign-out-specific error without changing the signed-in state', async () => {
+    const driver = createControllableAuthPort();
+    driver.signOut.mockRejectedValueOnce(new Error('network unavailable'));
+    const { result } = renderHook(useAuth, { wrapper: provider(driver.port) });
+    const user = { uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null };
+    act(() => driver.emit(user));
+
+    await act(async () => { await result.current.signOut(); });
+
+    expect(driver.signOut).toHaveBeenCalledTimes(1);
+    expect(result.current.state).toEqual({ kind: 'signed-in', user });
+    expect(result.current.commandError).toBe('登出失敗，私人資料仍保持登入狀態。請再試一次。');
   });
 
   it('prevents duplicate commands while an auth command is in flight', async () => {

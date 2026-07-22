@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GuardedLink,
   NavigationGuardProvider,
+  useGuardedAsyncCommand,
   useGuardedNavigate,
   useGuardedRouteLocation,
 } from '../../app/navigationGuard';
@@ -52,6 +53,29 @@ function GuardHarness({
       <Routes location={routeLocation}>
         <Route path="/previous" element={<h1>上一頁</h1>} />
         <Route path="/middle" element={<h1>中間頁</h1>} />
+        <Route path="/current" element={<h1>編輯頁</h1>} />
+        <Route path="/next" element={<h1>下一頁</h1>} />
+      </Routes>
+    </>
+  );
+}
+
+function CommandHarness({
+  flush,
+  command,
+}: {
+  flush: () => Promise<void>;
+  command: () => Promise<void>;
+}) {
+  useDirtyNavigationGuard({ dirty: true, flush });
+  const runGuardedCommand = useGuardedAsyncCommand();
+  const routeLocation = useGuardedRouteLocation();
+
+  return (
+    <>
+      <button type="button" onClick={() => { void runGuardedCommand(command).catch(() => undefined); }}>執行受保護命令</button>
+      <GuardedLink to="/next">連結前往下一頁</GuardedLink>
+      <Routes location={routeLocation}>
         <Route path="/current" element={<h1>編輯頁</h1>} />
         <Route path="/next" element={<h1>下一頁</h1>} />
       </Routes>
@@ -125,6 +149,67 @@ describe('useDirtyNavigationGuard', () => {
     await act(async () => { pending.resolve(undefined); await pending.promise; });
     expect(screen.getByLabelText('瀏覽器路徑')).toHaveTextContent('/next');
     expect(screen.getByRole('heading', { name: '下一頁' })).toBeInTheDocument();
+  });
+
+  it('does not run an async command while a navigation transition already owns the flush', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    const command = vi.fn(async () => undefined);
+    render(
+      <MemoryRouter initialEntries={['/previous', '/current']} initialIndex={1}>
+        <NavigationGuardProvider>
+          <CommandHarness flush={flush} command={command} />
+        </NavigationGuardProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('link', { name: '連結前往下一頁' }));
+    fireEvent.click(screen.getByRole('button', { name: '執行受保護命令' }));
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(command).not.toHaveBeenCalled();
+
+    await act(async () => { pending.resolve(undefined); await pending.promise; });
+    expect(command).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: '下一頁' })).toBeInTheDocument();
+  });
+
+  it('cancels an async command when navigation starts during its dirty flush', async () => {
+    const pending = deferred();
+    const flush = vi.fn(() => pending.promise);
+    const command = vi.fn(async () => undefined);
+    render(
+      <MemoryRouter initialEntries={['/previous', '/current']} initialIndex={1}>
+        <NavigationGuardProvider>
+          <CommandHarness flush={flush} command={command} />
+        </NavigationGuardProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '執行受保護命令' }));
+    fireEvent.click(screen.getByRole('link', { name: '連結前往下一頁' }));
+    expect(command).not.toHaveBeenCalled();
+
+    await act(async () => { pending.resolve(undefined); await pending.promise; });
+    expect(command).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: '下一頁' })).toBeInTheDocument();
+  });
+
+  it('does not run an async command after the provider unmounts during flush', async () => {
+    const pending = deferred();
+    const command = vi.fn(async () => undefined);
+    const view = render(
+      <MemoryRouter initialEntries={['/current']}>
+        <NavigationGuardProvider>
+          <CommandHarness flush={() => pending.promise} command={command} />
+        </NavigationGuardProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '執行受保護命令' }));
+    view.unmount();
+    await act(async () => { pending.resolve(undefined); await pending.promise; });
+
+    expect(command).not.toHaveBeenCalled();
   });
 
   it('guards app programmatic PUSH navigation on success and failure', async () => {

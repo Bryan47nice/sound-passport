@@ -1,10 +1,44 @@
-import { Globe2, LogIn, LogOut } from 'lucide-react';
-import type { PropsWithChildren } from 'react';
+import { CircleAlert, Globe2, LogIn, LogOut, X } from 'lucide-react';
+import { type PropsWithChildren, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { GuardedLink } from './navigationGuard';
+import { GuardedLink, useGuardedAsyncCommand } from './navigationGuard';
 
 export function AppShell({ children }: PropsWithChildren) {
-  const { state, busy, signInWithGoogle, signOut } = useAuth();
+  const { state, busy, commandError, clearCommandError, signInWithGoogle, signOut } = useAuth();
+  const runGuardedCommand = useGuardedAsyncCommand();
+  const [guardError, setGuardError] = useState('');
+  const [signOutPending, setSignOutPending] = useState(false);
+  const signOutPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const visibleError = guardError || commandError;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const handleSignOut = async () => {
+    if (signOutPendingRef.current) return;
+    signOutPendingRef.current = true;
+    setSignOutPending(true);
+    setGuardError('');
+    clearCommandError();
+    try {
+      await runGuardedCommand(signOut);
+    } catch {
+      if (mountedRef.current) {
+        setGuardError('目前的變更無法儲存，因此尚未登出。請稍後再試一次。');
+      }
+    } finally {
+      signOutPendingRef.current = false;
+      if (mountedRef.current) setSignOutPending(false);
+    }
+  };
+
+  const dismissError = () => {
+    setGuardError('');
+    clearCommandError();
+  };
 
   return (
     <div className="app-shell">
@@ -35,7 +69,7 @@ export function AppShell({ children }: PropsWithChildren) {
             <div className="account-menu-popover">
               <strong>{state.user.displayName ?? state.user.email ?? '使用者'}</strong>
               <GuardedLink to="/demo">探索示範</GuardedLink>
-              <button type="button" disabled={busy} onClick={() => void signOut()}>
+              <button type="button" disabled={busy || signOutPending} onClick={() => void handleSignOut()}>
                 <LogOut size={16} aria-hidden="true" />
                 登出
               </button>
@@ -43,6 +77,15 @@ export function AppShell({ children }: PropsWithChildren) {
           </details>
         )}
       </header>
+      {visibleError && (
+        <div className="auth-error-band" aria-live="assertive" aria-atomic="true">
+          <CircleAlert size={17} aria-hidden="true" />
+          <span>{visibleError}</span>
+          <button type="button" aria-label="關閉登入錯誤" onClick={dismissError}>
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
+      )}
       <main>{children}</main>
     </div>
   );

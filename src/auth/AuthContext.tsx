@@ -26,11 +26,14 @@ interface AuthContextValue {
 
 const Context = createContext<AuthContextValue | null>(null);
 
-function authMessage(error: unknown) {
+type AuthCommand = 'sign-in' | 'sign-out';
+
+function authMessage(error: unknown, command: AuthCommand) {
   const code = typeof error === 'object' && error !== null && 'code' in error
     ? String(error.code)
     : error instanceof Error ? error.message : '';
 
+  if (command === 'sign-out') return '登出失敗，私人資料仍保持登入狀態。請再試一次。';
   if (code === 'auth/popup-blocked') return '瀏覽器封鎖了登入視窗。請允許彈出式視窗後再試一次。';
   if (code === 'auth/popup-closed-by-user') return '你已關閉登入視窗，請再試一次。';
   if (code === 'FIREBASE_NOT_CONFIGURED') return 'Google 登入目前尚未設定。';
@@ -44,11 +47,14 @@ export function AuthProvider({ port, children }: PropsWithChildren<{ port: AuthP
   const commandPending = useRef(false);
 
   useEffect(() => port.observe(
-    (user) => setState(user ? { kind: 'signed-in', user } : { kind: 'signed-out' }),
-    () => setState({ kind: 'signed-out' }),
+    (user) => {
+      setState(user ? { kind: 'signed-in', user } : { kind: 'signed-out' });
+      setCommandError('');
+    },
+    () => setCommandError('無法確認登入狀態。請檢查網路連線後再試一次。'),
   ), [port]);
 
-  const run = useCallback(async (command: () => Promise<void>) => {
+  const run = useCallback(async (kind: AuthCommand, command: () => Promise<void>) => {
     if (commandPending.current) return;
 
     commandPending.current = true;
@@ -57,21 +63,23 @@ export function AuthProvider({ port, children }: PropsWithChildren<{ port: AuthP
     try {
       await command();
     } catch (error) {
-      setCommandError(authMessage(error));
+      setCommandError(authMessage(error, kind));
     } finally {
       commandPending.current = false;
       setBusy(false);
     }
   }, []);
 
+  const clearCommandError = useCallback(() => setCommandError(''), []);
+
   const value = useMemo<AuthContextValue>(() => ({
     state,
     busy,
     commandError,
-    clearCommandError: () => setCommandError(''),
-    signInWithGoogle: () => run(() => port.signInWithGoogle()),
-    signOut: () => run(() => port.signOut()),
-  }), [busy, commandError, port, run, state]);
+    clearCommandError,
+    signInWithGoogle: () => run('sign-in', () => port.signInWithGoogle()),
+    signOut: () => run('sign-out', () => port.signOut()),
+  }), [busy, clearCommandError, commandError, port, run, state]);
 
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

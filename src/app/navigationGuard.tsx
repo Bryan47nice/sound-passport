@@ -36,6 +36,7 @@ interface OwnedNavigationGuard {
 interface NavigationGuardContextValue {
   routeLocation: Location;
   requestNavigation: (request: AppNavigationRequest) => void;
+  runGuardedCommand: (command: () => Promise<void>) => Promise<void>;
   updateGuard: (owner: symbol, registration: NavigationGuardRegistration | undefined) => void;
   captureCommand: () => ProviderCommandToken;
   isCommandCurrent: (token: ProviderCommandToken) => boolean;
@@ -87,6 +88,13 @@ interface NavigationSuppression {
 }
 
 const NavigationGuardContext = createContext<NavigationGuardContextValue | null>(null);
+
+export class GuardedCommandInterruptedError extends Error {
+  constructor() {
+    super('Guarded command was interrupted by navigation or unmount.');
+    this.name = 'GuardedCommandInterruptedError';
+  }
+}
 
 function routePath(location: Location) {
   return `${location.pathname}${location.search}${location.hash}`;
@@ -141,6 +149,7 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
   const applySuccessfulTransitionRef = useRef<(transition: ActiveTransition) => void>(() => {});
   const startTransitionRef = useRef<(desired: DesiredTransition) => void>(() => {});
   const navigationGenerationRef = useRef(0);
+  const guardedCommandRef = useRef<Promise<void> | undefined>(undefined);
 
   actualEntryRef.current = historyEntry(location);
 
@@ -327,6 +336,33 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
     startTransitionRef.current(request);
   }, []);
 
+  const runGuardedCommand = useCallback((command: () => Promise<void>) => {
+    if (guardedCommandRef.current) return guardedCommandRef.current;
+    if (transitionRef.current) return Promise.reject(new GuardedCommandInterruptedError());
+
+    const generation = navigationGenerationRef.current;
+    const routeKey = committedEntryRef.current.location.key;
+    const pending = (async () => {
+      const guard = guardRef.current?.registration;
+      if (guard?.dirty) await guard.flush();
+      if (
+        !mountedRef.current
+        || transitionRef.current
+        || generation !== navigationGenerationRef.current
+        || routeKey !== committedEntryRef.current.location.key
+      ) {
+        throw new GuardedCommandInterruptedError();
+      }
+      await command();
+    })();
+    guardedCommandRef.current = pending;
+    void pending.then(
+      () => { if (guardedCommandRef.current === pending) guardedCommandRef.current = undefined; },
+      () => { if (guardedCommandRef.current === pending) guardedCommandRef.current = undefined; },
+    );
+    return pending;
+  }, []);
+
   useLayoutEffect(() => {
     const actual = historyEntry(location);
     actualEntryRef.current = actual;
@@ -371,6 +407,7 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
       mountedRef.current = false;
       transitionRef.current = undefined;
       suppressionRef.current = undefined;
+      guardedCommandRef.current = undefined;
     };
   }, []);
 
@@ -398,10 +435,11 @@ export function NavigationGuardProvider({ children }: PropsWithChildren) {
   const value = useMemo<NavigationGuardContextValue>(() => ({
     routeLocation,
     requestNavigation,
+    runGuardedCommand,
     updateGuard,
     captureCommand,
     isCommandCurrent,
-  }), [captureCommand, isCommandCurrent, requestNavigation, routeLocation, updateGuard]);
+  }), [captureCommand, isCommandCurrent, requestNavigation, routeLocation, runGuardedCommand, updateGuard]);
 
   return <NavigationGuardContext.Provider value={value}>{children}</NavigationGuardContext.Provider>;
 }
@@ -463,6 +501,13 @@ export function useGuardedNavigate(): NavigateFunction {
       commit: () => rawNavigate(to, options),
     });
   }) as NavigateFunction, [rawNavigate, requestNavigation]);
+}
+
+export function useGuardedAsyncCommand() {
+  const runGuardedCommand = useContext(NavigationGuardContext)?.runGuardedCommand;
+  return useCallback((command: () => Promise<void>) => (
+    runGuardedCommand ? runGuardedCommand(command) : command()
+  ), [runGuardedCommand]);
 }
 
 export function GuardedLink({

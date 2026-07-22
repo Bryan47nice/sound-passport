@@ -5,6 +5,10 @@ a { color: inherit; text-decoration: none; }
 button { font: inherit; }
 .app-shell { min-height: 100vh; }
 .app-header { min-height: 56px; display: flex; align-items: center; gap: 20px; padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.auth-error-band { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 42px; align-items: center; gap: 9px; padding: 8px 20px; border-bottom: 1px solid #e7b8ad; background: #fff4f1; color: var(--coral); font-size: 13px; font-weight: 700; }
+.auth-error-band span { min-width: 0; overflow-wrap: anywhere; }
+.auth-error-band button { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+.auth-error-band button:hover, .auth-error-band button:focus-visible { background: var(--surface); }
 .brand { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 9px; font-weight: 800; }
 .brand-passport-mark { display: inline-grid; width: 24px; height: 30px; place-items: center; border: 1px solid #0e2c25; border-radius: 3px; background: var(--forest); color: var(--yellow); box-shadow: inset 3px 0 0 rgb(255 255 255 / 11%); }
 .brand-name { white-space: nowrap; }

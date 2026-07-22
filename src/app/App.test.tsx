@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -19,16 +19,24 @@ vi.mock('../features/atlas/WorldMap', () => ({
 type TestAuthPort = AuthPort & {
   signInWithGoogle: ReturnType<typeof vi.fn>;
   signOut: ReturnType<typeof vi.fn>;
+  emit(user: AuthUser | null): void;
+  emitError(error: Error): void;
 };
 
 function createAuthPort(user: AuthUser | null): TestAuthPort {
+  let listener: ((nextUser: AuthUser | null) => void) | undefined;
+  let errorListener: ((error: Error) => void) | undefined;
   return {
-    observe: vi.fn((listener) => {
-      listener(user);
+    observe: vi.fn((next, onError) => {
+      listener = next;
+      errorListener = onError;
+      next(user);
       return vi.fn();
     }),
     signInWithGoogle: vi.fn(async () => undefined),
     signOut: vi.fn(async () => undefined),
+    emit: (nextUser) => listener?.(nextUser),
+    emitError: (error) => errorListener?.(error),
   };
 }
 
@@ -69,6 +77,28 @@ describe('App', () => {
     expect(screen.getByRole('main')).toBeInTheDocument();
     expect(await screen.findByLabelText('world-map')).toBeInTheDocument();
     expect(screen.getByText('日本:2')).toBeInTheDocument();
+  });
+
+  it('shows a home-page sign-in failure in the global auth error region', async () => {
+    const user = userEvent.setup();
+    const authPort = createAuthPort(null);
+    authPort.signInWithGoogle.mockRejectedValueOnce({ code: 'auth/popup-blocked' });
+    renderApp({ authPort });
+
+    await user.click(screen.getByRole('button', { name: '使用 Google 登入' }));
+
+    expect(await screen.findByText('瀏覽器封鎖了登入視窗。請允許彈出式視窗後再試一次。')).toBeVisible();
+  });
+
+  it('shows an observer error globally and clears it after a successful observer event', async () => {
+    const authPort = createAuthPort(null);
+    renderApp({ authPort });
+
+    act(() => authPort.emitError(new Error('observer failed')));
+    expect(await screen.findByText('無法確認登入狀態。請檢查網路連線後再試一次。')).toBeVisible();
+
+    act(() => authPort.emit(null));
+    expect(screen.queryByText('無法確認登入狀態。請檢查網路連線後再試一次。')).not.toBeInTheDocument();
   });
 
   it.each([
@@ -194,6 +224,19 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: '登出' }));
 
     expect(authPort.signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a sign-out failure globally while the account remains signed in', async () => {
+    const user = userEvent.setup();
+    const authPort = createAuthPort({ uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null });
+    authPort.signOut.mockRejectedValueOnce(new Error('network unavailable'));
+    renderApp({ authPort });
+
+    await user.click(screen.getByLabelText('帳戶選單'));
+    await user.click(screen.getByRole('button', { name: '登出' }));
+
+    expect(await screen.findByText('登出失敗，私人資料仍保持登入狀態。請再試一次。')).toBeVisible();
+    expect(screen.getByLabelText('帳戶選單')).toBeInTheDocument();
   });
 
   it('renders the existing not-found route', () => {

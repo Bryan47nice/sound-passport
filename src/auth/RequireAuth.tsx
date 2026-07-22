@@ -3,7 +3,7 @@ import { Outlet } from 'react-router';
 import { useAuth } from './AuthContext';
 
 export function RequireAuth() {
-  const { state, busy, commandError, signInWithGoogle } = useAuth();
+  const { state, busy, signInWithGoogle } = useAuth();
 
   if (state.kind === 'loading') {
     return <section className="page" aria-label="正在確認登入狀態" />;
@@ -19,7 +19,6 @@ export function RequireAuth() {
         <LogIn size={17} aria-hidden="true" />
         {busy ? '登入中...' : '使用 Google 登入'}
       </button>
-      {commandError && <p className="field-error" role="alert">{commandError}</p>}
     </section>
   );
 }
