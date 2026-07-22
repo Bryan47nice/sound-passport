@@ -83,7 +83,14 @@ describe('resolveFirebaseOptions', () => {
   });
 
   it('returns undefined rather than partially configuring production', () => {
-    expect(resolveFirebaseOptions({ VITE_FIREBASE_PROJECT_ID: 'sound-passport' })).toBeUndefined();
+    const env = {
+      VITE_FIREBASE_PROJECT_ID: 'sound-passport',
+      VITE_USE_FIREBASE_EMULATORS: 'false',
+    };
+
+    expect(resolveFirebaseOptions(env)).toBeUndefined();
+    expect(createFirebaseRuntime(env)).toBeUndefined();
+    expectFirebaseApisUntouched();
   });
 
   it('maps a complete production web configuration', () => {
