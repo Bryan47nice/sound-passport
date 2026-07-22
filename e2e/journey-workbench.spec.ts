@@ -1,6 +1,7 @@
 import { expect, test, type Download, type Locator, type Page } from '@playwright/test';
 import { unzipSync, zipSync, type Zippable } from 'fflate';
-import { DB_VERSION } from '../src/data/indexedDb';
+import { DB_VERSION, userDatabaseName } from '../src/data/indexedDb';
+import { defaultE2eUser, setE2eUser } from './helpers/auth';
 import { verifyRouteLayout } from './helpers/layoutAssertions';
 import { makePng } from './helpers/testImages';
 
@@ -53,6 +54,7 @@ const momentFixtures = [
 
 type MomentFixture = (typeof momentFixtures)[number];
 const mobileJourneyId = 'synthetic-mobile-taiwan-journey';
+const e2eDatabaseName = userDatabaseName(defaultE2eUser.uid);
 
 function collectPageErrors(page: Page) {
   const errors: string[] = [];
@@ -88,10 +90,16 @@ async function expectLoadedImages(images: Locator, count: number) {
   ))).toBe(true);
 }
 
+async function signInForPrivateRepository(page: Page) {
+  await page.goto('/');
+  await setE2eUser(page, defaultE2eUser);
+  await expect(page.locator('.account-menu')).toBeVisible();
+}
+
 async function readPersistedJourney(page: Page, journeyId: string) {
-  return page.evaluate(async (id) => {
+  return page.evaluate(async ({ databaseName, id }) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('sound-passport');
+      const request = indexedDB.open(databaseName);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -125,16 +133,16 @@ async function readPersistedJourney(page: Page, journeyId: string) {
     } finally {
       database.close();
     }
-  }, journeyId);
+  }, { databaseName: e2eDatabaseName, id: journeyId });
 }
 
 async function readCanonicalPrivateSnapshot(page: Page) {
-  return page.evaluate(async () => {
+  return page.evaluate(async (databaseName) => {
     type StoredRecord = { id: string } & Record<string, unknown>;
     type StoredPhoto = StoredRecord & { blob: Blob };
     const storeNames = ['journeys', 'moments', 'songs', 'photos'] as const;
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('sound-passport');
+      const request = indexedDB.open(databaseName);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -188,7 +196,7 @@ async function readCanonicalPrivateSnapshot(page: Page) {
     } finally {
       database.close();
     }
-  });
+  }, e2eDatabaseName);
 }
 
 async function downloadBuffer(download: Download) {
@@ -271,7 +279,7 @@ async function seedCompletedMobileJourney(page: Page, portrait: Buffer, landscap
   const createdAt = '2026-04-06T08:00:00.000Z';
   await page.evaluate(async (payload) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('sound-passport');
+      const request = indexedDB.open(payload.databaseName);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -302,6 +310,7 @@ async function seedCompletedMobileJourney(page: Page, portrait: Buffer, landscap
       database.close();
     }
   }, {
+    databaseName: e2eDatabaseName,
     journey: {
       cityLabels: [...journeyFixture.cities],
       countryCode: journeyFixture.countryCode,
@@ -445,6 +454,7 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
   );
 
   diagnostics.setStage('studio dashboard');
+  await signInForPrivateRepository(page);
   await page.goto('/studio');
   await expect(page.getByRole('heading', { level: 1, name: '整理旅程' })).toBeVisible();
   await verifyRouteLayout(page);
@@ -616,9 +626,7 @@ test('completes, backs up, clears, restores, and protects a private desktop jour
     songs: [],
   });
   await page.getByRole('link', { name: '世界地圖' }).click();
-  await expect(page.getByLabel('旅行世界地圖')).toHaveAttribute('data-map-ready', 'true', { timeout: 45_000 });
-  await expect(page.getByRole('button', { name: '台灣，1 趟旅程' })).toHaveCount(0);
-  await expect(page.getByText(journeyFixture.title)).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '還沒有私人旅程' })).toBeVisible();
   await verifyRouteLayout(page);
 
   diagnostics.setStage('real backup import and complete restore');
@@ -714,10 +722,11 @@ test('plays a preloaded private journey without mobile editing, overflow, overla
   const landscape = makePng(1600, 900, [32, 104, 92]);
 
   diagnostics.setStage('initialize private IndexedDB');
+  await signInForPrivateRepository(page);
   await page.goto('/studio');
-  await expect.poll(() => page.evaluate(async (expectedVersion) => (
-    (await indexedDB.databases()).some((database) => database.name === 'sound-passport' && database.version === expectedVersion)
-  ), DB_VERSION)).toBe(true);
+  await expect.poll(() => page.evaluate(async ({ databaseName, expectedVersion }) => (
+    (await indexedDB.databases()).some((database) => database.name === databaseName && database.version === expectedVersion)
+  ), { databaseName: e2eDatabaseName, expectedVersion: DB_VERSION })).toBe(true);
   await seedCompletedMobileJourney(page, portrait, landscape);
 
   diagnostics.setStage('mobile Studio guidance routes');

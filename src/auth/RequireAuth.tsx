@@ -13,7 +13,7 @@ export function RequireAuth() {
 
   return (
     <section className="page auth-required">
-      <h1 className="page-title">請先登入以使用創作工坊</h1>
+      <h1 className="page-title">登入以整理私人旅程</h1>
       <p className="muted">登入後即可建立、編輯及預覽你的旅程。</p>
       <button className="primary-command" type="button" disabled={busy} onClick={() => void signInWithGoogle()}>
         <LogIn size={17} aria-hidden="true" />

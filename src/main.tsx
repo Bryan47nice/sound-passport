@@ -10,17 +10,26 @@ import './styles/tokens.css';
 import './styles/global.css';
 
 const root = ReactDOM.createRoot(document.getElementById('root')!);
-const runtime = createFirebaseRuntime();
-const authPort = runtime
-  ? createFirebaseAuthPort(firebaseAuthDriver(runtime.auth))
-  : createUnavailableAuthPort();
 
-root.render(
-  <React.StrictMode>
-    <AuthProvider port={authPort}>
-      <RepositorySessionProvider>
-        <BrowserRouter><App /></BrowserRouter>
-      </RepositorySessionProvider>
-    </AuthProvider>
-  </React.StrictMode>,
-);
+async function resolveAuthPort() {
+  if (import.meta.env.MODE === 'e2e') {
+    const { createE2eAuthPort } = await import('./auth/e2eAuthPort');
+    return createE2eAuthPort();
+  }
+  const runtime = createFirebaseRuntime();
+  return runtime
+    ? createFirebaseAuthPort(firebaseAuthDriver(runtime.auth))
+    : createUnavailableAuthPort();
+}
+
+void resolveAuthPort().then((authPort) => {
+  root.render(
+    <React.StrictMode>
+      <AuthProvider port={authPort}>
+        <RepositorySessionProvider>
+          <BrowserRouter><App /></BrowserRouter>
+        </RepositorySessionProvider>
+      </AuthProvider>
+    </React.StrictMode>,
+  );
+});

@@ -133,6 +133,8 @@ export async function expectNoObviousOverlap(page: Page) {
     };
 
     const isVisible = (element: Element) => {
+      const closedDetails = element.closest('details:not([open])');
+      if (closedDetails && !closedDetails.querySelector(':scope > summary')?.contains(element)) return false;
       for (let current: Element | null = element; current; current = current.parentElement) {
         const style = getComputedStyle(current);
         if (

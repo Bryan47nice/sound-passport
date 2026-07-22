@@ -1,5 +1,6 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { deflateSync, inflateSync } from 'node:zlib';
+import { defaultE2eUser, setE2eUser } from './helpers/auth';
 import { verifyRouteLayout } from './helpers/layoutAssertions';
 import { makePng } from './helpers/testImages';
 
@@ -258,8 +259,12 @@ test('copies a fixture journey into an editable private draft', async ({ page },
     headers: { 'access-control-allow-origin': '*' },
   }));
 
+  await page.goto('/');
+  await setE2eUser(page, defaultE2eUser);
+  await expect(page.locator('.account-menu')).toBeVisible();
+
   diagnostics.setStage('fixture detail');
-  await page.goto('/journeys/seoul-2025');
+  await page.goto('/demo/journeys/seoul-2025');
   await expect(page.locator('.brand-passport-mark')).toBeVisible();
   await expect(page.getByText('示範旅程', { exact: true })).toBeVisible();
   await verifyRouteLayout(page);
