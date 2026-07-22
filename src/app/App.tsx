@@ -15,7 +15,14 @@ import { GuardedLink, NavigationGuardProvider, useGuardedRouteLocation } from '.
 
 function RootExperienceBoundary() {
   const { state } = useAuth();
-  return <JourneyExperienceBoundary kind={state.kind === 'signed-in' ? 'private' : 'demo'} routePrefix="" />;
+  switch (state.kind) {
+    case 'signed-in':
+      return <JourneyExperienceBoundary kind="private" routePrefix="" />;
+    case 'loading':
+    case 'signed-out':
+    case 'observer-failed':
+      return <JourneyExperienceBoundary kind="demo" routePrefix="" />;
+  }
 }
 
 function AppRoutes() {

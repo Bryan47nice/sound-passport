@@ -54,6 +54,10 @@ export function RepositorySessionProvider({
       setView({ kind: 'ready', identity: 'signed-out', fixtures, services: signedOutServices });
       return () => { cancelled = true; };
     }
+    if (state.kind === 'observer-failed') {
+      setView({ kind: 'ready', identity: 'observer-failed', fixtures, services: signedOutServices });
+      return () => { cancelled = true; };
+    }
 
     setView({ kind: 'loading' });
     const nextUid = state.user.uid;

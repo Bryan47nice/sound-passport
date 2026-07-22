@@ -10,7 +10,8 @@ export function AppShell({ children }: PropsWithChildren) {
   const [signOutPending, setSignOutPending] = useState(false);
   const signOutPendingRef = useRef(false);
   const mountedRef = useRef(true);
-  const visibleError = guardError || commandError;
+  const observerError = state.kind === 'observer-failed' ? state.message : '';
+  const visibleError = guardError || observerError || commandError;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -85,9 +86,11 @@ export function AppShell({ children }: PropsWithChildren) {
         <div className="auth-error-band" aria-live="assertive" aria-atomic="true">
           <CircleAlert size={17} aria-hidden="true" />
           <span>{visibleError}</span>
-          <button type="button" aria-label="關閉登入錯誤" onClick={dismissError}>
-            <X size={16} aria-hidden="true" />
-          </button>
+          {!observerError && (
+            <button type="button" aria-label="關閉登入錯誤" onClick={dismissError}>
+              <X size={16} aria-hidden="true" />
+            </button>
+          )}
         </div>
       )}
       <main>{children}</main>

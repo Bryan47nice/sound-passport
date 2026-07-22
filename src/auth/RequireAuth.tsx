@@ -9,6 +9,15 @@ export function RequireAuth() {
     return <section className="page" aria-label="正在確認登入狀態" />;
   }
 
+  if (state.kind === 'observer-failed') {
+    return (
+      <section className="page auth-required">
+        <h1 className="page-title">無法確認登入狀態</h1>
+        <p className="muted">私人旅程已暫時鎖定，等待登入狀態恢復後再試。</p>
+      </section>
+    );
+  }
+
   if (state.kind === 'signed-in') return <Outlet />;
 
   return (

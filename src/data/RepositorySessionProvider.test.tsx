@@ -27,12 +27,21 @@ function deferred<T>() {
 
 function createAuthPort() {
   let listener: ((user: AuthUser | null) => void) | undefined;
+  let errorListener: ((error: Error) => void) | undefined;
   const port: AuthPort = {
-    observe(next) { listener = next; return () => { listener = undefined; }; },
+    observe(next, error) {
+      listener = next;
+      errorListener = error;
+      return () => { listener = undefined; errorListener = undefined; };
+    },
     signInWithGoogle: async () => undefined,
     signOut: async () => undefined,
   };
-  return { port, emit: (user: AuthUser | null) => act(() => listener?.(user)) };
+  return {
+    port,
+    emit: (user: AuthUser | null) => act(() => listener?.(user)),
+    emitError: (error: Error) => act(() => errorListener?.(error)),
+  };
 }
 
 function signedIn(uid: string, overrides: Partial<AuthUser> = {}): AuthUser {
@@ -193,6 +202,32 @@ describe('RepositorySessionProvider', () => {
     await expectPublished('fixtures', 'no-editor:');
 
     expect(renders).not.toContain('signed-out:a');
+  });
+
+  it('withdraws and closes uid services on observer error, then reopens only after recovery', async () => {
+    const renders: EventLog = [];
+    const { port, emit, emitError } = createAuthPort();
+    const first = session('a-1');
+    const recovered = session('a-2');
+    const openSession = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(recovered);
+    renderProvider(port, openSession, { renders });
+
+    emit(signedIn('user-a'));
+    await expectPublished('a-1');
+    renders.length = 0;
+
+    emitError(new Error('observer failed'));
+    expect(screen.queryByText('a-1:editor:', { exact: true })).not.toBeInTheDocument();
+    await expectPublished('fixtures', 'no-editor:');
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(renders).not.toContain('observer-failed:a-1');
+
+    emit(signedIn('user-a'));
+    await expectPublished('a-2');
+    expect(openSession).toHaveBeenCalledTimes(2);
+    expect(recovered.close).not.toHaveBeenCalled();
   });
 
   it('closes a stale A completion without ever publishing A after B', async () => {

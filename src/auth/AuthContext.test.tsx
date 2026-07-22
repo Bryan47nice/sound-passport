@@ -44,7 +44,20 @@ describe('AuthProvider', () => {
     expect(result.current.state).toMatchObject({ kind: 'signed-in', user: { uid: 'user-a' } });
   });
 
-  it('preserves the current state and exposes an observer error until the next successful event', () => {
+  it('enters an explicit locked state when the initial observer event is an error', () => {
+    const driver = createControllableAuthPort();
+    const { result } = renderHook(useAuth, { wrapper: provider(driver.port) });
+
+    act(() => driver.emitError(new Error('observer failed')));
+
+    expect(result.current.state).toEqual({
+      kind: 'observer-failed',
+      message: '無法確認登入狀態。請檢查網路連線後再試一次。',
+    });
+    expect(result.current.commandError).toBe('無法確認登入狀態。請檢查網路連線後再試一次。');
+  });
+
+  it('locks a previously signed-in user when the observer reports an error', () => {
     const driver = createControllableAuthPort();
     const { result } = renderHook(useAuth, { wrapper: provider(driver.port) });
     const user = { uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null };
@@ -52,12 +65,26 @@ describe('AuthProvider', () => {
     act(() => driver.emit(user));
     act(() => driver.emitError(new Error('observer failed')));
 
-    expect(result.current.state).toEqual({ kind: 'signed-in', user });
-    expect(result.current.commandError).toBe('無法確認登入狀態。請檢查網路連線後再試一次。');
+    expect(result.current.state.kind).toBe('observer-failed');
+    expect(result.current.state.kind).not.toBe('signed-in');
+  });
 
+  it('recovers from the locked state only after the next successful observer event', () => {
+    const driver = createControllableAuthPort();
+    const { result } = renderHook(useAuth, { wrapper: provider(driver.port) });
+    const user = { uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null };
+
+    act(() => driver.emitError(new Error('observer failed')));
+    act(() => result.current.clearCommandError());
+    expect(result.current.state.kind).toBe('observer-failed');
+
+    act(() => driver.emit(user));
+    expect(result.current.state).toEqual({ kind: 'signed-in', user });
+    expect(result.current.commandError).toBe('');
+
+    act(() => driver.emitError(new Error('observer failed again')));
     act(() => driver.emit(null));
     expect(result.current.state).toEqual({ kind: 'signed-out' });
-    expect(result.current.commandError).toBe('');
   });
 
   it('runs Google sign-in and exposes a localized popup-blocked error', async () => {

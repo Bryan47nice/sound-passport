@@ -13,6 +13,7 @@ import type { AuthPort, AuthUser } from './ports';
 export type AuthState =
   | { kind: 'loading' }
   | { kind: 'signed-out' }
+  | { kind: 'observer-failed'; message: string }
   | { kind: 'signed-in'; user: AuthUser };
 
 interface AuthContextValue {
@@ -25,6 +26,7 @@ interface AuthContextValue {
 }
 
 const Context = createContext<AuthContextValue | null>(null);
+export const AUTH_OBSERVER_ERROR_MESSAGE = '無法確認登入狀態。請檢查網路連線後再試一次。';
 
 type AuthCommand = 'sign-in' | 'sign-out';
 
@@ -51,7 +53,10 @@ export function AuthProvider({ port, children }: PropsWithChildren<{ port: AuthP
       setState(user ? { kind: 'signed-in', user } : { kind: 'signed-out' });
       setCommandError('');
     },
-    () => setCommandError('無法確認登入狀態。請檢查網路連線後再試一次。'),
+    () => {
+      setState({ kind: 'observer-failed', message: AUTH_OBSERVER_ERROR_MESSAGE });
+      setCommandError(AUTH_OBSERVER_ERROR_MESSAGE);
+    },
   ), [port]);
 
   const run = useCallback(async (kind: AuthCommand, command: () => Promise<void>) => {

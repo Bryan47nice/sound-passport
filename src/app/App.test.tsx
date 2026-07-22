@@ -4,9 +4,11 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../auth/AuthContext';
 import type { AuthPort, AuthUser } from '../auth/ports';
+import type { RepositorySession } from '../bootstrap';
 import { emptyJourneyRepository } from '../data/emptyJourneyRepository';
 import { fixtureJourneyRepository } from '../data/fixtureJourneyRepository';
 import { RepositoryProvider, type RepositoryServices } from '../data/RepositoryContext';
+import { RepositorySessionProvider } from '../data/RepositorySessionProvider';
 import type { JourneyEditorRepository, JourneyRepository } from '../data/ports';
 import { App } from './App';
 
@@ -23,14 +25,15 @@ type TestAuthPort = AuthPort & {
   emitError(error: Error): void;
 };
 
-function createAuthPort(user: AuthUser | null): TestAuthPort {
+function createAuthPort(user: AuthUser | null, { initialError = false } = {}): TestAuthPort {
   let listener: ((nextUser: AuthUser | null) => void) | undefined;
   let errorListener: ((error: Error) => void) | undefined;
   return {
     observe: vi.fn((next, onError) => {
       listener = next;
       errorListener = onError;
-      next(user);
+      if (initialError) onError(new Error('observer failed'));
+      else next(user);
       return vi.fn();
     }),
     signInWithGoogle: vi.fn(async () => undefined),
@@ -38,6 +41,26 @@ function createAuthPort(user: AuthUser | null): TestAuthPort {
     emit: (nextUser) => listener?.(nextUser),
     emitError: (error) => errorListener?.(error),
   };
+}
+
+function renderProductionApp({
+  authPort,
+  openSession,
+  initialEntries = ['/'],
+}: {
+  authPort: TestAuthPort;
+  openSession: (uid: string, fixtures: JourneyRepository) => Promise<RepositorySession>;
+  initialEntries?: string[];
+}) {
+  return render(
+    <AuthProvider port={authPort}>
+      <RepositorySessionProvider openSession={openSession}>
+        <MemoryRouter initialEntries={initialEntries}>
+          <App />
+        </MemoryRouter>
+      </RepositorySessionProvider>
+    </AuthProvider>,
+  );
 }
 
 function CurrentPath() {
@@ -98,6 +121,47 @@ describe('App', () => {
     expect(await screen.findByText('無法確認登入狀態。請檢查網路連線後再試一次。')).toBeVisible();
 
     act(() => authPort.emit(null));
+    expect(screen.queryByText('無法確認登入狀態。請檢查網路連線後再試一次。')).not.toBeInTheDocument();
+  });
+
+  it('shows a locked Traditional Chinese error when the initial observer event fails', async () => {
+    const authPort = createAuthPort(null, { initialError: true });
+    const openSession = vi.fn();
+    renderProductionApp({ authPort, openSession, initialEntries: ['/studio'] });
+
+    expect(await screen.findByText('無法確認登入狀態。請檢查網路連線後再試一次。')).toBeVisible();
+    expect(screen.getByRole('heading', { name: '無法確認登入狀態' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '登入以整理私人旅程' })).not.toBeInTheDocument();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it('hides and closes private composition on observer error, then reopens after recovery', async () => {
+    const signedInUser = { uid: 'user-a', displayName: '使用者 A', email: 'a@example.com', photoURL: null };
+    const authPort = createAuthPort(signedInUser);
+    const first: RepositorySession = {
+      services: { query: emptyJourneyRepository, fixtures: fixtureJourneyRepository },
+      close: vi.fn(),
+    };
+    const recovered: RepositorySession = {
+      services: { query: emptyJourneyRepository, fixtures: fixtureJourneyRepository },
+      close: vi.fn(),
+    };
+    const openSession = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(recovered);
+    renderProductionApp({ authPort, openSession });
+    expect(await screen.findByRole('heading', { name: '還沒有私人旅程' })).toBeInTheDocument();
+
+    act(() => authPort.emitError(new Error('observer failed')));
+    expect(screen.queryByRole('heading', { name: '還沒有私人旅程' })).not.toBeInTheDocument();
+    expect(await screen.findByText('無法確認登入狀態。請檢查網路連線後再試一次。')).toBeVisible();
+    expect(await screen.findByLabelText('world-map')).toBeInTheDocument();
+    expect(first.close).toHaveBeenCalledTimes(1);
+
+    act(() => authPort.emit(signedInUser));
+    expect(await screen.findByRole('heading', { name: '還沒有私人旅程' })).toBeInTheDocument();
+    expect(openSession).toHaveBeenCalledTimes(2);
+    expect(recovered.close).not.toHaveBeenCalled();
     expect(screen.queryByText('無法確認登入狀態。請檢查網路連線後再試一次。')).not.toBeInTheDocument();
   });
 

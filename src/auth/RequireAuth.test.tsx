@@ -16,6 +16,17 @@ function authPort(user: AuthUser | null): AuthPort {
   };
 }
 
+function observerErrorPort(): AuthPort {
+  return {
+    observe: vi.fn((_listener, onError) => {
+      onError(new Error('observer failed'));
+      return vi.fn();
+    }),
+    signInWithGoogle: vi.fn(async () => undefined),
+    signOut: vi.fn(async () => undefined),
+  };
+}
+
 function renderRoute(user: AuthUser | null) {
   return render(
     <AuthProvider port={authPort(user)}>
@@ -46,5 +57,23 @@ describe('RequireAuth', () => {
 
     expect(screen.getByRole('heading', { name: '創作工坊' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '登入以整理私人旅程' })).not.toBeInTheDocument();
+  });
+
+  it('renders a locked error instead of private or signed-out controls after observer failure', () => {
+    render(
+      <AuthProvider port={observerErrorPort()}>
+        <MemoryRouter initialEntries={['/studio']}>
+          <Routes>
+            <Route element={<RequireAuth />}>
+              <Route path="studio" element={<h1>創作工坊</h1>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </AuthProvider>,
+    );
+
+    expect(screen.getByRole('heading', { name: '無法確認登入狀態' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '創作工坊' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '使用 Google 登入' })).not.toBeInTheDocument();
   });
 });
