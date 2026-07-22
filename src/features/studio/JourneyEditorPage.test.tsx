@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { PropsWithChildren } from 'react';
 import { MemoryRouter, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../app/App';
-import { RepositoryProvider } from '../../data/RepositoryContext';
+import { AuthProvider } from '../../auth/AuthContext';
+import type { AuthPort, AuthUser } from '../../auth/ports';
+import { RepositoryProvider as DataRepositoryProvider, type RepositoryServices } from '../../data/RepositoryContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import {
   JourneyVersionConflictError,
@@ -15,6 +18,30 @@ import {
 } from '../../data/ports';
 import type { Journey, JourneyPatch, JourneyStory, Moment, MomentPatch } from '../../domain/model';
 import { claimJourneyOutboxOwner } from './journeyOutbox';
+
+const signedInUser: AuthUser = {
+  uid: 'studio-test-user',
+  displayName: 'Studio Test User',
+  email: 'studio@example.com',
+  photoURL: null,
+};
+
+const signedInAuthPort: AuthPort = {
+  observe(listener) {
+    listener(signedInUser);
+    return () => undefined;
+  },
+  signInWithGoogle: async () => undefined,
+  signOut: async () => undefined,
+};
+
+function RepositoryProvider({ children, services }: PropsWithChildren<{ services: RepositoryServices }>) {
+  return (
+    <AuthProvider port={signedInAuthPort}>
+      <DataRepositoryProvider services={services}>{children}</DataRepositoryProvider>
+    </AuthProvider>
+  );
+}
 
 const ownerStorageKey = 'sound-passport.journey-autosave-owner-id';
 const ownerA = '11111111-1111-4111-8111-111111111111';
