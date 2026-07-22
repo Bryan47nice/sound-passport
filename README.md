@@ -2,7 +2,7 @@
 
 ## Firebase 開發環境
 
-先從範例建立本機環境檔，接著分別啟動 Firebase Emulator Suite 與前端開發伺服器：
+先從範例建立本機環境檔。範例已將 `VITE_USE_FIREBASE_EMULATORS=true`；執行下列命令前，必須確認 `.env.local` 仍為這個值，再分別啟動 Firebase Emulator Suite 與前端開發伺服器：
 
 ```powershell
 Copy-Item .env.example .env.local
@@ -10,7 +10,7 @@ npm.cmd run emulators
 npm.cmd run dev
 ```
 
-正式環境請在 Firebase Console 建立 Firebase Web App，並在 Authentication 的登入提供者中只啟用 Google。將該 Web App 的公開設定填入 `.env.local`，並在 Firebase Console 的 authorized domains 加入需要使用登入功能的網域。
+只有刻意連線到正式 Firebase 時才能使用 `VITE_USE_FIREBASE_EMULATORS=false`。正式環境請在 Firebase Console 建立 Firebase Web App，並在 Authentication 的登入提供者中只啟用 Google；將該 Web App 的完整公開設定填入環境變數，並在 Firebase Console 的 authorized domains 加入需要使用登入功能的網域。一般 emulator local-dev 不得改為 `false`。
 
 `.env.local` 已刻意忽略，不應提交。Firebase Web config 屬於公開用戶端設定；service-account JSON 則絕不能放入此前端 repository，也不得提交或提供給瀏覽器。
 
@@ -34,7 +34,9 @@ npm.cmd run test:e2e
 
 ## 私人旅程工作台
 
-- Atlas 仍是首頁，只顯示內建示範旅程與狀態為「已完成」的私人旅程。
+- signed-out 使用者的 root Atlas（`/`）只讀取固定 fixtures。
+- signed-in 使用者的 root Atlas（`/`）只讀取目前 `uid` 的私人 repository，且只呈現狀態為「已完成」的私人旅程；不會混入 fixtures。
+- `/demo` 是明確的示範入口，不論登入狀態都只讀取 fixtures；示範內容不會計入私人旅程統計。
 - `/studio` 提供建立、編輯、排序、預覽、完成、匯出、匯入與清除私人旅程的桌機流程。
 - 文字欄位停止輸入 500ms 後自動儲存；日期、選單、照片與排序立即保存。
 - 手機尺寸的 Studio 只顯示改用電腦的指引；Atlas、國家頁、旅程頁與播放器仍可完整回放。
