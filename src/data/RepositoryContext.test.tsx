@@ -12,6 +12,7 @@ import type {
 import {
   RepositoryProvider,
   useBackupService,
+  useFixtureJourneyRepository,
   useJourneyAutosaveOutbox,
   useJourneyEditorRepository,
   useJourneyRepository,
@@ -81,6 +82,18 @@ describe('repository service hooks', () => {
       .toBe(backup);
     expect(renderHook(usePrivateStorageError, { wrapper: AllServicesProvider }).result.current)
       .toBe(privateStorageError);
+  });
+
+  it('returns explicit fixtures while preserving the concise query fallback', () => {
+    const privateQuery = { ...fixtureJourneyRepository };
+    function PrivateQueryProvider({ children }: PropsWithChildren) {
+      return <RepositoryProvider services={{ query: privateQuery, fixtures: fixtureJourneyRepository }}>{children}</RepositoryProvider>;
+    }
+
+    expect(renderHook(useFixtureJourneyRepository, { wrapper: PrivateQueryProvider }).result.current)
+      .toBe(fixtureJourneyRepository);
+    expect(renderHook(useFixtureJourneyRepository, { wrapper: QueryOnlyProvider }).result.current)
+      .toBe(fixtureJourneyRepository);
   });
 
   it('throws the exact query-service error outside the provider', () => {

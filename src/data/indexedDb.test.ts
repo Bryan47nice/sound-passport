@@ -1,7 +1,8 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanupDb, uniqueDbName } from '../test/indexedDb';
-import { DB_VERSION, openSoundPassportDb } from './indexedDb';
+import { DB_NAME, DB_VERSION, openSoundPassportDb, openUserSoundPassportDb, userDatabaseName } from './indexedDb';
+import { createIndexedDbJourneyRepository } from './indexedDbJourneyRepository';
 
 const databaseNames: string[] = [];
 const openDatabases: Array<{ close(): void }> = [];
@@ -93,5 +94,62 @@ describe('openSoundPassportDb', () => {
 
     expect(result.kind).toBe('resolved');
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('uid-isolated databases', () => {
+  it('derives deterministic database names and requires a Firebase uid', () => {
+    expect(userDatabaseName('user-a')).toBe('sound-passport-user-user-a');
+    expect(userDatabaseName('user-b')).toBe('sound-passport-user-user-b');
+    expect(() => userDatabaseName('')).toThrowError('Firebase uid is required');
+  });
+
+  it('keeps each uid database and the legacy database isolated', async () => {
+    const uidA = `user-a-${crypto.randomUUID()}`;
+    const uidB = `user-b-${crypto.randomUUID()}`;
+    const legacy = track(await openSoundPassportDb(DB_NAME));
+    const userA = track(await openUserSoundPassportDb(uidA));
+    const userB = track(await openUserSoundPassportDb(uidB));
+    databaseNames.push(DB_NAME, userDatabaseName(uidA), userDatabaseName(uidB));
+
+    await legacy.put('journeys', {
+      id: 'legacy-journey',
+      title: 'Legacy',
+      countryCode: 'ZZ',
+      countryName: 'Legacy',
+      countryCoordinates: [0, 0],
+      cityLabels: [],
+      startDate: '2026-01-01',
+      endDate: '2026-01-01',
+      summary: '',
+      status: 'draft',
+      source: 'private',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const repositoryA = createIndexedDbJourneyRepository({ db: userA });
+    await repositoryA.createJourney({
+      title: 'A private draft',
+      countryCode: 'ZZ',
+      countryName: 'Testland',
+      countryCoordinates: [12, 34],
+      cityLabels: [],
+      startDate: '2026-01-01',
+      endDate: '2026-01-02',
+      summary: '',
+    });
+
+    expect(await createIndexedDbJourneyRepository({ db: userB }).listPrivateJourneys()).toEqual([]);
+    expect(await repositoryA.listPrivateJourneys()).toHaveLength(1);
+    userA.close();
+    const reopenedA = track(await openUserSoundPassportDb(uidA));
+    expect(await createIndexedDbJourneyRepository({ db: reopenedA }).listPrivateJourneys()).toHaveLength(1);
+    expect(await createIndexedDbJourneyRepository({ db: reopenedA }).listPrivateJourneys()).not.toContainEqual(
+      expect.objectContaining({ id: 'legacy-journey' }),
+    );
+    expect(await createIndexedDbJourneyRepository({ db: userB }).listPrivateJourneys()).not.toContainEqual(
+      expect.objectContaining({ id: 'legacy-journey' }),
+    );
   });
 });

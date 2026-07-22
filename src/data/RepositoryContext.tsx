@@ -18,6 +18,7 @@ import type {
 
 export interface RepositoryServices {
   query: JourneyRepository;
+  fixtures?: JourneyRepository;
   editor?: JourneyEditorRepository;
   outbox?: JourneyAutosaveOutboxPort;
   momentOutbox?: MomentAutosaveOutboxPort;
@@ -63,6 +64,12 @@ export function useJourneyRepository(): JourneyRepository {
   const repository = useContext(Context)?.query;
   if (!repository) throw new Error('JourneyRepository is not available');
   return repository;
+}
+
+export function useFixtureJourneyRepository(): JourneyRepository {
+  const context = useContext(Context);
+  if (!context) throw new Error('JourneyRepository is not available');
+  return context.fixtures ?? context.query;
 }
 
 export function useJourneyEditorRepository(): JourneyEditorRepository {

@@ -180,6 +180,15 @@ export function openSoundPassportDb(name = DB_NAME) {
   return Promise.race([trackedOpening, blockedResult]);
 }
 
+export function userDatabaseName(uid: string) {
+  if (!uid) throw new Error('Firebase uid is required');
+  return `${DB_NAME}-user-${encodeURIComponent(uid)}`;
+}
+
+export function openUserSoundPassportDb(uid: string) {
+  return openSoundPassportDb(userDatabaseName(uid));
+}
+
 export async function deleteSoundPassportDb(name = DB_NAME) {
   await deleteDB(name);
 }
