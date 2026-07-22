@@ -1,10 +1,10 @@
 import { CopyPlus, Pencil, Trash2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { useParams } from 'react-router';
+import { experiencePath, useJourneyExperience } from '../../app/JourneyExperienceContext';
 import { GuardedLink, useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
 import {
   useInvalidateRepositoryQueries,
-  useJourneyRepository,
   useOptionalJourneyEditorRepository,
   useRepositoryRevision,
 } from '../../data/RepositoryContext';
@@ -41,7 +41,7 @@ export function JourneyPage({ prepareFixturePhoto = prepareRemoteFixturePhoto }:
   const { journeyId = '' } = useParams();
   const navigate = useGuardedNavigate();
   const routeCommand = useRouteCommandGuard();
-  const repository = useJourneyRepository();
+  const { kind, repository, routePrefix } = useJourneyExperience();
   const editor = useOptionalJourneyEditorRepository();
   const isMobile = useMobileStudio();
   const repositoryRevision = useRepositoryRevision();
@@ -83,7 +83,7 @@ export function JourneyPage({ prepareFixturePhoto = prepareRemoteFixturePhoto }:
   if (currentState.kind === 'error') {
     return (
       <section className="page empty-state" role="alert">
-        <h1>無法讀取旅程</h1>
+        <h1>{kind === 'private' ? '無法讀取私人資料' : '無法讀取旅程'}</h1>
         <p>私人旅程資料暫時無法讀取，請重新讀取。</p>
         <button className="secondary-command" type="button" onClick={invalidateQueries}>重新讀取</button>
       </section>
@@ -163,7 +163,7 @@ export function JourneyPage({ prepareFixturePhoto = prepareRemoteFixturePhoto }:
       <h1 className="page-title">{story.journey.title}</h1>
       <p className="journey-detail-summary">{story.journey.summary || '尚未填寫旅程總文。'}</p>
       <div className="journey-detail-actions">
-        <GuardedLink className="primary-command" to={`/journeys/${story.journey.id}/play`}>播放這趟旅程</GuardedLink>
+        <GuardedLink className="primary-command" to={experiencePath(routePrefix, `/journeys/${story.journey.id}/play`)}>播放這趟旅程</GuardedLink>
         {canCopy && (
           <button
             className="secondary-command"

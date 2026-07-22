@@ -1,17 +1,23 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import type { PropsWithChildren } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCombinedJourneyRepository } from '../../data/combinedJourneyRepository';
 import { openSoundPassportDb } from '../../data/indexedDb';
 import { createIndexedDbJourneyRepository } from '../../data/indexedDbJourneyRepository';
-import { RepositoryProvider } from '../../data/RepositoryContext';
+import { RepositoryProvider as DataRepositoryProvider, type RepositoryServices } from '../../data/RepositoryContext';
+import { JourneyExperienceProvider } from '../../app/JourneyExperienceContext';
 import { fixtureJourneyRepository } from '../../data/fixtureJourneyRepository';
 import type { JourneyEditorRepository, JourneyRepository } from '../../data/ports';
 import type { JourneyStory, NormalizedPhotoInput } from '../../domain/model';
 import { cleanupDb, uniqueDbName } from '../../test/indexedDb';
 import { seedPrivateReviewJourney } from '../../test/privateJourney';
 import { JourneyPage } from './JourneyPage';
+
+function RepositoryProvider({ children, services }: PropsWithChildren<{ services: RepositoryServices }>) {
+  return <DataRepositoryProvider services={services}><JourneyExperienceProvider kind="demo" routePrefix="">{children}</JourneyExperienceProvider></DataRepositoryProvider>;
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -543,5 +549,39 @@ describe('JourneyPage', () => {
 
     expect(await screen.findByRole('heading', { name: privateStory.journey.title })).toBeInTheDocument();
     expect(getJourneyStory).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the demo player link under the demo prefix', async () => {
+    render(
+      <DataRepositoryProvider services={{ query: fixtureJourneyRepository, fixtures: fixtureJourneyRepository }}>
+        <JourneyExperienceProvider kind="demo" routePrefix="/demo">
+          <MemoryRouter initialEntries={['/demo/journeys/tokyo-2024']}>
+            <Routes><Route path="/demo/journeys/:journeyId" element={<JourneyPage />} /></Routes>
+          </MemoryRouter>
+        </JourneyExperienceProvider>
+      </DataRepositoryProvider>,
+    );
+
+    expect(await screen.findByRole('link', { name: '播放這趟旅程' })).toHaveAttribute('href', '/demo/journeys/tokyo-2024/play');
+  });
+
+  it('does not render a fixture journey when a private detail read fails', async () => {
+    const failingPrivate: JourneyRepository = {
+      async listCountrySummaries() { throw new Error('IndexedDB failed'); },
+      async listJourneysByCountry() { throw new Error('IndexedDB failed'); },
+      async getJourneyStory() { throw new Error('IndexedDB failed'); },
+    };
+    render(
+      <DataRepositoryProvider services={{ query: failingPrivate, fixtures: fixtureJourneyRepository }}>
+        <JourneyExperienceProvider kind="private" routePrefix="">
+          <MemoryRouter initialEntries={['/journeys/tokyo-2024']}>
+            <Routes><Route path="/journeys/:journeyId" element={<JourneyPage />} /></Routes>
+          </MemoryRouter>
+        </JourneyExperienceProvider>
+      </DataRepositoryProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: '無法讀取私人資料' })).toBeInTheDocument();
+    expect(screen.queryByText('東京，雨停之後')).not.toBeInTheDocument();
   });
 });

@@ -6,11 +6,13 @@ import { AuthProvider } from '../auth/AuthContext';
 import type { AuthPort, AuthUser } from '../auth/ports';
 import { fixtureJourneyRepository } from '../data/fixtureJourneyRepository';
 import { RepositoryProvider, type RepositoryServices } from '../data/RepositoryContext';
-import type { JourneyEditorRepository } from '../data/ports';
+import type { JourneyEditorRepository, JourneyRepository } from '../data/ports';
 import { App } from './App';
 
 vi.mock('../features/atlas/WorldMap', () => ({
-  WorldMap: () => <div aria-label="world-map" />,
+  WorldMap: ({ countries }: { countries: Array<{ countryCode: string; countryName: string; journeyCount: number }> }) => (
+    <div aria-label="world-map">{countries.map((country) => <span key={country.countryCode}>{country.countryName}:{country.journeyCount}</span>)}</div>
+  ),
 }));
 
 type TestAuthPort = AuthPort & {
@@ -65,6 +67,7 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: '使用 Google 登入' })).toBeInTheDocument();
     expect(screen.getByRole('main')).toBeInTheDocument();
     expect(await screen.findByLabelText('world-map')).toBeInTheDocument();
+    expect(screen.getByText('日本:2')).toBeInTheDocument();
   });
 
   it.each([
@@ -77,6 +80,41 @@ describe('App', () => {
 
     expect(screen.getByTestId('current-path')).toHaveTextContent(path);
     expect(screen.getByRole('heading', { name: '請先登入以使用創作工坊' })).toBeInTheDocument();
+  });
+
+  it('uses only the signed-in private repository on the root route', async () => {
+    const privateRepository: JourneyRepository = {
+      listCountrySummaries: vi.fn(async () => []),
+      listJourneysByCountry: vi.fn(async () => []),
+      getJourneyStory: vi.fn(async () => undefined),
+    };
+
+    renderApp({
+      authPort: createAuthPort({ uid: 'user-a', displayName: 'Private User', email: 'private@example.com', photoURL: null }),
+      services: { query: privateRepository, fixtures: fixtureJourneyRepository },
+    });
+
+    expect(await screen.findByRole('heading', { name: '還沒有私人旅程' })).toBeInTheDocument();
+    expect(privateRepository.listCountrySummaries).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('日本')).not.toBeInTheDocument();
+  });
+
+  it('uses fixtures and labels the signed-in demo route as 探索示範', async () => {
+    const privateRepository: JourneyRepository = {
+      listCountrySummaries: vi.fn(async () => []),
+      listJourneysByCountry: vi.fn(async () => []),
+      getJourneyStory: vi.fn(async () => undefined),
+    };
+
+    renderApp({
+      authPort: createAuthPort({ uid: 'user-a', displayName: 'Private User', email: 'private@example.com', photoURL: null }),
+      initialEntries: ['/demo'],
+      services: { query: privateRepository, fixtures: fixtureJourneyRepository },
+    });
+
+    expect(await screen.findByText('探索示範')).toBeInTheDocument();
+    expect(await screen.findByText('日本')).toBeInTheDocument();
+    expect(privateRepository.listCountrySummaries).not.toHaveBeenCalled();
   });
 
   it('renders a signed-in private preview through the existing Studio route', async () => {
@@ -122,6 +160,7 @@ describe('App', () => {
 
     await user.click(screen.getByLabelText('帳戶選單'));
     expect(screen.getByText('使用者 A')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '探索示範' })).toHaveAttribute('href', '/demo');
     await user.click(screen.getByRole('button', { name: '登出' }));
 
     expect(authPort.signOut).toHaveBeenCalledTimes(1);

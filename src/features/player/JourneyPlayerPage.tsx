@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
+import { experiencePath, useJourneyExperience } from '../../app/JourneyExperienceContext';
 import { GuardedLink } from '../../app/navigationGuard';
-import { useJourneyRepository, useRepositoryRevision } from '../../data/RepositoryContext';
+import { useRepositoryRevision } from '../../data/RepositoryContext';
 import { formatLocalDateTime } from '../../domain/dateTime';
 import type { JourneyStory } from '../../domain/model';
 import { JourneyPhoto } from '../../media/JourneyPhoto';
@@ -9,7 +10,7 @@ import { YouTubeEmbed } from './YouTubeEmbed';
 
 export function JourneyPlayerPage() {
   const { journeyId = '' } = useParams();
-  const repository = useJourneyRepository();
+  const { kind, repository, routePrefix } = useJourneyExperience();
   const repositoryRevision = useRepositoryRevision();
   const [story, setStory] = useState<JourneyStory>();
   const [loaded, setLoaded] = useState(false);
@@ -39,21 +40,15 @@ export function JourneyPlayerPage() {
         setLoaded(true);
       });
 
-    return () => {
-      isCurrent = false;
-    };
+    return () => { isCurrent = false; };
   }, [journeyId, repository, repositoryRevision, retryGeneration]);
 
   if (!loaded || resolvedJourneyId !== journeyId) return <section className="page" aria-label="載入播放器" />;
   if (loadError) {
     return (
       <section className="page empty-state">
-        <h1>無法讀取旅程</h1>
-        <button
-          type="button"
-          className="secondary-command"
-          onClick={() => setRetryGeneration((current) => current + 1)}
-        >重新讀取</button>
+        <h1>{kind === 'private' ? '無法讀取私人資料' : '無法讀取旅程'}</h1>
+        <button type="button" className="secondary-command" onClick={() => setRetryGeneration((value) => value + 1)}>重新讀取</button>
       </section>
     );
   }
@@ -61,7 +56,7 @@ export function JourneyPlayerPage() {
     return (
       <section className="page empty-state">
         <h1>找不到這趟旅程</h1>
-        <GuardedLink className="primary-command" to="/">返回旅行地圖</GuardedLink>
+        <GuardedLink className="primary-command" to={experiencePath(routePrefix, '')}>返回旅行地圖</GuardedLink>
       </section>
     );
   }
@@ -77,12 +72,7 @@ export function JourneyPlayerPage() {
       <p className="eyebrow">{story.journey.title}</p>
       <div className="player-stage">
         <figure className="player-visual">
-          <JourneyPhoto
-            className="player-photo"
-            photoAssetId={moment.photoAssetId}
-            fixtureUrl={moment.photoUrl}
-            alt={moment.photoAlt}
-          />
+          <JourneyPhoto className="player-photo" photoAssetId={moment.photoAssetId} fixtureUrl={moment.photoUrl} alt={moment.photoAlt} />
           <figcaption>{moment.cityLabel} · {moment.placeLabel}</figcaption>
         </figure>
         <div className="player-copy">
@@ -91,7 +81,7 @@ export function JourneyPlayerPage() {
           <h1>{moment.song.title}</h1>
           <p className="song-artist">{moment.song.artist}</p>
           <div className="player-song"><YouTubeEmbed song={moment.song} /></div>
-          <p>{moment.reason || '旅後待補'}</p>
+          <p>{moment.reason || '暫無說明'}</p>
         </div>
       </div>
       <div className="player-controls">

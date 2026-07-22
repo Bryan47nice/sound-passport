@@ -34,6 +34,7 @@ export function AppShell({ children }: PropsWithChildren) {
             </summary>
             <div className="account-menu-popover">
               <strong>{state.user.displayName ?? state.user.email ?? '使用者'}</strong>
+              <GuardedLink to="/demo">探索示範</GuardedLink>
               <button type="button" disabled={busy} onClick={() => void signOut()}>
                 <LogOut size={16} aria-hidden="true" />
                 登出
