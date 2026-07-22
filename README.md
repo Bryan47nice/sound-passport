@@ -1,5 +1,21 @@
 # Sound Passport
 
+## Firebase 開發環境
+
+先從範例建立本機環境檔，接著分別啟動 Firebase Emulator Suite 與前端開發伺服器：
+
+```powershell
+Copy-Item .env.example .env.local
+npm.cmd run emulators
+npm.cmd run dev
+```
+
+正式環境請在 Firebase Console 建立 Firebase Web App，並在 Authentication 的登入提供者中只啟用 Google。將該 Web App 的公開設定填入 `.env.local`，並在 Firebase Console 的 authorized domains 加入需要使用登入功能的網域。
+
+`.env.local` 已刻意忽略，不應提交。Firebase Web config 屬於公開用戶端設定；service-account JSON 則絕不能放入此前端 repository，也不得提交或提供給瀏覽器。
+
+目前里程碑已使用 Firebase Authentication。Firestore rules 僅預留最小 owner-profile contract，應用程式尚未寫入 profile。旅程 metadata 與照片仍儲存在依 `uid` 隔離的本機 IndexedDB，待後續 migration/sync Goal 再處理。
+
 Sound Passport 是一個「預設私人」的旅行音樂日誌。桌機整理工作台可建立旅程、批次加入照片、記錄歌曲與感受，再從世界地圖進入已完成旅程回放；私人內容只保存在目前瀏覽器與使用者主動下載的備份檔。
 
 ## 本機執行
