@@ -1,13 +1,18 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
-import type { PropsWithChildren } from 'react';
+import { StrictMode, useEffect, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../auth/AuthContext';
 import type { AuthPort, AuthUser } from '../auth/ports';
 import type { RepositorySession } from '../bootstrap';
+import { emptyJourneyRepository } from './emptyJourneyRepository';
 import { fixtureJourneyRepository } from './fixtureJourneyRepository';
 import type { JourneyRepository } from './ports';
 import { useJourneyRepository, useOptionalJourneyEditorRepository, usePrivateStorageError } from './RepositoryContext';
 import { RepositorySessionProvider } from './RepositorySessionProvider';
+
+type EventLog = string[];
+
+const repositoryIdentities = new WeakMap<JourneyRepository, string>();
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -29,45 +34,81 @@ function createAuthPort() {
   return { port, emit: (user: AuthUser | null) => act(() => listener?.(user)) };
 }
 
-function signedIn(uid: string): AuthUser {
-  return { uid, displayName: uid, email: null, photoURL: null };
+function signedIn(uid: string, overrides: Partial<AuthUser> = {}): AuthUser {
+  return { uid, displayName: uid, email: null, photoURL: null, ...overrides };
 }
 
-function session(label: string): RepositorySession {
-  const query = {
+function session(identity: string, events: EventLog = []): RepositorySession {
+  const query: JourneyRepository = {
     listCountrySummaries: vi.fn(async () => []),
     listJourneysByCountry: vi.fn(async () => []),
     getJourneyStory: vi.fn(async () => undefined),
   };
-  return { services: { query, fixtures: fixtureJourneyRepository, editor: query as never }, close: vi.fn() };
+  repositoryIdentities.set(query, identity);
+  return {
+    services: { query, fixtures: fixtureJourneyRepository, editor: query as never },
+    close: vi.fn(() => events.push(`close-${identity}`)),
+  };
 }
 
-function Probe() {
+function repositoryIdentity(query: JourneyRepository) {
+  if (query === fixtureJourneyRepository) return 'fixtures';
+  if (query === emptyJourneyRepository) return 'empty';
+  return repositoryIdentities.get(query) ?? 'unknown';
+}
+
+function Probe({ events }: { events: EventLog }) {
   const query = useJourneyRepository();
   const editor = useOptionalJourneyEditorRepository();
   const error = usePrivateStorageError();
-  return <output data-testid="services">{`${query === fixtureJourneyRepository ? 'fixtures' : 'private'}:${editor ? 'editor' : 'no-editor'}:${error ?? ''}`}</output>;
+  const identity = repositoryIdentity(query);
+
+  useEffect(() => {
+    events.push(`publish-${identity}`);
+  }, [events, identity]);
+
+  return (
+    <output data-testid="services">
+      {`${identity}:${editor ? 'editor' : 'no-editor'}:${error ?? ''}`}
+    </output>
+  );
+}
+
+interface RenderProviderOptions {
+  events?: EventLog;
+  strictMode?: boolean;
 }
 
 function renderProvider(
   port: AuthPort,
   openSession: (uid: string, fixtures: JourneyRepository) => Promise<RepositorySession>,
+  { events = [], strictMode = false }: RenderProviderOptions = {},
 ) {
-  return render(
+  const providers = (
     <AuthProvider port={port}>
-      <RepositorySessionProvider openSession={openSession}><Probe /></RepositorySessionProvider>
-    </AuthProvider>,
+      <RepositorySessionProvider openSession={openSession}>
+        <Probe events={events} />
+      </RepositorySessionProvider>
+    </AuthProvider>
   );
+  const tree: ReactNode = strictMode ? <StrictMode>{providers}</StrictMode> : providers;
+  return render(tree);
+}
+
+async function expectPublished(identity: string, suffix = 'editor:') {
+  await waitFor(() => {
+    expect(screen.getByTestId('services')).toHaveTextContent(`${identity}:${suffix}`);
+  });
 }
 
 afterEach(cleanup);
 
 describe('RepositorySessionProvider', () => {
-  it('renders loading without opening a database', () => {
+  it('renders the exact loading label without opening a database', () => {
     const { port } = createAuthPort();
     const openSession = vi.fn();
     renderProvider(port, openSession);
-    expect(screen.getByLabelText('蝣箄?蝘犖鞈?')).toBeInTheDocument();
+    expect(screen.getByLabelText('確認私人資料')).toBeInTheDocument();
     expect(openSession).not.toHaveBeenCalled();
   });
 
@@ -76,45 +117,148 @@ describe('RepositorySessionProvider', () => {
     const openSession = vi.fn();
     renderProvider(port, openSession);
     emit(null);
-    expect(await screen.findByTestId('services')).toHaveTextContent('fixtures:no-editor:');
+    await expectPublished('fixtures', 'no-editor:');
     expect(openSession).not.toHaveBeenCalled();
   });
 
-  it('opens A only and closes it before B services become visible', async () => {
+  it('closes A before publishing B', async () => {
+    const events: EventLog = [];
+    const { port, emit } = createAuthPort();
+    const a = session('a', events);
+    const b = session('b', events);
+    const openSession = vi.fn(async (uid: string) => uid === 'user-a' ? a : b);
+    renderProvider(port, openSession, { events });
+
+    emit(signedIn('user-a'));
+    await expectPublished('a');
+    emit(signedIn('user-b'));
+    await expectPublished('b');
+
+    expect(a.close).toHaveBeenCalledTimes(1);
+    expect(events.indexOf('close-a')).toBeLessThan(events.indexOf('publish-b'));
+    expect(openSession).toHaveBeenNthCalledWith(1, 'user-a', fixtureJourneyRepository);
+    expect(openSession).toHaveBeenNthCalledWith(2, 'user-b', fixtureJourneyRepository);
+  });
+
+  it('closes a stale A completion without ever publishing A after B', async () => {
+    const events: EventLog = [];
+    const { port, emit } = createAuthPort();
+    const openA = deferred<RepositorySession>();
+    const a = session('a', events);
+    const b = session('b', events);
+    const openSession = vi.fn((uid: string) => uid === 'user-a' ? openA.promise : Promise.resolve(b));
+    renderProvider(port, openSession, { events });
+
+    emit(signedIn('user-a'));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
+    emit(signedIn('user-b'));
+    await expectPublished('b');
+    await act(async () => { openA.resolve(a); });
+
+    expect(a.close).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('services')).toHaveTextContent('b:editor:');
+    expect(events).not.toContain('publish-a');
+  });
+
+  it('uses the exact private-storage error with an empty private query', async () => {
+    const { port, emit } = createAuthPort();
+    renderProvider(port, vi.fn(async () => { throw new Error('open failed'); }));
+    emit(signedIn('user-b'));
+
+    await expectPublished('empty', 'no-editor:本機儲存空間暫時無法使用');
+    expect(screen.getByTestId('services')).toHaveTextContent('本機儲存空間暫時無法使用');
+  });
+
+  it('opens and disposes one signed-in session under React StrictMode', async () => {
+    const { port, emit } = createAuthPort();
+    const a = session('a');
+    const openSession = vi.fn(async () => a);
+    const view = renderProvider(port, openSession, { strictMode: true });
+
+    emit(signedIn('user-a'));
+    await expectPublished('a');
+    expect(openSession).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(a.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes A and B when switching accounts and then signing out', async () => {
     const { port, emit } = createAuthPort();
     const a = session('a');
     const b = session('b');
     const openSession = vi.fn(async (uid: string) => uid === 'user-a' ? a : b);
     renderProvider(port, openSession);
+
     emit(signedIn('user-a'));
-    await screen.findByTestId('services');
+    await expectPublished('a');
     emit(signedIn('user-b'));
-    await waitFor(() => expect(a.close).toHaveBeenCalledTimes(1));
-    expect(await screen.findByTestId('services')).toHaveTextContent('private:editor:');
-    expect(openSession).toHaveBeenNthCalledWith(1, 'user-a', fixtureJourneyRepository);
-    expect(openSession).toHaveBeenNthCalledWith(2, 'user-b', fixtureJourneyRepository);
+    await expectPublished('b');
+    emit(null);
+    await expectPublished('fixtures', 'no-editor:');
+
+    expect(a.close).toHaveBeenCalledTimes(1);
+    expect(b.close).toHaveBeenCalledTimes(1);
   });
 
-  it('closes a stale A session and never publishes it after B replaces it', async () => {
+  it('keeps the second A published when a stale B completes during A to B to A', async () => {
+    const events: EventLog = [];
+    const { port, emit } = createAuthPort();
+    const firstA = session('a-1', events);
+    const secondA = session('a-2', events);
+    const b = session('b', events);
+    const openB = deferred<RepositorySession>();
+    let aCount = 0;
+    const openSession = vi.fn((uid: string) => {
+      if (uid === 'user-b') return openB.promise;
+      aCount += 1;
+      return Promise.resolve(aCount === 1 ? firstA : secondA);
+    });
+    renderProvider(port, openSession, { events });
+
+    emit(signedIn('user-a'));
+    await expectPublished('a-1');
+    emit(signedIn('user-b'));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
+    emit(signedIn('user-a'));
+    await expectPublished('a-2');
+    await act(async () => { openB.resolve(b); });
+
+    expect(firstA.close).toHaveBeenCalledTimes(1);
+    expect(b.close).toHaveBeenCalledTimes(1);
+    expect(secondA.close).not.toHaveBeenCalled();
+    expect(screen.getByTestId('services')).toHaveTextContent('a-2:editor:');
+    expect(events).not.toContain('publish-b');
+  });
+
+  it('ignores a late rejection from A after B is published', async () => {
     const { port, emit } = createAuthPort();
     const openA = deferred<RepositorySession>();
     const b = session('b');
-    const a = session('a');
     const openSession = vi.fn((uid: string) => uid === 'user-a' ? openA.promise : Promise.resolve(b));
     renderProvider(port, openSession);
+
     emit(signedIn('user-a'));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
     emit(signedIn('user-b'));
-    await screen.findByTestId('services');
-    await act(async () => openA.resolve(a));
-    expect(a.close).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId('services')).toHaveTextContent('private:editor:');
+    await expectPublished('b');
+    await act(async () => { openA.reject(new Error('late A failure')); });
+
+    expect(screen.getByTestId('services')).toHaveTextContent('b:editor:');
+    expect(screen.getByTestId('services')).not.toHaveTextContent('本機儲存空間暫時無法使用');
   });
 
-  it('uses the empty private query when opening B fails', async () => {
+  it('does not reopen the database when only profile metadata changes for the same uid', async () => {
     const { port, emit } = createAuthPort();
-    renderProvider(port, vi.fn(async () => { throw new Error('open failed'); }));
-    emit(signedIn('user-b'));
-    expect(await screen.findByTestId('services')).toHaveTextContent('?祆??脣?蝛粹??急??⊥?雿輻');
-    expect(screen.getByTestId('services')).toHaveTextContent('private:no-editor:');
+    const a = session('a');
+    const openSession = vi.fn(async () => a);
+    renderProvider(port, openSession);
+
+    emit(signedIn('user-a', { displayName: 'First name', email: 'first@example.com' }));
+    await expectPublished('a');
+    emit(signedIn('user-a', { displayName: 'Updated name', email: 'updated@example.com' }));
+
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
+    expect(a.close).not.toHaveBeenCalled();
+    expect(screen.getByTestId('services')).toHaveTextContent('a:editor:');
   });
 });

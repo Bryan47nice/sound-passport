@@ -72,7 +72,7 @@ export function RepositorySessionProvider({
             services: {
               query: emptyJourneyRepository,
               fixtures,
-              privateStorageError: '?祆??脣?蝛粹??急??⊥?雿輻',
+              privateStorageError: '本機儲存空間暫時無法使用',
             },
           });
         }
@@ -87,7 +87,7 @@ export function RepositorySessionProvider({
   }, [fixtures, sessionOpener, signedOutServices, state.kind, uid]);
 
   if (view.kind === 'loading') {
-    return <section className="page" aria-label="蝣箄?蝘犖鞈?" />;
+    return <section className="page" aria-label="確認私人資料" />;
   }
   return <RepositoryProvider services={view.services}>{children}</RepositoryProvider>;
 }
