@@ -4,6 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../auth/AuthContext';
 import type { AuthPort, AuthUser } from '../auth/ports';
+import { emptyJourneyRepository } from '../data/emptyJourneyRepository';
 import { fixtureJourneyRepository } from '../data/fixtureJourneyRepository';
 import { RepositoryProvider, type RepositoryServices } from '../data/RepositoryContext';
 import type { JourneyEditorRepository, JourneyRepository } from '../data/ports';
@@ -115,6 +116,35 @@ describe('App', () => {
     expect(await screen.findByText('探索示範')).toBeInTheDocument();
     expect(await screen.findByText('日本')).toBeInTheDocument();
     expect(privateRepository.listCountrySummaries).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '/',
+    '/countries/JP',
+    '/journeys/tokyo-2024',
+    '/journeys/tokyo-2024/play',
+  ])('prioritizes the private-storage error at %s', async (path) => {
+    renderApp({
+      authPort: createAuthPort({ uid: 'user-a', displayName: 'Private User', email: 'private@example.com', photoURL: null }),
+      initialEntries: [path],
+      services: {
+        query: emptyJourneyRepository,
+        fixtures: fixtureJourneyRepository,
+        privateStorageError: '本機儲存空間暫時無法使用',
+      },
+    });
+
+    expect(await screen.findByRole('heading', { name: '無法讀取私人資料' })).toBeInTheDocument();
+    expect(screen.getByText('本機儲存空間暫時無法使用')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '建立第一趟旅程' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '找不到這趟旅程' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the demo prefix in the demo not-found route', () => {
+    renderApp({ initialEntries: ['/demo/unknown'] });
+
+    expect(screen.getByRole('heading', { name: '找不到示範頁面' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '返回旅行地圖' })).toHaveAttribute('href', '/demo');
   });
 
   it('renders a signed-in private preview through the existing Studio route', async () => {

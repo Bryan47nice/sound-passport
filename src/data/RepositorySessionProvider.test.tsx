@@ -2,6 +2,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode, useEffect, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../auth/AuthContext';
+import { useAuth } from '../auth/AuthContext';
 import type { AuthPort, AuthUser } from '../auth/ports';
 import type { RepositorySession } from '../bootstrap';
 import { emptyJourneyRepository } from './emptyJourneyRepository';
@@ -57,11 +58,14 @@ function repositoryIdentity(query: JourneyRepository) {
   return repositoryIdentities.get(query) ?? 'unknown';
 }
 
-function Probe({ events }: { events: EventLog }) {
+function Probe({ events, renders }: { events: EventLog; renders?: EventLog }) {
+  const { state } = useAuth();
   const query = useJourneyRepository();
   const editor = useOptionalJourneyEditorRepository();
   const error = usePrivateStorageError();
   const identity = repositoryIdentity(query);
+  const authIdentity = state.kind === 'signed-in' ? state.user.uid : state.kind;
+  renders?.push(`${authIdentity}:${identity}`);
 
   useEffect(() => {
     events.push(`publish-${identity}`);
@@ -76,18 +80,19 @@ function Probe({ events }: { events: EventLog }) {
 
 interface RenderProviderOptions {
   events?: EventLog;
+  renders?: EventLog;
   strictMode?: boolean;
 }
 
 function renderProvider(
   port: AuthPort,
   openSession: (uid: string, fixtures: JourneyRepository) => Promise<RepositorySession>,
-  { events = [], strictMode = false }: RenderProviderOptions = {},
+  { events = [], renders, strictMode = false }: RenderProviderOptions = {},
 ) {
   const providers = (
     <AuthProvider port={port}>
       <RepositorySessionProvider openSession={openSession}>
-        <Probe events={events} />
+        <Probe events={events} renders={renders} />
       </RepositorySessionProvider>
     </AuthProvider>
   );
@@ -138,6 +143,56 @@ describe('RepositorySessionProvider', () => {
     expect(events.indexOf('close-a')).toBeLessThan(events.indexOf('publish-b'));
     expect(openSession).toHaveBeenNthCalledWith(1, 'user-a', fixtureJourneyRepository);
     expect(openSession).toHaveBeenNthCalledWith(2, 'user-b', fixtureJourneyRepository);
+  });
+
+  it('never renders A services under B auth while B is opening', async () => {
+    const renders: EventLog = [];
+    const { port, emit } = createAuthPort();
+    const a = session('a');
+    const openB = deferred<RepositorySession>();
+    const openSession = vi.fn((uid: string) => uid === 'user-a' ? Promise.resolve(a) : openB.promise);
+    renderProvider(port, openSession, { renders });
+
+    emit(signedIn('user-a'));
+    await expectPublished('a');
+    renders.length = 0;
+    emit(signedIn('user-b'));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2));
+
+    expect(renders).not.toContain('user-b:a');
+    expect(screen.queryByTestId('services')).not.toBeInTheDocument();
+  });
+
+  it('never renders signed-out fixtures under signed-in auth while the session is opening', async () => {
+    const renders: EventLog = [];
+    const { port, emit } = createAuthPort();
+    const openA = deferred<RepositorySession>();
+    const openSession = vi.fn(() => openA.promise);
+    renderProvider(port, openSession, { renders });
+
+    emit(null);
+    await expectPublished('fixtures', 'no-editor:');
+    renders.length = 0;
+    emit(signedIn('user-a'));
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1));
+
+    expect(renders).not.toContain('user-a:fixtures');
+    expect(screen.queryByTestId('services')).not.toBeInTheDocument();
+  });
+
+  it('never renders signed-in services under signed-out auth', async () => {
+    const renders: EventLog = [];
+    const { port, emit } = createAuthPort();
+    const a = session('a');
+    renderProvider(port, vi.fn(async () => a), { renders });
+
+    emit(signedIn('user-a'));
+    await expectPublished('a');
+    renders.length = 0;
+    emit(null);
+    await expectPublished('fixtures', 'no-editor:');
+
+    expect(renders).not.toContain('signed-out:a');
   });
 
   it('closes a stale A completion without ever publishing A after B', async () => {

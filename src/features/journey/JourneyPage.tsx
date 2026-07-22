@@ -1,11 +1,12 @@
 import { CopyPlus, Pencil, Trash2 } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { useParams } from 'react-router';
-import { experiencePath, useJourneyExperience } from '../../app/JourneyExperienceContext';
+import { experiencePath, useJourneyExperience, type JourneyExperienceValue } from '../../app/JourneyExperienceContext';
 import { GuardedLink, useGuardedNavigate, useRouteCommandGuard } from '../../app/navigationGuard';
 import {
   useInvalidateRepositoryQueries,
   useOptionalJourneyEditorRepository,
+  usePrivateStorageError,
   useRepositoryRevision,
 } from '../../data/RepositoryContext';
 import { storageWriteFailureMessage } from '../../data/storageErrors';
@@ -17,9 +18,9 @@ import { AccessibleDialog } from '../studio/AccessibleDialog';
 import { useMobileStudio } from '../studio/useMobileStudio';
 
 type JourneyLoadState =
-  | { kind: 'loading'; journeyId: string }
-  | { kind: 'ready'; journeyId: string; story: JourneyStory | undefined }
-  | { kind: 'error'; journeyId: string };
+  | { kind: 'loading'; journeyId: string; experience: JourneyExperienceValue; repositoryRevision: number }
+  | { kind: 'ready'; journeyId: string; experience: JourneyExperienceValue; repositoryRevision: number; story: JourneyStory | undefined }
+  | { kind: 'error'; journeyId: string; experience: JourneyExperienceValue; repositoryRevision: number };
 
 type FixturePhotoPreparer = (photoUrl: string, fileStem: string) => Promise<NormalizedPhotoInput>;
 
@@ -41,14 +42,18 @@ export function JourneyPage({ prepareFixturePhoto = prepareRemoteFixturePhoto }:
   const { journeyId = '' } = useParams();
   const navigate = useGuardedNavigate();
   const routeCommand = useRouteCommandGuard();
-  const { kind, repository, routePrefix } = useJourneyExperience();
+  const experience = useJourneyExperience();
+  const { kind, repository, routePrefix } = experience;
   const editor = useOptionalJourneyEditorRepository();
   const isMobile = useMobileStudio();
   const repositoryRevision = useRepositoryRevision();
+  const privateStorageError = usePrivateStorageError();
   const invalidateQueries = useInvalidateRepositoryQueries();
   const [loadState, setLoadState] = useState<JourneyLoadState>(() => ({
     kind: 'loading',
     journeyId,
+    experience,
+    repositoryRevision,
   }));
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -61,30 +66,42 @@ export function JourneyPage({ prepareFixturePhoto = prepareRemoteFixturePhoto }:
 
   useEffect(() => {
     let isCurrent = true;
-    setLoadState({ kind: 'loading', journeyId });
+    setLoadState({ kind: 'loading', journeyId, experience, repositoryRevision });
 
     void repository.getJourneyStory(journeyId)
       .then((story) => {
-        if (isCurrent) setLoadState({ kind: 'ready', journeyId, story });
+        if (isCurrent) setLoadState({ kind: 'ready', journeyId, experience, repositoryRevision, story });
       })
       .catch(() => {
-        if (isCurrent) setLoadState({ kind: 'error', journeyId });
+        if (isCurrent) setLoadState({ kind: 'error', journeyId, experience, repositoryRevision });
       });
 
     return () => {
       isCurrent = false;
     };
-  }, [journeyId, repository, repositoryRevision]);
+  }, [experience, journeyId, repository, repositoryRevision]);
+
+  if (kind === 'private' && privateStorageError) {
+    return (
+      <section className="page empty-state" role="alert">
+        <h1>無法讀取私人資料</h1>
+        <p>{privateStorageError}</p>
+        <p>請重新整理頁面後再試一次。</p>
+      </section>
+    );
+  }
 
   const currentState = loadState.journeyId === journeyId
+    && loadState.experience === experience
+    && loadState.repositoryRevision === repositoryRevision
     ? loadState
-    : { kind: 'loading', journeyId } as const;
+    : { kind: 'loading' } as const;
   if (currentState.kind === 'loading') return <section className="page" aria-label="載入旅程" />;
   if (currentState.kind === 'error') {
     return (
       <section className="page empty-state" role="alert">
         <h1>{kind === 'private' ? '無法讀取私人資料' : '無法讀取旅程'}</h1>
-        <p>私人旅程資料暫時無法讀取，請重新讀取。</p>
+        <p>{kind === 'private' ? '私人旅程資料暫時無法讀取，請重新讀取。' : '示範旅程暫時無法讀取，請重新讀取。'}</p>
         <button className="secondary-command" type="button" onClick={invalidateQueries}>重新讀取</button>
       </section>
     );

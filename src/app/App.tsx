@@ -35,6 +35,7 @@ function AppRoutes() {
           <Route path="countries/:countryCode" element={<CountryPage />} />
           <Route path="journeys/:journeyId/play" element={<JourneyPlayerPage />} />
           <Route path="journeys/:journeyId" element={<JourneyPage />} />
+          <Route path="*" element={<section className="page empty-state"><h1>找不到示範頁面</h1><GuardedLink className="primary-command" to="/demo">返回旅行地圖</GuardedLink></section>} />
         </Route>
         <Route element={<RequireAuth />}>
           <Route path="studio" element={<StudioPage />} />

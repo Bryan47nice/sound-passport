@@ -5,7 +5,7 @@ import type { JourneyRepository } from '../data/ports';
 
 export type JourneyExperienceKind = 'private' | 'demo';
 
-interface JourneyExperienceValue {
+export interface JourneyExperienceValue {
   kind: JourneyExperienceKind;
   repository: JourneyRepository;
   routePrefix: '' | '/demo';

@@ -10,7 +10,7 @@ import { RepositoryProvider, type RepositoryServices } from './RepositoryContext
 type SessionOpener = (uid: string, fixtures: JourneyRepository) => Promise<RepositorySession>;
 type SessionView =
   | { kind: 'loading' }
-  | { kind: 'ready'; services: RepositoryServices };
+  | { kind: 'ready'; identity: string; fixtures: JourneyRepository; services: RepositoryServices };
 
 interface RepositorySessionProviderProps extends PropsWithChildren {
   fixtures?: JourneyRepository;
@@ -24,6 +24,7 @@ export function RepositorySessionProvider({
 }: RepositorySessionProviderProps) {
   const { state } = useAuth();
   const uid = state.kind === 'signed-in' ? state.user.uid : undefined;
+  const identity = state.kind === 'signed-in' ? `signed-in:${state.user.uid}` : state.kind;
   const activeSession = useRef<RepositorySession | undefined>(undefined);
   const defaultOpenSession = useCallback<SessionOpener>(
     (nextUid, nextFixtures) => openPrivateRepositorySession({
@@ -50,7 +51,7 @@ export function RepositorySessionProvider({
       return () => { cancelled = true; };
     }
     if (state.kind === 'signed-out') {
-      setView({ kind: 'ready', services: signedOutServices });
+      setView({ kind: 'ready', identity: 'signed-out', fixtures, services: signedOutServices });
       return () => { cancelled = true; };
     }
 
@@ -63,12 +64,14 @@ export function RepositorySessionProvider({
           return;
         }
         activeSession.current = session;
-        setView({ kind: 'ready', services: session.services });
+        setView({ kind: 'ready', identity: `signed-in:${nextUid}`, fixtures, services: session.services });
       },
       () => {
         if (!cancelled) {
           setView({
             kind: 'ready',
+            identity: `signed-in:${nextUid}`,
+            fixtures,
             services: {
               query: emptyJourneyRepository,
               fixtures,
@@ -86,7 +89,7 @@ export function RepositorySessionProvider({
     };
   }, [fixtures, sessionOpener, signedOutServices, state.kind, uid]);
 
-  if (view.kind === 'loading') {
+  if (view.kind === 'loading' || view.identity !== identity || view.fixtures !== fixtures) {
     return <section className="page" aria-label="確認私人資料" />;
   }
   return <RepositoryProvider services={view.services}>{children}</RepositoryProvider>;

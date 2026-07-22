@@ -1,39 +1,73 @@
 import { useCallback, useEffect, useState } from 'react';
-import { experiencePath, useJourneyExperience } from '../../app/JourneyExperienceContext';
+import { experiencePath, useJourneyExperience, type JourneyExperienceValue } from '../../app/JourneyExperienceContext';
 import { GuardedLink, useGuardedNavigate } from '../../app/navigationGuard';
-import { useRepositoryRevision } from '../../data/RepositoryContext';
+import { usePrivateStorageError, useRepositoryRevision } from '../../data/RepositoryContext';
 import type { CountrySummary } from '../../domain/model';
 import { WorldMap } from './WorldMap';
 
+type AtlasLoadState =
+  | { kind: 'loading'; experience: JourneyExperienceValue; repositoryRevision: number; retryGeneration: number }
+  | { kind: 'ready'; experience: JourneyExperienceValue; repositoryRevision: number; retryGeneration: number; countries: CountrySummary[] }
+  | { kind: 'error'; experience: JourneyExperienceValue; repositoryRevision: number; retryGeneration: number };
+
 export function AtlasPage() {
-  const { kind, repository, routePrefix } = useJourneyExperience();
+  const experience = useJourneyExperience();
+  const { kind, repository, routePrefix } = experience;
   const repositoryRevision = useRepositoryRevision();
+  const privateStorageError = usePrivateStorageError();
   const navigate = useGuardedNavigate();
-  const [countries, setCountries] = useState<CountrySummary[]>();
-  const [loadError, setLoadError] = useState(false);
   const [retryGeneration, setRetryGeneration] = useState(0);
+  const [loadState, setLoadState] = useState<AtlasLoadState>(() => ({
+    kind: 'loading',
+    experience,
+    repositoryRevision,
+    retryGeneration,
+  }));
 
   useEffect(() => {
     let isCurrent = true;
-    setCountries(undefined);
-    setLoadError(false);
+    setLoadState({ kind: 'loading', experience, repositoryRevision, retryGeneration });
 
     void repository.listCountrySummaries()
       .then((summaries) => {
-        if (isCurrent) setCountries(summaries);
+        if (isCurrent) {
+          setLoadState({
+            kind: 'ready',
+            experience,
+            repositoryRevision,
+            retryGeneration,
+            countries: summaries,
+          });
+        }
       })
       .catch(() => {
-        if (isCurrent) setLoadError(true);
+        if (isCurrent) setLoadState({ kind: 'error', experience, repositoryRevision, retryGeneration });
       });
 
     return () => { isCurrent = false; };
-  }, [repository, repositoryRevision, retryGeneration]);
+  }, [experience, repository, repositoryRevision, retryGeneration]);
 
   const selectCountry = useCallback((countryCode: string) => {
     navigate(experiencePath(routePrefix, `/countries/${countryCode}`));
   }, [navigate, routePrefix]);
 
-  if (loadError) {
+  if (kind === 'private' && privateStorageError) {
+    return (
+      <section className="page empty-state" role="alert">
+        <h1>無法讀取私人資料</h1>
+        <p>{privateStorageError}</p>
+        <p>請重新整理頁面後再試一次。</p>
+      </section>
+    );
+  }
+
+  const currentState = loadState.experience === experience
+    && loadState.repositoryRevision === repositoryRevision
+    && loadState.retryGeneration === retryGeneration
+    ? loadState
+    : { kind: 'loading' } as const;
+
+  if (currentState.kind === 'error') {
     return (
       <section className="page empty-state">
         <h1>{kind === 'private' ? '無法讀取私人資料' : '無法讀取旅行地圖'}</h1>
@@ -41,7 +75,8 @@ export function AtlasPage() {
       </section>
     );
   }
-  if (!countries) return <section className="page map-loading" aria-label="載入旅行地圖" />;
+  if (currentState.kind === 'loading') return <section className="page map-loading" aria-label="載入旅行地圖" />;
+  const { countries } = currentState;
   if (countries.length === 0 && kind === 'private') {
     return (
       <section className="page empty-state">

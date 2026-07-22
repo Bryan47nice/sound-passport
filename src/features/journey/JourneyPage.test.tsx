@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import type { PropsWithChildren } from 'react';
+import { useLayoutEffect, type PropsWithChildren } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +27,13 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+function CommitProbe({ snapshots }: { snapshots: string[] }) {
+  useLayoutEffect(() => {
+    snapshots.push(document.body.textContent ?? '');
+  });
+  return null;
 }
 
 function editorStub(overrides: Partial<JourneyEditorRepository> = {}): JourneyEditorRepository {
@@ -543,6 +550,8 @@ describe('JourneyPage', () => {
     );
 
     expect(await screen.findByRole('heading', { name: '無法讀取旅程' })).toBeInTheDocument();
+    expect(screen.getByText('示範旅程暫時無法讀取，請重新讀取。')).toBeInTheDocument();
+    expect(screen.queryByText(/私人旅程資料暫時無法讀取/)).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '找不到這趟旅程' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('載入旅程')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '重新讀取' }));
@@ -583,5 +592,41 @@ describe('JourneyPage', () => {
 
     expect(await screen.findByRole('heading', { name: '無法讀取私人資料' })).toBeInTheDocument();
     expect(screen.queryByText('東京，雨停之後')).not.toBeInTheDocument();
+  });
+
+  it('does not commit a journey from the previous experience repository', async () => {
+    const previousStory = await fixtureJourneyRepository.getJourneyStory('tokyo-2024') as JourneyStory;
+    const nextStory = deferred<JourneyStory | undefined>();
+    const previousRepository: JourneyRepository = {
+      ...fixtureJourneyRepository,
+      getJourneyStory: async () => previousStory,
+    };
+    const nextRepository: JourneyRepository = {
+      ...fixtureJourneyRepository,
+      getJourneyStory: () => nextStory.promise,
+    };
+    const snapshots: string[] = [];
+    const view = (repository: JourneyRepository, kind: 'private' | 'demo') => (
+      <DataRepositoryProvider services={{ query: repository, fixtures: repository }}>
+        <JourneyExperienceProvider kind={kind} routePrefix="">
+          <MemoryRouter initialEntries={['/journeys/tokyo-2024']}>
+            <Routes>
+              <Route
+                path="/journeys/:journeyId"
+                element={<><JourneyPage /><CommitProbe snapshots={snapshots} /></>}
+              />
+            </Routes>
+          </MemoryRouter>
+        </JourneyExperienceProvider>
+      </DataRepositoryProvider>
+    );
+    const rendered = render(view(previousRepository, 'demo'));
+    expect(await screen.findByRole('heading', { name: previousStory.journey.title })).toBeInTheDocument();
+
+    snapshots.length = 0;
+    rendered.rerender(view(nextRepository, 'private'));
+
+    expect(snapshots.every((snapshot) => !snapshot.includes(previousStory.journey.title))).toBe(true);
+    expect(screen.getByLabelText('載入旅程')).toBeInTheDocument();
   });
 });
